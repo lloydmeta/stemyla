@@ -49,5 +49,12 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-10, with WebCodecs 
 
 Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  `GPUAdapterInfo.subgroupMinSize` is `undefined`, and wgpu reads it as a number.
 
-* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in a Safari `web-test` (TD-93).  With `WASM_BINDGEN_NO_DEBUG=1`, both pass.  WebKit's WGSL compiler also words its errors in its own way, such as "Expected a Identifier", so a test of a compile error takes the text of each browser.
+* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in a Safari `web-test` (TD-93).  With `WASM_BINDGEN_NO_DEBUG=1`, both pass.  The f16 test then needs the text of the next entry.
+* Rule: VERIFY-1.
+
+## WebKit words a WGSL compile error in its own way
+
+Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  A planted WGSL error gives "Expected a Identifier, but got a {".  Chrome's Tint names a parse error.
+
+* The code: `an_f16_variant_the_browser_rejects_keeps_f32_weights` takes the text of each browser, and still checks that the text names the compile failure (TD-93).
 * Rule: VERIFY-1.

@@ -131,10 +131,22 @@ export function aac_take(s) { const c = s.chunks; s.chunks = []; return c; }
 export function aac_received(s) { return s.received; }
 export function aac_error(s) { return s.error; }
 export function aac_description(s) { return s.description; }
-export async function aac_flush(s) {
+// `promise`, or a rejection with the text `late` when it does not end
+// within `ms`.  A later rejection of `promise` is ignored.
+function within(promise, ms, late) {
+  promise.catch(() => {});
+  let timer = null;
+  const timeout = new Promise((_, no) => { timer = setTimeout(() => no(late), ms); });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+// The flush of the encoder, within `ms`.
+export async function aac_flush(s, ms) {
   if (s.error) throw new Error(s.error);
-  try { await s.enc.flush(); }
-  catch (e) { throw new Error(s.error || String(e)); }
+  try { await within(s.enc.flush(), ms, "the encoder's flush did not end"); }
+  catch (e) {
+    if (s.error) throw new Error(s.error);
+    throw typeof e === "string" ? e : new Error(String(e));
+  }
   if (s.error) throw new Error(s.error);
 }
 // Closes the encoder, if it is not closed.  After its error callback, a
@@ -144,7 +156,7 @@ export function aac_close(s) {
 }
 // The probe: encodes 16384 frames with 1.0 at frame 4096 and 0 elsewhere,
 // and gives the packets and the description.
-export async function aac_probe(config) {
+export async function aac_probe(config, ms) {
   const s = aac_open(config);
   try {
     const frames = 16384;
@@ -152,14 +164,14 @@ export async function aac_probe(config) {
     planar[4096] = 1;
     planar[frames + 4096] = 1;
     aac_encode(s, planar, frames, config.sampleRate, 0);
-    await aac_flush(s);
+    await aac_flush(s, ms);
     return [aac_take(s), s.description];
   } finally { aac_close(s); }
 }
 // Decodes `chunks` with `AudioDecoder` and the bare AudioSpecificConfig
 // `asc`: the frame and the value of the largest absolute sample of the
 // left channel, and the frames decoded.
-export async function aac_peak(config, asc, chunks) {
+export async function aac_peak(config, asc, chunks, ms) {
   let error = null, frames = 0, at = -1, peak = 0;
   const dec = new AudioDecoder({
     output: (a) => {
@@ -179,8 +191,11 @@ export async function aac_peak(config, asc, chunks) {
       numberOfChannels: config.numberOfChannels, description: asc });
     chunks.forEach((data, k) => dec.decode(new EncodedAudioChunk({ type: "key",
       timestamp: Math.round(k * 1024 * 1e6 / config.sampleRate), data })));
-    await dec.flush();
-  } catch (e) { throw new Error(error || String(e)); }
+    await within(dec.flush(), ms, "the decoder's flush did not end");
+  } catch (e) {
+    if (error) throw new Error(error);
+    throw typeof e === "string" ? e : new Error(String(e));
+  }
   finally { if (dec.state !== "closed") dec.close(); }
   if (error) throw new Error(error);
   return [at, peak, frames];
@@ -213,15 +228,16 @@ extern "C" {
     fn aac_error(s: &JsValue) -> Option<String>;
     fn aac_description(s: &JsValue) -> Option<Uint8Array>;
     #[wasm_bindgen(catch)]
-    async fn aac_flush(s: &JsValue) -> Result<(), JsValue>;
+    async fn aac_flush(s: &JsValue, ms: u32) -> Result<(), JsValue>;
     fn aac_close(s: &JsValue);
     #[wasm_bindgen(catch)]
-    async fn aac_probe(config: &JsValue) -> Result<JsValue, JsValue>;
+    async fn aac_probe(config: &JsValue, ms: u32) -> Result<JsValue, JsValue>;
     #[wasm_bindgen(catch)]
     async fn aac_peak(
         config: &JsValue,
         asc: &Uint8Array,
         chunks: &Array,
+        ms: u32,
     ) -> Result<JsValue, JsValue>;
 }
 
@@ -269,8 +285,8 @@ const _: () = assert!(AAC_ENCODER.channels == 2);
 /// The packets that the bound of a layout adds to the frames of the encode.
 const BOUND_PACKETS: usize = 8;
 
-/// Milliseconds that an encode waits for an output, or for its queue to
-/// move, before it ends.
+/// Milliseconds that an encode waits for an output, for its queue to move,
+/// or for a flush, before it ends.
 const OUTPUT_WAIT_MS: u32 = 10_000;
 
 thread_local! {
@@ -328,7 +344,8 @@ impl Drop for Session {
 /// the largest absolute sample, minus 4096.
 pub(super) async fn aac_delay(rate: u32) -> Result<usize, Failure> {
     let config = AAC_ENCODER.to_js(rate);
-    let probe = aac_probe(&config)
+    let wait_ms = OUTPUT_WAIT.with(|wait| wait.get());
+    let probe = aac_probe(&config, wait_ms)
         .await
         .map_err(|e| encoder_failure(format!("the probe failed: {}", js_text(&e))))?;
     let probe = Array::from(&probe);
@@ -339,7 +356,7 @@ pub(super) async fn aac_delay(rate: u32) -> Result<usize, Failure> {
     let description = description_bytes(&description);
     let asc = m4a::audio_specific_config(&description)
         .map_err(|e| encoder_failure(format!("the probe's description: {e}")))?;
-    let peak = aac_peak(&config, &Uint8Array::from(asc), &chunks)
+    let peak = aac_peak(&config, &Uint8Array::from(asc), &chunks, wait_ms)
         .await
         .map_err(|e| encoder_failure(format!("the probe did not decode: {}", js_text(&e))))?;
     let peak = Array::from(&peak);
@@ -479,7 +496,9 @@ async fn aac_packets(
         }
     }
     drop(planar);
-    aac_flush(s).await.map_err(|e| session.failure(&e))?;
+    aac_flush(s, OUTPUT_WAIT.with(|wait| wait.get()))
+        .await
+        .map_err(|e| session.failure(&e))?;
     session.drain(out, sizes).await?;
     let description =
         aac_description(s).ok_or_else(|| encoder_failure("the encoder gave no description"))?;

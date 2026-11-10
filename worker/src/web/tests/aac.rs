@@ -22,15 +22,20 @@ let fake = null;
 // * output_ms: the time that the encoder holds each packet before its
 //   output; flush_only: no output before `flush`.
 // * error_after: the encoder fails once it holds more frames than this.
+// * error_microtask: the failure comes in a microtask of `encode`, so
+//   before any wait of the encode.  Else it comes in a task.
 // * peak: the value of the probe's impulse in the decode.
 // * record: whether the encoder keeps each input sample.
 // * stuck_queue: `encode` adds to the queue, which never moves and sends
 //   no `dequeue` event.
+// * flush_never, decoder_flush_never: the flush of the encoder of the save,
+//   or of the decoder of the probe, never ends.
 export function fake_aac_install(json) {
   if (fake) throw new Error("a fake AAC is already installed");
   const o = Object.assign({ delay: 2112, probe_delay: null, extra: 3, description: [0x12, 0x10],
     main_description: undefined, supported: true, queue: true, hold_ms: 0, output_ms: 0,
-    flush_only: false, error_after: -1, peak: 1.0, record: true, stuck_queue: false }, JSON.parse(json));
+    flush_only: false, error_after: -1, peak: 1.0, record: true, stuck_queue: false, error_microtask: false, flush_never: false,
+    decoder_flush_never: false }, JSON.parse(json));
   const bytes = (d) => (d === null ? null : new Uint8Array(d));
   const stats = { data_made: 0, data_closed: 0, enc_made: 0, enc_closed: 0, dec_made: 0,
     dec_closed: 0, max_queue: 0, max_lag: 0, max_burst: 0, encoders: [], decoder_description: null };
@@ -105,11 +110,6 @@ export function fake_aac_install(json) {
       rec.frames_in += n;
       rec.timestamps.push(data.timestamp);
       if (o.record) { rec.left.push(...left); rec.right.push(...right); }
-      if (o.stuck_queue && this.index > 0) {
-        this.encodeQueueSize++;
-        stats.max_queue = Math.max(stats.max_queue, this.encodeQueueSize);
-        return;
-      }
       if (o.queue) this.encodeQueueSize++;
       stats.max_queue = Math.max(stats.max_queue, this.encodeQueueSize);
       if (this.index > 0) {
@@ -118,13 +118,20 @@ export function fake_aac_install(json) {
         this.since = 0;
       }
       if (this.index > 0 && o.error_after >= 0 && rec.frames_in > o.error_after) {
-        setTimeout(() => {
+        const fail = () => {
           if (this.state === "closed") return;
           this.state = "closed";
           this.encodeQueueSize = 0;
           stats.enc_closed++;
           this.fail(new DOMException("the fake failed", "EncodingError"));
-        }, 0);
+        };
+        if (o.error_microtask) queueMicrotask(fail); else setTimeout(fail, 0);
+      }
+      if (o.stuck_queue && this.index > 0) {
+        // The block stays in the queue: no work, and no `dequeue`.
+        if (!o.queue) this.encodeQueueSize++;
+        stats.max_queue = Math.max(stats.max_queue, this.encodeQueueSize);
+        return;
       }
       const work = () => {
         if (this.state === "closed") return;
@@ -151,6 +158,7 @@ export function fake_aac_install(json) {
       }
     }
     async flush() {
+      if (o.flush_never && this.index > 0) return new Promise(() => {});
       while (this.state !== "closed" && this.encodeQueueSize > 0) await new Promise((r) => setTimeout(r, 1));
       await new Promise((r) => setTimeout(r, o.output_ms + 1));
       if (this.state === "closed") throw new DOMException("the fake failed", "EncodingError");
@@ -174,6 +182,7 @@ export function fake_aac_install(json) {
     }
     decode() { this.count++; }
     async flush() {
+      if (o.decoder_flush_never) return new Promise(() => {});
       const n = this.count * 1024;
       const planar = new Float32Array(2 * n);
       const at = 4096 + (o.probe_delay === null ? o.delay : o.probe_delay);
@@ -1156,12 +1165,15 @@ async fn encode_within(
 
 /// Finding 1-1 of review round 1 of M4: an encoder error during the wait
 /// for an output ends the encode with the error, at once.  The fake gives
-/// no output before `flush`, and fails at 34,000 frames, before the wait.
+/// no output before `flush`, and fails at 34,000 frames.  It fails in a
+/// microtask of `encode`, so the error comes before the wait in every
+/// browser (finding 3-1 of review round 3).
 #[wasm_bindgen_test]
 async fn an_encoder_error_in_the_output_wait_ends_the_encode() {
     fresh().await;
-    let fake =
-        Fake::new(r#"{"queue": false, "flush_only": true, "error_after": 34000, "record": false}"#);
+    let fake = Fake::new(
+        r#"{"queue": false, "flush_only": true, "error_after": 34000, "error_microtask": true, "record": false}"#,
+    );
     // Finding 2-1 of review round 2: the wait is longer than the race, so
     // an error that waits out the timer fails the test.
     set_output_wait_ms(2_500);
@@ -1193,4 +1205,55 @@ async fn a_queue_that_does_not_move_ends_the_encode() {
         Some(Err("AAC encoder: the encoder's queue did not move".into()))
     );
     assert_eq!(fake.all_closed(), Ok(()));
+}
+
+/// Finding 3-2 of review round 3 of M4: an encoder error during the wait
+/// for the encoder's queue ends the encode with the error, at once.  The
+/// queue never moves, and the fake fails at 16,384 frames, before the wait
+/// starts at 18,432.  The error comes in a task, during the wait.
+#[wasm_bindgen_test]
+async fn an_encoder_error_in_the_queue_wait_ends_the_encode() {
+    fresh().await;
+    let fake = Fake::new(r#"{"stuck_queue": true, "error_after": 16384, "record": false}"#);
+    set_output_wait_ms(2_500);
+    let (left, right) = (tone(220.0, 20 * AAC_BLOCK), tone(330.0, 20 * AAC_BLOCK));
+    let end = encode_within(&left, &right, 1_000).await;
+    set_output_wait_ms(10_000);
+    assert!(end.is_some(), "the encode did not end within 1 s");
+    assert_eq!(
+        end,
+        Some(Err("AAC encoder: EncodingError: the fake failed".into()))
+    );
+    assert_eq!(fake.all_closed(), Ok(()));
+}
+
+/// Finding 3-3 of review round 3 of M4: a flush that never ends ends the
+/// encode after the time limit of the output wait, with its own text.  This
+/// holds for the encoder of the save and for the decoder of the probe, and
+/// each codec is closed after it.
+#[wasm_bindgen_test]
+async fn a_flush_that_does_not_end_ends_the_encode() {
+    for (options, text) in [
+        (
+            r#"{"flush_never": true, "record": false}"#,
+            "AAC encoder: the encoder's flush did not end",
+        ),
+        (
+            r#"{"decoder_flush_never": true, "record": false}"#,
+            "AAC encoder: the probe did not decode: the decoder's flush did not end",
+        ),
+    ] {
+        fresh().await;
+        let fake = Fake::new(options);
+        set_output_wait_ms(300);
+        let (left, right) = (tone(220.0, 3 * AAC_BLOCK), tone(330.0, 3 * AAC_BLOCK));
+        let end = encode_within(&left, &right, 3_000).await;
+        set_output_wait_ms(10_000);
+        assert!(
+            end.is_some(),
+            "{options}: the encode did not end within 3 s"
+        );
+        assert_eq!(end, Some(Err(text.into())), "{options}");
+        assert_eq!(fake.all_closed(), Ok(()), "{options}");
+    }
 }

@@ -967,7 +967,8 @@ async fn forget_model_removes_the_stored_model_and_partial_files() {
 async fn errors_name_the_request_they_answer() {
     fresh().await;
     // 4 frames at a rate that MP3, M4A and AAC refuse, then none: each
-    // fails.  AAC has a rate of 96 kHz, so its 4 frames are at 22 kHz.
+    // fails.  96 kHz is in the AAC table, so the AAC case uses 22 kHz,
+    // which the worker refuses.
     for (kind, frames, rate) in [
         ("mp3", 4, 96_000),
         ("mp3", 0, 96_000),
@@ -3539,7 +3540,7 @@ async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
     // The text of the compiler: Chrome's Tint names a parse error, and
     // WebKit's says "Expected a Identifier" (finding 2-2 of review round 2
     // of M4).
-    let names_the_error = |p: &str| p.contains("pars") || p.contains("Expected");
+    let names_the_error = |p: &str| p.contains("pars") || p.contains("Expected a Identifier");
     for p in &problems {
         assert!(
             p.contains("does not compile on this GPU")

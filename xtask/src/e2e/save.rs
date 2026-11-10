@@ -156,7 +156,8 @@ pub(super) const READ_WAIT_S: u64 = 30;
 /// the 1-minute session took 0.4 s together.  The last clean-up removes
 /// about 356 MB, which that run did not reach.  The two M4A saves of M3 of
 /// `docs/plans/active/m4a.md` add 26 MB of it.  The two AAC saves of M4
-/// add 17.8 MB more (1.5 MB and 16.2 MB in Chrome on 2026-11-10).
+/// add up to 21.3 MB more: 1.9 MB and 19.4 MB in Safari, the larger, on
+/// 2026-11-11.
 pub(super) const CLEAN_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for a short script: a session switch, the
 /// calibration, a heap reading, a reading of the progress or the list of
