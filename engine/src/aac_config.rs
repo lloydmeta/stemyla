@@ -434,6 +434,35 @@ mod tests {
         // Finding 20-2: an escaped count past the end of the packet reads no
         // field, with no sum past 32 bits.
         assert!(!has_sbr_fill(&[0x00, 0xFE]), "a count past the end");
+        // Finding 21-3 of review round 21: an EXT_SBR_DATA_CRC fill of 3
+        // bytes holds no header after its CRC; one of 4 bytes does.
+        let crc = |count: u32, header: u32, rest: usize| {
+            let mut bits = BitWriter::default();
+            bits.put(9, 0x15A);
+            for (width, value) in [(3, 6), (4, count), (4, 0xE), (10, 0x2AA)] {
+                bits.put(width, value);
+            }
+            bits.put(rest, header);
+            for (width, value) in [(3, 6), (4, 0), (3, 7)] {
+                bits.put(width, value);
+            }
+            bits.bytes
+        };
+        assert!(
+            !has_sbr_header(&crc(3, 1 << 9, 10)),
+            "a CRC fill of 3 bytes"
+        );
+        assert!(
+            has_sbr_header(&crc(4, with << 3, 18)),
+            "a CRC fill of 4 bytes"
+        );
+        // Missed mutant 21-10: an empty fill just before ID_END is no SBR
+        // fill.
+        let mut bits = BitWriter::default();
+        for (width, value) in [(9, 0x15A), (3, 6), (4, 0), (3, 7)] {
+            bits.put(width, value);
+        }
+        assert!(!has_sbr_fill(&bits.bytes), "an empty fill before ID_END");
     }
 
     /// Findings 8-4 and 8-9 of review round 8: SBR data in a fill element

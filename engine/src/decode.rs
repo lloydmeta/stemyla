@@ -4736,9 +4736,13 @@ mod tests {
     /// Finding 20-1 of review round 20: an HE-AAC stream whose config does
     /// not show SBR, cut after a packet that holds an SBR header, gives the
     /// HE-AAC text.  The encoder sends the header in each eighth packet, so
-    /// the check reads on past 8 packets to the next header.  Each cut from
-    /// packet 0 to 9 is refused, as ADTS and as M4A, and so is a stream of
-    /// its first 8 packets, with the header in the first only (20-8).
+    /// each cut from packet 0 to 9 holds a header in its first 8 packets, and
+    /// is refused, as ADTS and as M4A.  So is a stream of its first 8
+    /// packets, with the header in the first only (20-8).  The stream with
+    /// no packet 0 and 8 has its first header at packet 14, so the check
+    /// reads on past 8 packets to it (21-1 of review round 21).  A stream
+    /// whose first header comes after 64 packets opens, since the check
+    /// stops at 64.
     #[test]
     fn an_he_aac_stream_cut_after_its_header_gives_the_he_aac_text() {
         use crate::test_m4a::{aac_m4a_of, adts_of, adts_packets, config, he_aac};
@@ -4757,6 +4761,15 @@ mod tests {
         let eight = &packets[..8];
         let adts = adts_of(eight, 22_050, 2, 0);
         assert_eq!(refusal(adts, "aac"), HE_AAC_TEXT, "8 packets, ADTS");
+        let late: Vec<&[u8]> = [&packets[1..8], &packets[9..]].concat();
+        let adts = adts_of(&late, 22_050, 2, 0);
+        assert_eq!(refusal(adts, "aac"), HE_AAC_TEXT, "a header at 14, ADTS");
+        let m4a = aac_m4a_of(&late, 2, &lc, 22_050, None, None, m4a::Order::FastStart);
+        assert_eq!(refusal(m4a, "m4a"), HE_AAC_TEXT, "a header at 14, M4A");
+        let mut far: Vec<&[u8]> = [&packets[1..8]; 10].concat();
+        far.extend_from_slice(&packets[8..]);
+        let got = decode_bytes(adts_of(&far, 22_050, 2, 0), Some("aac"));
+        assert!(got.is_ok(), "a header at 70: {:?}", got.err());
     }
 
     /// TD-81, closed by review round 7: an HE-AAC stream whose config does
