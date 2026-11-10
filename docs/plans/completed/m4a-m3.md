@@ -325,7 +325,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
   * Acceptance, the memory: `a_stored_alac_holds_only_its_packet_table` and `an_alac_is_encoded_in_blocks` allow 12 and 4 bytes for each packet.  The sizes use `Vec::with_capacity(layout.packets())`, the reserve goes in blocks of at most 64 KiB, and `moov` is not streamed.
   * Acceptance, `e2e save`: the M4A saves of 1 and 10 minutes passed the limits of FLAC, and each decoded to the WAV save's samples, bit for bit (Step 5).
   * Acceptance, the extension test: `only_wav_is_made_without_the_worker` lists `m4a`.
-* [ ] Review rounds.
+* [x] Review rounds, 2026-11-10: 3 rounds (`reviews/feature-m4a-m3.md`), 18 agents, 1,803,568 tokens, 45.8 wall minutes, 0 interventions.  Round 3 is the last round by decision 0024.  Mutants: 4 missed of 64 in round 1, none in the diffs of rounds 2 and 3.
   * Review round 1 fixes, 2026-11-10.  First failures:
     * 1-1: `a_memory_save_posts_the_arrays_of_its_format`, with `encode_flac` in the `JsSink::M4a` arm: "m4a: the request of the format", `flac`, not `alac`.
     * 1-11 and 1-12: `each_request_names_its_type`, with `Request::kind` giving "" for each request but `init`: the kinds were `["init", "", ...]`.
@@ -378,4 +378,41 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 
 ## Outcomes and retrospective
 
-Not started.
+Done on 2026-11-10.
+
+What M3 achieved:
+
+* The Save menu of a stem lane and of the mix lane has "M4A (16-bit Apple Lossless)", after FLAC.
+* The stem worker encodes ALAC with the `m4a` crate, on the storage path and on the memory path.  Each file equals `alac_file` of the same 16-bit samples, byte for byte.  Symphonia decodes it bit for bit.
+* One sink, `EncodeOut`, serves FLAC and ALAC, with `put`, `reserve` and `replace_head` (D6).  The reserve's zeros are made in JS, in blocks of at most 64 KiB (MEM-5).
+* The encode holds no song-sized buffer.  The peak grows by 4 bytes for each packet in the loop.  The end holds only its head, at its final capacity.
+* The wire has the kind `alac`, with one encoder and one decoder for both sides (PROTO-1).
+* `xtask e2e save` saves M4A files of 1 and 10 minutes.  Each meets the limits of FLAC and decodes to the planted mix, bit for bit.
+* The web app ships `m4a`, Apache-2.0 only, as decision 0029 (`proposed`) says.  TD-91 records that the page ships no licence text for any crate.
+* Wasm: `stem-worker_bg.wasm` grows by 45,336 bytes (3.6%).
+
+The review, in numbers: 3 rounds, 18 agents, 1,803,568 tokens, 45.8 wall minutes, 0 interventions.  Two plan reviews found 3 blockers and 15 should-fix before any code.
+
+| Round | Agents | Tokens | Wall minutes | Found | Significant |
+| - | - | - | - | - | - |
+| 1 | 7 | 827,348 | 20.7 | 1 confirmed, 2 pre-existing | 1-1 |
+| 2 | 6 | 556,214 | 17.6 | 1 confirmed | 2-1 |
+| 3 | 5 | 420,006 | 7.5 | none | none |
+
+The rounds also fixed 18 nits.  Two mutants were refuted as code that runs on wasm32 only.
+
+What did not go well:
+
+* The plan named the memory path of the page, but no step tested its M4A request.  A mutation to `encode_flac` passed every test (1-1).
+* The first memory test measured only the loop.  The end of the encode, which is the peak above about 15.7 minutes, had no check (2-1).  Round 1 had changed only text for it (1-8).
+* The implementer left 8 wait loops that never ended, since `pgrep -f` matched its own shell.  Auto mode refused their removal.
+* A reviewer's `sed` wrote into another reviewer's worktree after a `git worktree add` failed in a pipe (Surprises).
+
+What to do differently:
+
+* For each path that the plan names, add a test that fails when the request goes to the wrong encoder.
+* For a memory bound, find where the peak is at each length, and measure each stage that can be the peak.
+* Fix a weak test with a test, not with text, also for a nit.
+* Wait for a process by its PID.  Give each reviewer's worktree a unique name, and stop a chain when a command fails.
+
+Debt: TD-91 is new.

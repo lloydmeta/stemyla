@@ -1494,7 +1494,7 @@ async fn an_alac_of_unequal_channels_stops_at_the_shorter() {
 }
 
 /// The app sends neither input ("The inputs that the app gives an
-/// encode", `plans/active/m4a-m3.md`).
+/// encode", `plans/completed/m4a-m3.md`).
 #[wasm_bindgen_test]
 async fn an_alac_of_no_samples_is_refused() {
     fresh().await;
@@ -1848,7 +1848,7 @@ fn parts_of(parts: &js_sys::Array) -> Vec<Vec<u8>> {
         .collect()
 }
 
-/// Step 1 of `plans/active/m4a-m3.md`: a reserve is one unit that the head
+/// Step 1 of `plans/completed/m4a-m3.md`: a reserve is one unit that the head
 /// replaces.  On the storage path, the zeros go in writes of at most 64
 /// KiB, each a whole array (MEM-5).  The head then goes in one write at 0.
 #[wasm_bindgen_test]
@@ -2003,7 +2003,7 @@ async fn arrays_peak(codec: Codec, seconds: usize) -> usize {
 }
 
 /// The growth of an ALAC encode's peak from 10 s to 60 s, on `path`, is the
-/// packet table only ("Memory of the encode", `plans/active/m4a-m3.md`).
+/// packet table only ("Memory of the encode", `plans/completed/m4a-m3.md`).
 /// The parent allows 12 bytes for each packet more: 4 for its size, and
 /// about 8 in `moov`.  That is the parent's bound for the end of the encode,
 /// which `the_end_of_an_alac_holds_only_its_head` measures.  At 10 s and
