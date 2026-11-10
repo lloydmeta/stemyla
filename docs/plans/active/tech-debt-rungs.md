@@ -84,12 +84,12 @@ Orchestrated mode (decision 0023), with the `orchestrate` skill.  The maintainer
 
 #### Branch and PR
 
-The branch is `tech-debt/2026-11-11`, from `main` at `ee3728e`.  This differs from the skill: there is no push and no PR during the run (GIT-1).  The maintainer pushes and opens the PR.  The orchestrator writes the PR body in its scratchpad folder `m2/pr-body.md`, and checks it with `xtask pr-body`.  So no CI run checks M2 before the close-out, and the report says so.
+The branch is `tech-debt/2026-11-11`, from `main` at `ee3728e`.  On 2026-11-11 the maintainer asked for a push and a draft PR into `main`.  So the orchestrator opens the draft PR now, and pushes between review rounds, as the skill says.  It never pushes `main` or `gh-pages` (GIT-1).
 
 #### Maintainer steps
 
 * None that blocks the run.  Safari has Develop > Allow Remote Automation on.  The weights for `e2e selftest` are on this Mac, outside the repo (ASSET-1).
-* After the run: push the branch, open the PR, and watch the first run of the macOS job (step 10).  File the draft wgpu issue of step 6, if it is still wanted.
+* After the run: file the draft wgpu issue of step 6, if it is still wanted.  Make the macOS job a required check after a few green runs.
 
 #### Preflight
 
