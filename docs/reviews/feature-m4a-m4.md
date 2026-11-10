@@ -89,6 +89,13 @@
 | 2026-11-11 | 7 | 8331229 | 7-2 | reviewer, docs-reviewer | nit | - | doc | none | README.md:16 | README names only Chrome on Windows, as certain; TD-94 names Chrome and Edge | unvalidated | none | reported, not fixed |
 | 2026-11-11 | 7 | 8331229 | 7-3 | docs-reviewer | nit | - | doc | DOC-1 | docs/README.md:20 | the index line of the parent plan says it saves only an ALAC M4A | unvalidated | none | reported, not fixed |
 | 2026-11-11 | 7 | 8331229 | 7-4 | reviewer | nit | - | doc | none | docs/tech-debt.md:511 | the command of TD-95 needs the runner and SAFARIDRIVER that web-test sets | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 8 | 922f454 | 8-1 | docs-reviewer, reviewer | should-fix | yes | doc | DOC-1 | docs/plans/completed/m4a-m4.md:427 | the Outcomes of the milestone plan give 5 rounds and 2 TDs, and the parent gives 7 rounds and 4 TDs | pre-existing | none | 85a22ce review round 8 fixes |
+| 2026-11-11 | 8 | 922f454 | 8-2 | docs-reviewer, reviewer | nit | - | doc | none | docs/plans/active/m4a.md:236 | the M4 Progress line calls 6-1 both not fixed and fixed | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 8 | 922f454 | 8-3 | docs-reviewer | nit | - | doc | none | docs/plans/active/m4a.md:274 | a Surprise reads as two runs at 69e63db; the kept logs hold one | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 8 | 922f454 | 8-4 | docs-reviewer | nit | - | doc | none | docs/plans/active/m4a.md:319 | two new descriptions have more than 25 words | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 8 | 922f454 | 8-5 | reviewer | nit | - | doc | VERIFY-1 | docs/tech-debt.md:511 | TD-95 does not say that a Safari web-test never reaches the protocol crate | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 8 | 922f454 | 8-6 | reviewer | nit | - | doc | DOC-1 | docs/plans/active/m4a.md:274 | the first Safari web-test stopped at the app crate, not at TD-93 | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 9 | e3a83aa | 9-1 | reviewer | nit | - | doc | DOC-1 | docs/plans/completed/m4a-m4.md:427 | the milestone plan says the parent's Progress line holds all rounds, but that line counts 7 after round 8 | unvalidated | none | reported, not fixed |
 
 ## Rounds
 
@@ -101,3 +108,5 @@
 | 5 | 3 | 200953 | 8.1 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
 | 6 | 7 | 368344 | 8.3 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
 | 7 | 2 | 138614 | 12.2 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
+| 8 | 3 | 177997 | 9.7 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
+| 9 | 1 | 56862 | 5.9 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
