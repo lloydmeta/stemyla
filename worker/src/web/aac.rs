@@ -212,6 +212,16 @@ extern "C" {
     ) -> Result<JsValue, JsValue>;
 }
 
+/// Whether this browser has an AAC encoder for the config of a save at
+/// `rate`.
+#[cfg(test)]
+pub(super) async fn aac_encoder_here(rate: u32) -> bool {
+    aac_supported(&AAC_ENCODER.to_js(rate).into())
+        .await
+        .as_bool()
+        == Some(true)
+}
+
 /// Frames of silence before the source.  Safari encodes the first 1024
 /// input frames as silence, so 2048 keeps one packet of margin.  The skip
 /// trims them.

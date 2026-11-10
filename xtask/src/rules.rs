@@ -71,6 +71,11 @@ const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[
         "skipped: no GPU adapter: {e}",
         "a wasm test cannot read STEMYLA_REQUIRE; CI's headless Chrome can have no GPU adapter, so the maintainer's Mac gives the evidence (TD-8).  `a_read_back_is_copied_into_wasm_memory_once` and `an_f16_variant_the_browser_rejects_keeps_f32_weights` log it",
     ),
+    (
+        "worker/src/web/tests/aac.rs",
+        "skipped: this browser has no AAC encoder",
+        "a wasm test cannot read STEMYLA_REQUIRE; CI's Chrome on Linux has no AAC encoder, so the maintainer's Mac gives the evidence (TD-92).  `a_real_aac_decodes_to_the_source` logs it",
+    ),
 ];
 
 /// VERIFY-1: every skip message goes through `test_support::skip`, so that

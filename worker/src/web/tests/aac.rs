@@ -910,3 +910,201 @@ async fn the_end_of_an_aac_holds_only_its_moov() {
         }
     }
 }
+
+/// A signal with no period: two sines of unrelated rates and noise, as the
+/// spike of M4 made.  It is the same on each run.
+fn no_period(frames: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut seed: u32 = 1;
+    let rate = TONE_RATE as f32;
+    let mut left = Vec::with_capacity(frames);
+    let mut right = Vec::with_capacity(frames);
+    for i in 0..frames {
+        seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+        let noise = ((seed >> 8) as f32 / 16_777_216.0 - 0.5) * 0.2;
+        let t = i as f32 / rate;
+        left.push(0.5 * (std::f32::consts::TAU * 440.0 * t).sin() + noise);
+        right.push(0.4 * (std::f32::consts::TAU * 660.0 * t).sin() - noise);
+    }
+    (left, right)
+}
+
+/// An M4A decoded by Symphonia as `f32`, with no trim: Symphonia ignores
+/// `elst`, so the decode holds the skip.
+fn decode_aac(bytes: Vec<u8>) -> Result<Vec<Vec<f32>>, String> {
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+
+    let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default());
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            Hint::new().with_extension("m4a"),
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| format!("not an M4A that Symphonia reads: {e}"))?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or("no audio track")?;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or("no audio parameters")?
+        .clone();
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
+        .map_err(|e| format!("no decoder: {e}"))?;
+    let mut channels: Vec<Vec<f32>> = Vec::new();
+    let mut planes: Vec<Vec<f32>> = Vec::new();
+    while let Some(packet) = format.next_packet().map_err(|e| format!("a packet: {e}"))? {
+        let buf = decoder
+            .decode(&packet)
+            .map_err(|e| format!("a packet that does not decode: {e}"))?;
+        buf.copy_to_vecs_planar::<f32>(&mut planes);
+        channels.resize(planes.len(), Vec::new());
+        for (c, p) in channels.iter_mut().zip(&planes) {
+            c.extend_from_slice(p);
+        }
+    }
+    Ok(channels)
+}
+
+/// The `media_time` of the one `elst` entry of an M4A with `moov` last:
+/// the frames that a player skips.
+fn elst_skip(bytes: &[u8]) -> Option<u32> {
+    let at = bytes.windows(4).rposition(|w| w == b"elst")?;
+    let field = |k: usize| {
+        let i = at + 4 + 4 * k;
+        bytes
+            .get(i..i + 4)
+            .map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]))
+    };
+    // Version and flags, the count, the duration, then media_time.
+    field(3)
+}
+
+/// The lag in -`most`..=`most` where the cross-correlation of `got` with
+/// `want` over `span` frames from `from` is largest.
+fn best_lag(got: &[f32], want: &[f32], from: usize, span: usize, most: isize) -> isize {
+    let mut best = (f64::MIN, 0);
+    for lag in -most..=most {
+        let mut sum = 0.0_f64;
+        for i in from..from + span {
+            let j = i as isize + lag;
+            if j >= 0 && (j as usize) < got.len() {
+                sum += f64::from(got[j as usize]) * f64::from(want[i]);
+            }
+        }
+        if sum > best.0 {
+            best = (sum, lag);
+        }
+    }
+    best.1
+}
+
+/// The root of the mean square of `a`.
+fn rms(a: &[f32]) -> f64 {
+    (a.iter().map(|x| f64::from(*x).powi(2)).sum::<f64>() / a.len().max(1) as f64).sqrt()
+}
+
+/// The error of `got` to `want`, over the root of the mean square of
+/// `want`.
+fn relative_error(got: &[f32], want: &[f32]) -> f64 {
+    let diff: Vec<f32> = got.iter().zip(want).map(|(g, w)| g - w).collect();
+    rms(&diff) / rms(want)
+}
+
+/// The most relative error of the trimmed decode, over the first 4096
+/// frames and over the whole file.  On 2026-11-10 on an Apple M2 Pro, Chrome
+/// 157 gave 0.0275 and 0.0135, and Safari 27.2 gave 0.0092 and 0.0092.  The
+/// bounds are more than 3 times the larger.  A loss of the first 1024
+/// frames, as Safari makes with no lead-in, gives about 0.5 at the start.
+const MOST_START_ERROR: f64 = 0.1;
+const MOST_ERROR: f64 = 0.05;
+
+/// Step 4 of `plans/active/m4a-m4.md`: the browser's own `AudioEncoder`
+/// encodes 10 s of a signal with no period, on both paths.  Symphonia
+/// decodes the file.  Trimmed by its `elst` skip, the decode has the
+/// source's frames, lines up with it at lag 0, and keeps its start.  CI's
+/// Chrome on Linux has no AAC encoder (TD-92), so there the test logs a
+/// skip and passes.
+#[wasm_bindgen_test]
+async fn a_real_aac_decodes_to_the_source() {
+    fake_aac_restore();
+    if !crate::web::aac::aac_encoder_here(TONE_RATE).await {
+        web_sys::console::log_1(&"skipped: this browser has no AAC encoder".into());
+        return;
+    }
+    let delay = crate::web::aac::aac_delay(TONE_RATE).await;
+    assert!(delay.is_ok(), "{delay:?}");
+    let delay = delay.expect("a delay");
+    web_sys::console::log_1(&format!("the AAC encoder's delay: {delay} frames").into());
+    let frames = 10 * TONE_RATE as usize;
+    let (left, right) = no_period(frames);
+    for stored in [false, true] {
+        fresh().await;
+        let (file, want_left) = if stored {
+            let pairs: Vec<(i16, i16)> = left
+                .iter()
+                .zip(&right)
+                .map(|(l, r)| (pcm16(*l) as i16, pcm16(*r) as i16))
+                .collect();
+            plant_at(SAVE_WAV, &wav_file(&pairs)).await;
+            let encoded = encode_stored(Codec::Aac, SAVE_WAV, frames, SAVE_M4A).await;
+            assert!(encoded.is_ok(), "{encoded:?}");
+            let as_16: Vec<f32> = pairs.iter().map(|(l, _)| f32::from(*l) / 32768.0).collect();
+            (read_at(SAVE_M4A).await.unwrap_or_default(), as_16)
+        } else {
+            let file = encode_aac(
+                &Float32Array::from(left.as_slice()),
+                &Float32Array::from(right.as_slice()),
+            )
+            .await;
+            assert!(file.is_ok(), "{file:?}");
+            (file.expect("a file"), left.clone())
+        };
+        let path = if stored { "storage" } else { "memory" };
+        let kbps = file.len() as f64 * 8.0 / 10.0 / 1000.0;
+        let skip = elst_skip(&file);
+        assert!(skip.is_some(), "{path}: an elst entry");
+        let skip = skip.unwrap_or_default() as usize;
+        let decoded = decode_aac(file);
+        assert!(decoded.is_ok(), "{path}: {decoded:?}");
+        let decoded = decoded.expect("decoded");
+        assert!(
+            decoded[0].len() >= skip + frames,
+            "{path}: {} frames",
+            decoded[0].len()
+        );
+        let got = &decoded[0][skip..skip + frames];
+        let lag = best_lag(got, &want_left, TONE_RATE as usize, 16_384, 2048);
+        let start = relative_error(&got[..4096], &want_left[..4096]);
+        let whole = relative_error(got, &want_left);
+        web_sys::console::log_1(
+            &format!(
+                "a real AAC on the {path} path: skip {skip}, lag {lag}, error {start:.4} over the \
+                 first 4096 frames and {whole:.4} over the whole, {kbps:.0} kbit/s"
+            )
+            .into(),
+        );
+        assert_eq!(lag, 0, "{path}: the cross-correlation peaks at lag 0");
+        assert_eq!(
+            skip,
+            LEAD_IN + delay,
+            "{path}: the skip is the lead-in and the delay"
+        );
+        assert!(
+            rms(&got[..4096]) > 0.1,
+            "{path}: the first 4096 frames are not silent"
+        );
+        assert!(
+            start < MOST_START_ERROR,
+            "{path}: the error of the start is {start}"
+        );
+        assert!(whole < MOST_ERROR, "{path}: the error is {whole}");
+    }
+}

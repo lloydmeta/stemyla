@@ -35,8 +35,9 @@ web-sys = { version = "0.3.106", features = ["Blob", "BlobPropertyBag", "Dedicat
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.79"
 # Decodes the worker's FLAC and M4A in its tests, so a second
-# implementation checks the output of flacenc and of `m4a`.
-symphonia = { version = "0.6.1", default-features = false, features = ["flac", "isomp4", "alac"] }
+# implementation checks the output of flacenc, of `m4a` and of the
+# browser's AAC encoder.
+symphonia = { version = "0.6.1", default-features = false, features = ["flac", "isomp4", "alac", "aac"] }
 
 [lints]
 workspace = true

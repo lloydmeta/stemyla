@@ -478,7 +478,7 @@ The skill's "Stop and wait" lists the reasons to stop, and a request of the main
 
 This entry concerns VERIFY-1.
 
-Chromium on Linux has no AAC encoder for WebCodecs ([Chromium issue 40942807](https://issues.chromium.org/issues/40942807)).  CI's `browser-tests` job runs Chrome on `ubuntu-latest`.  So CI tests the AAC encode of a save only with the fake encoder of `worker/src/web/tests/aac.rs`.  The real encode runs only on a Mac, in Steps 4 and 6 of M4 of `plans/active/m4a.md`.
+Chromium on Linux has no AAC encoder for WebCodecs ([Chromium issue 40942807](https://issues.chromium.org/issues/40942807)).  CI's `browser-tests` job runs Chrome on `ubuntu-latest`.  So CI tests the AAC encode of a save only with the fake encoder of `worker/src/web/tests/aac.rs`.  The real encode runs only on a Mac: `a_real_aac_decodes_to_the_source` logs a skip in CI, and passes.  Step 6 of M4 of `plans/active/m4a.md` adds the AAC saves of `xtask e2e save`.
 
 The worker's probe measures the encoder's delay through `AudioDecoder`, so it assumes that `AudioDecoder` trims no frames.  The W3C AAC registration says that it trims none for a plain AAC stream ([W3C, AAC WebCodecs Registration](https://www.w3.org/TR/2026/DNOTE-webcodecs-aac-codec-registration-20260924/)).  Only macOS shows this, in Chrome 157 and Safari 27.2.  A decoder that trims would give a delay that is too small, and the saved file would lose the start of the source.
 
