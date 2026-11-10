@@ -4291,7 +4291,9 @@ impl StemApp {
                     }
                 }
                 Event::Log(text) => log::info!("separator: {text}"),
-                Event::Mp3 { name, file } | Event::Flac { name, file } => match file {
+                Event::Mp3 { name, file }
+                | Event::Flac { name, file }
+                | Event::Alac { name, file } => match file {
                     stem_protocol::Encoded::Bytes(bytes) => {
                         store::download(&name, &bytes, "audio/mpeg");
                         let note = self.save_notes.take(&name);

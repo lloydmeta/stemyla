@@ -15,7 +15,7 @@ flowchart LR
     DW["decode loop<br/>decode, resample, overviews,<br/>stem overviews, classic drums"]
   end
   subgraph worker["Web Worker (worker crate)"]
-    W["message loop<br/>pacing, self-test, bench, MP3, FLAC"]
+    W["message loop<br/>pacing, self-test, bench, MP3, FLAC, ALAC"]
     RF["roformer<br/>STFT, chunking, weights"]
     GPU["roformer-gpu<br/>WGSL kernels on WebGPU"]
   end
@@ -41,7 +41,7 @@ flowchart LR
 * `app`: the egui interface.  Natively it plays through cpal; on the web through Web Audio.  `separator.rs` drives the worker; `store.rs` keeps songs and stems in the browser.
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
-* `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark, and MP3 and FLAC encoding.
+* `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark, and MP3, FLAC and ALAC encoding.
 * `decode-worker` (`decoder/`): the page-side Web Worker (decision 0019).  It decodes a song that the page keeps in browser storage, in blocks, with `engine`.  It writes the session files and the overviews as `.decode.part` files, in blocks of 1 MiB (`decode_worker::pass`).  It answers each `decode` request of `stem_protocol::decode` with `decoded`, `undecodable` or `decode-unstored`.  It takes two more requests (`decode_worker::lanes`, D7 and D8 of `plans/completed/stream-from-storage-m7.md`):
   * `overviews`: the overviews of lane files, such as stems, and of their mix.  It ends with `overviews-made` or `decode-unstored`.
   * `classic`: classic drums of lane files as a 16-bit WAV, with a block HPSS, and its overview.  It ends with `classic-made` or `decode-unstored`.
@@ -67,7 +67,7 @@ Each workspace crate depends only on the workspace crates that its row lists, an
 | Engine and GPU | `roformer-gpu` | `roformer` |
 | Shells | `app` | `dsp`, `engine`, `m4a`, `stem-protocol`, `synth` |
 | Shells | `decode-worker` | `dsp`, `engine`, `m4a`, `stem-protocol` |
-| Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
+| Shells | `stem-worker` | `m4a`, `roformer`, `roformer-gpu`, `stem-protocol` |
 | Tools | `xtask` | `dsp`, `engine`, `m4a`, `roformer`, `synth` |
 
 The rows run from the lowest layer to the highest.  Each row lists every workspace crate that its crate depends on, dev- and build-dependencies included, apart from `test-support`.  `crates_depend_only_downwards` compares the table with `cargo metadata`.  Change the table in the commit that adds or removes a crate, or a dependency between crates.  Every path crate in the build is a workspace crate with a row.  No crate from a registry or git has a workspace crate's name, or takes a workspace crate.  The layers are those of LAYER-1, and `LAYERS` in `xtask/src/rules.rs` holds them.
@@ -150,7 +150,7 @@ Its JS heap holds these parts:
 * the browser's copy of the write in flight, about 2 MiB;
 * at the end stage, the last write's own array, up to 2 MiB.
 
-The end stage comes after the last read ends, so the last write's array never lies beside the reads in flight.  So a save of 7 lanes adds about 27 MiB to the tab at its peak.  The stem worker encodes FLAC and MP3 from that file in blocks.  An MP3 encode still holds about 3.5 times its file in the stem worker (TD-59).
+The end stage comes after the last read ends, so the last write's array never lies beside the reads in flight.  So a save of 7 lanes adds about 27 MiB to the tab at its peak.  The stem worker encodes FLAC, ALAC and MP3 from that file in blocks.  An ALAC encode keeps its packet table, 4 bytes for each packet of 4096 frames.  At the end, `moov` adds about 8 bytes for each packet, so about 77 KB in all for 10 minutes.  An MP3 encode still holds about 3.5 times its file in the stem worker (TD-59).
 
 ## Running it on the GPU
 

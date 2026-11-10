@@ -680,15 +680,17 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
 /// True when `tested` holds `engine` and a member outside the closure and
 /// the dependents of `engine`.  Then one test build has both, so the
 /// features of that member can reach the dependencies of `engine`.  It
-/// cannot see a member in the closure of `engine`, such as `m4a`, which
-/// `engine` takes for its tests.  So a new Symphonia feature of the tests
-/// of `m4a` passes it.  The test
+/// cannot see a member in the closure of `engine` whose dependents are all
+/// in the family, such as `dsp`.  `m4a` is in the closure too, since
+/// `engine` takes it for its tests.  From M3 of `plans/active/m4a.md`, its
+/// dependent `stem-worker` is outside the family, so a change of `m4a` runs
+/// `engine` alone.  The test
 /// `the_symphonia_features_of_the_tests_of_m4a_are_engines` and tier
-/// `push` cover that gap.  A dependent of `engine` can also turn on
-/// features of `engine`: `app` turns on `engine/cpal` with its default
-/// feature `audio`.  `xtask` does so only with its own `cpal` feature,
-/// which is not a default.  Tier `push` and CI run `cargo test -p engine`
-/// alone, so they cover that case.
+/// `push` also cover the features of the tests of `m4a`.  A dependent of
+/// `engine` can also turn on features of `engine`: `app` turns on
+/// `engine/cpal` with its default feature `audio`.  `xtask` does so only
+/// with its own `cpal` feature, which is not a default.  Tier `push` and
+/// CI run `cargo test -p engine` alone, so they cover that case.
 fn merges_into_engine(graph: &Graph, tested: &BTreeSet<&String>) -> bool {
     let engine = BTreeSet::from([ENGINE.to_string()]);
     let family: BTreeSet<String> = graph
@@ -1137,7 +1139,7 @@ mod tests {
             (
                 "worker",
                 "stem-worker",
-                &["roformer", "roformer-gpu", "stem-protocol"],
+                &["m4a", "roformer", "roformer-gpu", "stem-protocol"],
             ),
             (
                 "xtask",
@@ -1478,9 +1480,9 @@ mod tests {
         assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
     }
 
-    /// `m4a` is in the closure of `engine`, since `engine` takes it for
-    /// its tests.  So the crate tests of `dsp` and `m4a` stay in the family
-    /// of `engine`, and do not run `engine` alone.
+    /// `dsp` is in the closure of `engine`, and each of its dependents is
+    /// in the family of `engine`.  So the crate tests of `dsp` do not run
+    /// `engine` alone.
     #[test]
     fn crate_tests_of_engines_family_do_not_run_engine_alone() {
         let head = vec![
@@ -1492,13 +1494,39 @@ mod tests {
             run(APP_ALL),
             run(WASM),
             skip(XTASK_REPO),
-            run("cargo test -p app -p decode-worker -p dsp -p engine -p m4a -p xtask"),
+            run("cargo test -p app -p decode-worker -p dsp -p engine -p xtask"),
             skip(TESTS),
             skip(ENGINE),
             skip(GPU_LIB),
             skip(GPU_DOC),
         ];
-        let plan = commit(&["dsp/src/lib.rs", "m4a/src/lib.rs"]);
+        let plan = commit(&["dsp/src/lib.rs"]);
+        assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
+    }
+
+    /// `m4a` is in the closure of `engine`, since `engine` takes it for
+    /// its tests.  From M3 of `plans/active/m4a.md`, `stem-worker` takes it
+    /// too, and `stem-worker` is outside the family of `engine`.  So the
+    /// crate tests of `m4a` merge features into `engine`, and run `engine`
+    /// alone.
+    #[test]
+    fn crate_tests_of_m4a_run_engine_alone() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p app -p decode-worker -p engine -p m4a -p stem-worker -p xtask"),
+            skip(TESTS),
+            run(ENGINE),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        let plan = commit(&["m4a/src/lib.rs"]);
         assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
     }
 

@@ -34,10 +34,14 @@
 //! * `{type: "flac", name, left, right, rate?}`: encode one stem or mix as
 //!   a 16-bit FLAC (buffers transferred, the memory path of a save).  The
 //!   worker takes 44,100 Hz with no `rate`.
-//! * `{type: "mp3" or "flac", name, wav, frames, out, rate}`: encode the
-//!   16-bit stereo WAV file at `wav`, of `frames` frames, into the file at
-//!   `out` ([`Encode::Stored`], the storage path of a save).  Both paths
-//!   are from the root of the private file system, in its `saves` folder.
+//! * `{type: "alac", name, left, right, rate?}`: encode one stem or mix as
+//!   a 16-bit Apple Lossless (ALAC) M4A (buffers transferred, the memory
+//!   path of a save).  The worker takes 44,100 Hz with no `rate`.
+//! * `{type: "mp3", "flac" or "alac", name, wav, frames, out, rate}`:
+//!   encode the 16-bit stereo WAV file at `wav`, of `frames` frames, into
+//!   the file at `out` ([`Encode::Stored`], the storage path of a save).
+//!   Both paths are from the root of the private file system, in its
+//!   `saves` folder.
 //!   No samples cross.  The worker removes the WAV file at the end, also
 //!   when the encode fails.  A request with both arrays and `wav`, or
 //!   neither, with `out` or `frames` but no `wav`, with no `out` or no
@@ -72,12 +76,12 @@
 //! * `{type: "status", text}`, `{type: "log", text}`,
 //!   `{type: "selftest", ok, text}`, `{type: "bench", text}`.
 //! * `{type: "mp3", name, bytes}` (buffer transferred).
-//! * `{type: "flac", name, file: Blob}`: a `Blob` crosses as a reference,
-//!   so the file is not copied.
-//! * `{type: "mp3" or "flac", name, path}`: a stored encode wrote its file
-//!   at `path`, the request's `out` ([`Encoded::Stored`]).
-//! * `{type: "mp3" or "flac", name, path, failed: text}`: a stored encode
-//!   failed, for the reason `text` ([`Encoded::Failed`]).  The worker
+//! * `{type: "flac" or "alac", name, file: Blob}`: a `Blob` crosses as a
+//!   reference, so the file is not copied.
+//! * `{type: "mp3", "flac" or "alac", name, path}`: a stored encode wrote
+//!   its file at `path`, the request's `out` ([`Encoded::Stored`]).
+//! * `{type: "mp3", "flac" or "alac", name, path, failed: text}`: a stored
+//!   encode failed, for the reason `text` ([`Encoded::Failed`]).  The worker
 //!   removed the file at `path` and the WAV file.  A stored encode that the
 //!   worker started replies with one of these two, not with `error`, so the
 //!   page knows which save failed.
@@ -99,6 +103,7 @@ pub mod kind {
     pub const BENCH: &str = "bench";
     pub const MP3: &str = "mp3";
     pub const FLAC: &str = "flac";
+    pub const ALAC: &str = "alac";
     pub const ALIVE: &str = "alive";
     pub const PROGRESS: &str = "progress";
     pub const SEGMENT: &str = "segment";
@@ -342,7 +347,7 @@ pub enum Mix {
     Stored { path: String, frames: usize },
 }
 
-/// The audio that an MP3 or FLAC encode reads.
+/// The audio that an MP3, FLAC or ALAC encode reads.
 #[derive(Clone, Debug)]
 pub enum Encode {
     /// Both channels, transferred with the request (the memory path of a
@@ -364,12 +369,13 @@ pub enum Encode {
     },
 }
 
-/// The file that an MP3 or FLAC encode gives.
+/// The file that an MP3, FLAC or ALAC encode gives.
 #[derive(Clone, Debug)]
 pub enum Encoded {
     /// The MP3 of an [`Encode::Arrays`] (transferred).
     Bytes(Uint8Array),
-    /// The FLAC of an [`Encode::Arrays`] (a reference, not a copy).
+    /// The FLAC or the ALAC M4A of an [`Encode::Arrays`] (a reference, not a
+    /// copy).
     Blob(Blob),
     /// A stored encode wrote its file at `path`.
     Stored { path: String },
@@ -401,6 +407,10 @@ pub enum Request {
         source: Encode,
     },
     Flac {
+        name: Option<String>,
+        source: Encode,
+    },
+    Alac {
         name: Option<String>,
         source: Encode,
     },
@@ -437,6 +447,7 @@ impl Request {
             Self::Bench => kind::BENCH,
             Self::Mp3 { .. } => kind::MP3,
             Self::Flac { .. } => kind::FLAC,
+            Self::Alac { .. } => kind::ALAC,
         }
     }
 
@@ -470,7 +481,9 @@ impl Request {
                     set(&o, field::BASE, b.as_str());
                 }
             }
-            Self::Mp3 { name, source } | Self::Flac { name, source } => {
+            Self::Mp3 { name, source }
+            | Self::Flac { name, source }
+            | Self::Alac { name, source } => {
                 if let Some(n) = name {
                     set(&o, field::NAME, n.as_str());
                 }
@@ -534,6 +547,10 @@ impl ToWorker {
                 source: encode_source(msg).map_err(bad)?,
             },
             kind::FLAC => Request::Flac {
+                name: string(msg, field::NAME),
+                source: encode_source(msg).map_err(bad)?,
+            },
+            kind::ALAC => Request::Alac {
                 name: string(msg, field::NAME),
                 source: encode_source(msg).map_err(bad)?,
             },
@@ -614,6 +631,10 @@ pub enum Reply {
         name: String,
         file: Encoded,
     },
+    Alac {
+        name: String,
+        file: Encoded,
+    },
 }
 
 impl Reply {
@@ -634,6 +655,7 @@ impl Reply {
             Self::Bench(_) => kind::BENCH,
             Self::Mp3 { .. } => kind::MP3,
             Self::Flac { .. } => kind::FLAC,
+            Self::Alac { .. } => kind::ALAC,
         }
     }
 
@@ -693,7 +715,7 @@ impl Reply {
                 set(&o, field::OK, *ok);
                 set(&o, field::TEXT, text.as_str());
             }
-            Self::Mp3 { name, file } | Self::Flac { name, file } => {
+            Self::Mp3 { name, file } | Self::Flac { name, file } | Self::Alac { name, file } => {
                 set(&o, field::NAME, name.as_str());
                 match file {
                     Encoded::Bytes(bytes) => {
@@ -804,6 +826,10 @@ impl Reply {
                 name: string(msg, field::NAME).unwrap_or_default(),
                 file: encoded(msg, &kind).map_err(bad)?,
             },
+            kind::ALAC => Self::Alac {
+                name: string(msg, field::NAME).unwrap_or_default(),
+                file: encoded(msg, &kind).map_err(bad)?,
+            },
             other => return Err(bad(&format!("unknown type {other:?}"))),
         })
     }
@@ -873,8 +899,8 @@ fn whole_frames(msg: &JsValue) -> Result<usize, String> {
     Ok(frames as usize)
 }
 
-/// The source of an `mp3` or `flac` request: a stored WAV if it has `wav`,
-/// else the two arrays.  A missing field is refused, not read as a
+/// The source of an `mp3`, `flac` or `alac` request: a stored WAV if it has
+/// `wav`, else the two arrays.  A missing field is refused, not read as a
 /// default (TD-16).
 fn encode_source(msg: &JsValue) -> Result<Encode, String> {
     let has = |k| !get(msg, k).is_undefined();
@@ -925,8 +951,8 @@ fn whole_rate(msg: &JsValue) -> Result<u32, String> {
         })
 }
 
-/// The file of an `mp3` or `flac` reply: a stored file if it has `path`,
-/// else the bytes of an MP3 or the `Blob` of a FLAC.
+/// The file of an `mp3`, `flac` or `alac` reply: a stored file if it has
+/// `path`, else the bytes of an MP3, or the `Blob` of a FLAC or an M4A.
 fn encoded(msg: &JsValue, kind: &str) -> Result<Encoded, &'static str> {
     let path = get(msg, field::PATH);
     if !path.is_undefined() {
@@ -963,8 +989,8 @@ fn stereo(msg: &JsValue) -> Result<(Float32Array, Float32Array), String> {
 mod tests {
     use super::*;
 
-    /// Each reply's `type`.  `mp3` and `flac` carry JS values, which a
-    /// native test cannot make; the browser tests cover them.
+    /// Each reply's `type`.  `mp3`, `flac` and `alac` carry JS values, which
+    /// a native test cannot make; the browser tests cover them.
     #[test]
     fn each_reply_names_its_type() {
         let text = || "t".to_string();

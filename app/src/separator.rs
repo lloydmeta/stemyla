@@ -111,6 +111,12 @@ pub enum Event {
         name: String,
         file: Encoded,
     },
+    /// The encoded ALAC M4A: a `Blob`, as the worker sent it (the memory
+    /// path), or its path in browser storage (the storage path).
+    Alac {
+        name: String,
+        file: Encoded,
+    },
 }
 
 pub struct Separator {
@@ -372,6 +378,7 @@ impl Separator {
                 Reply::Bench(text) => Some(Event::Bench(text)),
                 Reply::Mp3 { name, file } => Some(Event::Mp3 { name, file }),
                 Reply::Flac { name, file } => Some(Event::Flac { name, file }),
+                Reply::Alac { name, file } => Some(Event::Alac { name, file }),
                 Reply::Download { done, total } => Some(Event::Download { done, total }),
             };
             if let Some(event) = event {
@@ -1101,6 +1108,36 @@ export function spy_on_post(worker) {
             Object::is(&file, &sent),
             "MEM-1: the page made a new file from the FLAC that the worker sent.  \
              Fix: keep the Blob in Event::Flac."
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn an_alac_reply_reaches_the_page_as_sent() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let parts = js_sys::Array::of1(&Uint8Array::from(&b"ftyp"[..]));
+        let sent = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
+        let (message, _) = Reply::Alac {
+            name: "bass.m4a".into(),
+            file: Encoded::Blob(sent.clone()),
+        }
+        .to_js();
+        deliver(&sep.worker, &message);
+        let alac = sep.take_events().into_iter().find_map(|e| match e {
+            Event::Alac {
+                name,
+                file: Encoded::Blob(file),
+            } => Some((name, file)),
+            _ => None,
+        });
+        // Before any assert: a failed assert aborts the test.
+        sep.stop();
+        assert!(alac.is_some(), "an Event::Alac of the reply");
+        let (name, file) = alac.expect("an Event::Alac");
+        assert_eq!(name, "bass.m4a");
+        assert!(
+            Object::is(&file, &sent),
+            "MEM-1: the page made a new file from the M4A that the worker sent.  \
+             Fix: keep the Blob in Event::Alac."
         );
     }
 }

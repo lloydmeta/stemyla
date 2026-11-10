@@ -289,7 +289,12 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 
 * [x] 2026-11-10: plan written by the team leader.  Plan review round 1 found 2 blockers, 7 should-fix and 4 nits.  Round 2 found 1 blocker, 8 should-fix and 4 nits.  The plan takes each (Decision log).
 * [x] Step 1: one sink for FLAC and ALAC.  2026-11-10: `EncodeOut` with `put`, `reserve` and `replace_head`.  `flac_into` reserves its stream header.  First failures, with a `reserve` that writes nothing: `a_reserve_is_one_unit_that_the_head_replaces` gave `w3@0 w65537@0`, not `w65536@0 w1@65536 w3@65537 w65537@0`.  `a_reserve_holds_its_zeros_outside_wasm_memory` gave a file of 0 bytes, not 1,048,576.  With a stub that makes its zeros in a `Vec`, the second test gave 65,584 bytes of WebAssembly memory on the file sink.  Then `web-test --browser chrome` passed: 80 `stem-worker` tests, with the FLAC tests unchanged.
-* [ ] Step 2: the wire kind `alac`, the worker's encode and the page's reply.
+* [x] Step 2: the wire kind `alac`, the worker's encode and the page's reply.  2026-11-10: `kind::ALAC`, `Request::Alac`, `Reply::Alac`, `Codec::Alac` with `alac_into`, and `Event::Alac`.  First failures:
+  * `stem-protocol`, with a stub `kind()` that gives `flac` for ALAC: 6 tests failed on "the type on the wire" (`flac`, not `alac`), or on "alac: 1 Hz decodes as 1".
+  * `app`, with a stub that gives no event for `Reply::Alac`: `an_alac_reply_reaches_the_page_as_sent` failed on `alac.is_some()`.  The protocol stub failed it at the same assert.
+  * `stem-worker`, with an `alac_into` that writes nothing: 9 tests failed on asserts.  The new ALAC tests failed on the bytes of `alac_file` or on `result.is_err()`.  The order test gave no reads, `errors_name_the_request_they_answer` gave no `alac` errors, and the "write refused" case gave no `failed` reply.  `a_failed_stored_encode_leaves_another_encode_whole` passed with this stub, so it now asserts a stored file with bytes, which then failed.
+  * `xtask`: with the new edge, `crate_tests_of_engines_family_do_not_run_engine_alone` failed before its change to `dsp`.  `crate_tests_of_m4a_run_engine_alone` failed on the old fixture.
+  * TD-16: `git grep -n "'flac'\|\"flac\"" xtask/` shows `flac` in `xtask/src/e2e.rs` and `xtask/src/e2e/save.rs` only.  No hand-written script writes or reads `alac` in this step.
 * [ ] Step 3: the memory of the encode.
 * [ ] Step 4: the page offers M4A.
 * [ ] Step 5: `xtask e2e save` saves M4A.
@@ -318,6 +323,10 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, agent (team leader, plan review round 2): the memory test of Step 3 asserts two bounds at 10 s and 60 s: the parent's 12 bytes for each packet, and 4 bytes.  Reason: at these lengths the peak is in the loop, so the tighter bound tells `with_capacity` from a doubling vector.  Round 1 had said that no bound could; round 2 showed where the peak is.
 * 2026-11-10, agent (team leader, plan review round 2): `flac_into` uses `reserve` for its first stream header.  Reason: `reserve` then has a caller in Step 1, so no dead code fails clippy, and the FLAC's bytes stay the same.
 * 2026-11-10, agent (implementer): Step 1 has two tests, not one.  `a_reserve_is_one_unit_that_the_head_replaces` checks the writes, the bytes and the parts.  `a_reserve_holds_its_zeros_outside_wasm_memory` checks the peak.  Reason: the stub that writes nothing cannot fail a bound on the peak.  So the peak test also checks the size of the file, and a second stub with zeros in a `Vec` fails its bound.
+* 2026-11-10, agent (implementer): the protocol tests of FLAC run for ALAC in loops, with helpers for a lossless request and reply.  Three tests have new names: `a_lossless_request_keeps_its_name_and_rate`, `a_lossless_reply_keeps_its_blob` and `an_encode_reply_without_its_file_is_refused`.  Reason: one test for each form keeps the two kinds the same.  No doc named the old names.
+* 2026-11-10, agent (implementer): `alac_into` calls `alac_packets`, which holds the encoder and the block buffers.  Reason: they are freed when it returns, before `head()` makes `moov` (Step 3, "Where the peak is").
+* 2026-11-10, agent (implementer): `an_alac_decodes_to_the_stem` encodes 10 s, not 30 s.  The lengths at each side of a packet are one test, `an_alac_of_each_length_is_the_reference_on_both_paths`.  The 65,536 Hz refusal runs on the memory path only.  Reason: the debug build encodes slowly, and the storage path takes the same `alac_into`.
+* 2026-11-10, agent (implementer): `errors_name_the_request_they_answer` sends `alac` at 96,000 Hz.  Reason: M4A refuses a rate above 65,535 Hz, so the request fails, as the MP3 one does.
 
 ## Outcomes and retrospective
 

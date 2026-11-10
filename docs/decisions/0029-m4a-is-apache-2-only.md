@@ -19,5 +19,5 @@ The workspace is MIT or Apache-2.0, at the user's option.  Decision 0028 puts an
 
 * The licence section of `README.md` says that `m4a/` is Apache-2.0 only.  `THIRD-PARTY.md` names the two sources of the port.
 * `m4a/src/alac.rs` holds the notice of each source.  It says that the file was changed from them, as Apache-2.0 section 4(b) asks.
-* When a shipped crate takes `m4a` (M3), the app ships Apache-2.0 code.  The licence list of the app must then give `m4a` as Apache-2.0.
+* Since M3, `stem-worker` takes `m4a`, so the web app ships Apache-2.0-only code.  `THIRD-PARTY.md` and the licence section of `README.md` give `m4a` as Apache-2.0 only.
 * A person who takes the workspace under MIT cannot take `m4a` under MIT.

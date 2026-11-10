@@ -568,6 +568,7 @@ mod tests {
             crate::kind::BENCH,
             crate::kind::MP3,
             crate::kind::FLAC,
+            crate::kind::ALAC,
             crate::kind::ALIVE,
             crate::kind::PROGRESS,
             crate::kind::SEGMENT,
