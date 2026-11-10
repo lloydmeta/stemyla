@@ -28,6 +28,12 @@
 | 2026-11-10 | 3 | 5467677 | 3-1 | supply-chain-reviewer | nit | - | doc | none | .github/workflows/ci.yml:175 | the CI comment gives the wrong reason for the range of the spare | unvalidated | none | 0377e56 review round 3 fixes |
 | 2026-11-10 | 3 | 5467677 | 3-2 | docs-reviewer | nit | - | doc | DOC-1 | docs/ARCHITECTURE.md:153 | the text says the size of moov, not the memory of the end, is fixed by construction | unvalidated | none | 0377e56 review round 3 fixes |
 | 2026-11-10 | 3 | 5467677 | 3-3 | docs-reviewer | nit | - | doc | none | docs/invariants.md:54 | MEM-1 says the capacity test checks one buffer; it checks the capacity only | unvalidated | none | 0377e56 review round 3 fixes |
+| 2026-11-10 | 4 | c738fdd | 4-1 | supply-chain-reviewer | nit | - | doc | none | .github/workflows/ci.yml:179 | the CI comment names a guessed cause of the gap between two runs | unvalidated | none | reported, not fixed |
+| 2026-11-10 | 4 | c738fdd | 4-2 | wire-reviewer, docs-reviewer | nit | - | doc | DOC-1 | docs/plans/completed/m4a-m3.md:387 | the retrospective names blocks of the reserve with no path | unvalidated | none | reported, not fixed |
+| 2026-11-10 | 4 | c738fdd | 4-3 | reviewer, docs-reviewer | nit | - | doc | none | docs/ARCHITECTURE.md:153 | "the memory of the end is fixed" reads as a constant | unvalidated | none | reported, not fixed |
+| 2026-11-10 | 4 | c738fdd | 4-4 | reviewer | nit | - | doc | none | docs/plans/completed/m4a-m3.md:328 | the Progress lines count 3 rounds, before round 4 | unvalidated | none | reported, not fixed |
+| 2026-11-10 | 4 | c738fdd | 4-5 | reviewer | nit | - | doc | none | docs/plans/completed/m4a-m3.md:326 | the Step 6 line names the WAV save, not the planted mix | unvalidated | none | reported, not fixed |
+| 2026-11-10 | 4 | c738fdd | 4-6 | docs-reviewer | nit | - | doc | none | docs/plans/active/m4a.md:301 | two new sentences have more than 25 words | unvalidated | none | reported, not fixed |
 
 ## Rounds
 
@@ -36,3 +42,4 @@
 | 1 | 7 | 827348 | 20.7 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: full: tested 64 (caught 52, missed 4, unviable 8), timeouts 0, not tested 0, known 0 | - | - | - | - | - | - |
 | 2 | 6 | 556214 | 17.6 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
 | 3 | 5 | 420006 | 7.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
+| 4 | 5 | 373687 | 4.5 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
