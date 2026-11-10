@@ -1,6 +1,6 @@
 # 0029: the crate m4a is Apache-2.0 only
 
-Status: proposed (2026-11-08, by the agent)
+Status: accepted (2026-11-11, by the maintainer, at the review of PR #43; proposed on 2026-11-08 by the agent)
 
 ## Context
 

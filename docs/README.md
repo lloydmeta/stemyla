@@ -80,7 +80,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0026-local-checks-by-tier.md`: local checks run by tier and by changed paths; the full set before a push (accepted).
 * `decisions/0027-pr-body-and-attention-comments.md`: a PR body with a summary for people and a section for agents, and inline comments where a person must look (accepted).
 * `decisions/0028-m4a-with-alac-as-the-save-format.md`: the app saves 16-bit stereo ALAC M4A, written by the Pure crate `m4a` with a safe port of `alac-encoder` 0.3.0 (accepted, amended 2026-11-08 and 2026-11-10).
-* `decisions/0029-m4a-is-apache-2-only.md`: the crate `m4a` is Apache-2.0 only, since its ALAC encoder is a port of Apple's Apache-2.0 reference (proposed).
+* `decisions/0029-m4a-is-apache-2-only.md`: the crate `m4a` is Apache-2.0 only, since its ALAC encoder is a port of Apple's Apache-2.0 reference (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References

@@ -318,6 +318,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-11, orchestrator (intent review of M4, round 2): `README.md` and the index line of the milestone plan name the rate of 256 kbit/s as the condition of the AAC item (TD-94).  `e2e save` and the worker's real AAC test run again on the Mac in Chrome and Safari, after the fixes of review rounds 1 to 3.  Review round 7 reviews the doc fixes.  The PR names TD-94 under "Needs your attention".
 * 2026-11-11, orchestrator (intent review of M4, round 3): the Progress line gives each Safari crate of `web-test` after round 6.  The kept logs show no Safari run of the decode-worker crate before round 1, so TD-95 and the milestone plan get a true record in review round 8.
 * 2026-11-11, orchestrator (intent review of M4, round 4, the last by decision 0024): one should-fix that is not significant (I4-1, the TD-95 Surprise, fixed in this plan text) and one nit on TD-95, reported, not fixed.
+* 2026-11-11, maintainer (the review of PR #43): accept each default of "Needs your attention" and each inline comment.  Decision 0029 is accepted.  Find the cause of TD-93 and TD-95 in another PR.
 
 ## Outcomes and retrospective
 
@@ -357,6 +358,6 @@ What went well:
 
 Left open:
 
-* Decision 0029 (`m4a` is Apache-2.0 only) is `proposed`.  The maintainer accepts it at the PR review.
+* Decision 0029 (`m4a` is Apache-2.0 only): the maintainer accepted it on 2026-11-11, at the review of PR #43.
 * TD-91: the page ships no licence text.  TD-92: CI cannot run the real AAC encode.  TD-93 and TD-95: Safari `web-test` failures that are older than M4.  TD-94: Chrome and Edge on Windows probably offer no AAC at 256 kbit/s.
 * Nobody opened a saved M4A in Logic Pro, or ran the AAC save on Windows, Android or iOS.
