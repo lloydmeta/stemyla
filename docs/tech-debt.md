@@ -480,7 +480,7 @@ This entry concerns VERIFY-1.
 
 Chromium on Linux has no AAC encoder for WebCodecs ([Chromium issue 40942807](https://issues.chromium.org/issues/40942807)).  CI's `browser-tests` job runs Chrome on `ubuntu-latest`.  So CI tests the AAC encode of a save only with the fake encoder of `worker/src/web/tests/aac.rs`.  The real encode runs only on a Mac: `a_real_aac_decodes_to_the_source` logs a skip in CI, and passes.  `xtask e2e save` saves AAC only where the page offers it, so on a Mac.  On Linux, it fails if the page offers AAC (`aac_rule`), since this entry then needs an update.
 
-The worker's probe measures the encoder's delay through `AudioDecoder`, so it assumes that `AudioDecoder` trims no frames.  The W3C AAC registration says that it trims none for a plain AAC stream ([W3C, AAC WebCodecs Registration](https://www.w3.org/TR/2026/DNOTE-webcodecs-aac-codec-registration-20260924/)).  Only macOS shows this, in Chrome 157 and Safari 27.2.  A decoder that trims would give a delay that is too small, and the saved file would lose the start of the source.
+The worker's probe measures the encoder's delay through `AudioDecoder`, so it assumes that `AudioDecoder` trims no frames.  The W3C AAC registration says that it trims none for a plain AAC stream ([W3C, AAC WebCodecs Registration](https://www.w3.org/TR/2026/DNOTE-webcodecs-aac-codec-registration-20260924/)).  Only macOS shows this, in Chrome 157 and Safari 27.2.  A decoder that trims `t` frames would give a delay `t` frames too small.  The file's `elst` and `iTunSMPB` would then start `t` frames early, in the silent lead-in.  So the source would start `t` frames late and lose its last `t` frames.
 
 * Fix: a CI runner with an AAC encoder, such as `macos-latest`, that runs the real-encode test and `e2e save`.
 
@@ -495,6 +495,14 @@ A second cause hid behind the first.  On 2026-11-11, with `WASM_BINDGEN_NO_DEBUG
 `xtask e2e selftest --browser safari` runs the release build of the stem worker on the GPU.  So it would show what a user of Safari 27.2 sees.  It needs the model, and nobody ran it on Safari 27.2 in M4.
 
 * Fix: a wgpu release that reads `subgroupMinSize` as optional.  Until then, run the two tests in Safari with `WASM_BINDGEN_NO_DEBUG=1`.  It turns off each debug assert of the run, not only this one.
+
+### TD-94: Chrome on Windows has no AAC encoder at 256 kbit/s
+
+This entry concerns no rule.  It concerns M4 of `plans/active/m4a.md`.
+
+The save asks for 256,000 bit/s (`stem_protocol::AAC_ENCODER`).  Chromium's Windows encoder takes only 96,000, 128,000, 160,000 and 192,000 bit/s (`kSupportedBitrates` in [Chromium's Windows audio encoder](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/media/gpu/windows/mf_audio_encoder.cc)).  Its `ValidateInputOptions` gives `kEncoderUnsupportedConfig` for each other rate.  So Chrome and Edge on Windows probably fail the page's probe, and the Save menu offers no AAC item.  No user gets a wrong file or a wrong label.  Nobody checked this on Windows.
+
+* Fix: the maintainer decides.  One option is a fallback rate of 192 kbit/s with its own label.  Another is no AAC on Windows, as today.
 
 ## Known breaches
 

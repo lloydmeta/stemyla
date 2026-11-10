@@ -38,7 +38,7 @@ Safari leaves every `AudioContext` suspended (time 0) while macOS reports the us
 
 ## Safari's AAC encoder loses the start and gives a whole `ES_Descriptor`
 
-Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-10, with WebCodecs `AudioEncoder` (`mp4a.40.2`, 44,100 Hz, 2 channels, 256,000 bit/s).  The spike is in M4 of `plans/active/m4a.md` ("Facts").  Chrome 157 on the same Mac shows none of the three.
+Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-10, with WebCodecs `AudioEncoder` (`mp4a.40.2`, 44,100 Hz, 2 channels, 256,000 bit/s).  The spike is in `plans/completed/m4a-m4.md` ("Facts").  Chrome 157 on the same Mac shows none of the three.
 
 * Safari encodes the first 1024 input frames as silence.  Mediabunny reports the same bug, and pads the input by 1024 frames ([Mediabunny, "Project sync"](https://mediabunny.dev/blog/project-sync)).  The code: the worker puts 2048 frames of silence before the source (`aac::LEAD_IN` in `worker/src/web/aac.rs`).  The `elst` entry and `iTunSMPB` skip them with the encoder's delay.
 * The `decoderConfig.description` of Safari's first output is a whole `ES_Descriptor` with 4-byte descriptor sizes, not the bare AudioSpecificConfig that Chrome gives.  Safari's own `AudioDecoder` refuses that description, and takes the bare config.  The code: `m4a::audio_specific_config` takes the config out of either form.  The worker's probe decodes with the bare config, and the file's `esds` holds it.
