@@ -356,16 +356,18 @@ async fn a_refused_open_or_write_removes_the_file_and_says_why() {
 }
 
 /// D7 of M8: the clean-up at the page's start removes a save file older
-/// than its age limit and keeps a newer one.
+/// than its age limit and keeps a newer one.  Safari gives `lastModified`
+/// in whole seconds (`docs/references/browser-quirks.md`).  So the waits
+/// either side of `between` are longer than a second.
 #[wasm_bindgen_test]
 async fn old_save_files_are_removed_and_new_ones_kept() {
     store::test_remove(store::SAVES).await;
     store::test_write("saves/1-1.wav", b"old")
         .await
         .expect("planted");
-    sv_sleep(30).await;
+    sv_sleep(1_100).await;
     let between = js_sys::Date::now();
-    sv_sleep(30).await;
+    sv_sleep(1_100).await;
     store::test_write("saves/2-1.flac", b"new")
         .await
         .expect("planted");
