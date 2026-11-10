@@ -3,10 +3,10 @@
 //!
 //! The scenario plants a stored session of 1 minute and one of 10 minutes,
 //! each a 16-bit WAV source and two 16-bit stem WAVs, in the layout of
-//! `old_session`.  For each format, WAV, then FLAC, then MP3, it restores
-//! the 1-minute session and saves the mix as heard through the mix lane's
-//! Save menu, then the same for the 10-minute session.  Each restore is a
-//! reload, so each save has a new page and new workers.
+//! `old_session`.  For each format, WAV, then FLAC, then M4A, then MP3, it
+//! restores the 1-minute session and saves the mix as heard through the mix
+//! lane's Save menu, then the same for the 10-minute session.  Each restore
+//! is a reload, so each save has a new page and new workers.
 //!
 //! The measure (D9 of the M8 plan): Chrome runs with
 //! `--enable-precise-memory-info` and `--js-flags=--expose-gc`, so
@@ -27,13 +27,15 @@
 //! worker's WebAssembly memory before and after, and the file's size.
 //!
 //! Checks (D10): for each format, the 10-minute save's measure is at most
-//! [`PAGE_BOUND_MB`] above the 1-minute save's.  A FLAC encode of 10
-//! minutes grows the worker's memory by at most 1 MiB more than one of 1
+//! [`PAGE_BOUND_MB`] above the 1-minute save's.  A FLAC or an M4A encode of
+//! 10 minutes grows the worker's memory by at most 1 MiB more than one of 1
 //! minute.  An MP3 encode grows it by at most [`MP3_FACTOR`] times its MP3
 //! plus 1 MiB (the MP3 exception, TD-59).  The 1-minute WAV is the 16-bit
 //! mix of the planted stems, computed here.  The 1-minute FLAC decodes to
 //! the same samples, and the MP3 to the same frames within one MP3 frame
-//! and the encoder's delay.
+//! and the encoder's delay.  Each M4A, of 1 and of 10 minutes, decodes to
+//! the samples of the mix of its length, bit for bit (M3 of
+//! `docs/plans/active/m4a.md`).
 //!
 //! Checks of D11 (a save that does not wait for the UI frame): for each
 //! format, a 10-minute save grows the page's WebAssembly memory by at most
@@ -41,7 +43,7 @@
 //! takes fewer animation frames than a quarter of its blocks, with the
 //! animation frames throttled to about 4 a second.  Each save's longest
 //! slice, and its longest end of a read, which the page logs, are at most
-//! [`SLICE_LIMIT_MS`].  A seventh save saves the 10-minute mix as a WAV
+//! [`SLICE_LIMIT_MS`].  A ninth save saves the 10-minute mix as a WAV
 //! while the song plays, with animation frames of [`LONG_FRAME_MS`], as
 //! CI's paints in software.  It fails on an underrun, on frames of another
 //! time, and when the save takes more than [`PLAYING_SAVE_MS`].  The main
@@ -63,14 +65,20 @@ const SECONDS: [u32; 2] = [60, 600];
 /// `0.002 x (k + 1)` radians a frame.
 const STEMS: [&str; 2] = ["bass", "drums"];
 /// The formats, in the order of the saves, with their items' rows in the
-/// Save menu.
-const FORMATS: [(&str, usize); 3] = [("wav", 0), ("flac", 1), ("mp3", 3)];
+/// Save menu (the order of `Format::ALL`) and the kind of the worker's
+/// `memory: encode` line.  The page makes a WAV itself.
+const FORMATS: [(&str, usize, Option<&str>); 4] = [
+    ("wav", 0, None),
+    ("flac", 1, Some("flac")),
+    ("m4a", 2, Some("alac")),
+    ("mp3", 3, Some("mp3")),
+];
 /// D10: how much more the 10-minute save's JS heap measure may be than
 /// the 1-minute save's, in MB.
 pub(super) const PAGE_BOUND_MB: f64 = 4.0;
-/// D10: how much more a FLAC encode of 10 minutes may grow the worker's
-/// memory than one of 1 minute, in bytes.
-pub(super) const FLAC_BOUND_BYTES: f64 = ONE_MIB;
+/// D10: how much more a FLAC or an M4A encode of 10 minutes may grow the
+/// worker's memory than one of 1 minute, in bytes.
+pub(super) const LOSSLESS_BOUND_BYTES: f64 = ONE_MIB;
 /// D10: a worker's MP3 encode grows its memory by at most this many times
 /// its MP3, plus [`ONE_MIB`].
 pub(super) const MP3_FACTOR: f64 = 4.0;
@@ -87,8 +95,10 @@ pub(super) const WASM_BOUND_BYTES: f64 = ONE_MIB;
 /// writes no `save.log`, but each note of the run also goes to the step's
 /// output.  Since review round speed 4 of M8, a run takes about 3 minutes
 /// on the maintainer's Mac (174 to 176 s), in Chrome and with
-/// `--swiftshader`, and 3.3 minutes on CI (run 40894815433).
-pub(super) const STEP_LIMIT_S: u64 = 40 * 60;
+/// `--swiftshader`, and 3.3 minutes on CI (run 40894815433).  With the two
+/// M4A saves of M3 of `docs/plans/active/m4a.md`, a run took 2.8 minutes
+/// (168 s) on an Apple M2 Pro in Chrome on 2026-11-10.
+pub(super) const STEP_LIMIT_S: u64 = 50 * 60;
 /// The longest that a save of `seconds` of audio may take from its click to its
 /// offer, in seconds: 6 times or more the slowest save of its length on the
 /// maintainer's Mac with `--swiftshader`, after D11 of M8 (2026-10-29).  Those
@@ -119,15 +129,18 @@ pub(super) const START_WAIT_S: u64 = 60;
 /// 40788465048, the plant of the 10-minute session took 4.4 s (1.2 s to
 /// 5.6 s).  So 60 s leaves 13 times that.
 pub(super) const PLANT_WAIT_S: u64 = 60;
-/// The longest wait, in seconds, for the read of a 1-minute file.  In CI run
-/// 40788465048, the read of the WAV's SHA-256 took less than 0.1 s.  The
-/// FLAC and the MP3 (about 1.4 MB each) are read whole, as base64, which
-/// that run did not reach.  So 30 s leaves a wide margin.
+/// The longest wait, in seconds, for the read of a file ([`reads_back`]).
+/// In CI run 40788465048, the read of the WAV's SHA-256 took less than
+/// 0.1 s.  The FLAC and the MP3 (about 1.4 MB each) are read whole, as
+/// base64, which that run did not reach.  The 10-minute M4A (23.7 MB) is
+/// read whole too.  It took about 2 s on an Apple M2 Pro on 2026-11-10 (M3
+/// of `docs/plans/active/m4a.md`).  So 30 s leaves a wide margin.
 pub(super) const READ_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for the removal of the sessions and the
 /// save files.  In CI run 40788465048, the first clean-up and the plant of
 /// the 1-minute session took 0.4 s together.  The last clean-up removes
-/// about 330 MB, which that run did not reach.
+/// about 356 MB, which that run did not reach.  The two M4A saves of M3 of
+/// `docs/plans/active/m4a.md` add 26 MB of it.
 pub(super) const CLEAN_WAIT_S: u64 = 30;
 /// The longest wait, in seconds, for a short script: a session switch, the
 /// calibration, a heap reading, a reading of the progress or the list of
@@ -164,6 +177,9 @@ pub(super) const LONG_FRAME_MS: f64 = 125.0;
 pub(super) const PLAYING_SAVE_MS: u64 = 120_000;
 /// The saves of a run, and the first restores of its sessions.
 const SAVES: u64 = (FORMATS.len() * SECONDS.len()) as u64;
+/// The files that a run reads back ([`reads_back`]): the 1-minute file of
+/// each format, and the 10-minute M4A.
+const READS: u64 = FORMATS.len() as u64 + 1;
 const FIRST_RESTORES: u64 = SECONDS.len() as u64;
 /// The caps of all the saves of a run together.
 const fn caps_s() -> u64 {
@@ -194,7 +210,7 @@ pub(super) const WAITS_S: u64 = START_WAIT_S
     + FIRST_RESTORES * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S)
     + SAVES * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 5 * SCRIPT_WAIT_S + SAVE_IDLE_S)
     + caps_s()
-    + FORMATS.len() as u64 * READ_WAIT_S
+    + READS * READ_WAIT_S
     + 4 * SCRIPT_WAIT_S
     + RESTORE_WAIT_S
     + SAVE_IDLE_S
@@ -322,7 +338,7 @@ const MB: f64 = 1e6;
 /// The checks of D10 on the saves, each with what it checks.
 pub(super) fn save_checks(saves: &[Save]) -> Vec<(bool, String)> {
     let mut checks = Vec::new();
-    for (format, _) in FORMATS {
+    for (format, _, _) in FORMATS {
         let heap = |seconds| find(saves, format, seconds).and_then(|s| s.heap);
         let (short, long) = (heap(SECONDS[0]), heap(SECONDS[1]));
         let growth = short.zip(long).map(|(s, l)| (l - s) / MB);
@@ -354,8 +370,8 @@ pub(super) fn save_checks(saves: &[Save]) -> Vec<(bool, String)> {
             ));
         }
     }
-    // Only the WAV: a FLAC's or an MP3's offer waits for the worker's
-    // encode too, which takes about 28 s and 16 s for 10 minutes.
+    // Only the WAV: the offer of a FLAC, an M4A or an MP3 waits for the
+    // worker's encode too.
     let frames = find(saves, "wav", SECONDS[1]).and_then(|s| s.frames);
     checks.push((
         not_frame_bound(frames, SECONDS[1]),
@@ -389,14 +405,16 @@ pub(super) fn save_checks(saves: &[Save]) -> Vec<(bool, String)> {
         ));
     }
     let worker = |format, seconds| find(saves, format, seconds).and_then(|s| s.worker);
-    let (flac_short, flac_long) = (worker("flac", SECONDS[0]), worker("flac", SECONDS[1]));
-    let flac = flac_short.zip(flac_long).map(|((s, _), (l, _))| l - s);
-    checks.push((
-        flac.is_some_and(|g| g <= FLAC_BOUND_BYTES),
-        format!(
-            "flac: the worker's growth for 10 minutes is at most {FLAC_BOUND_BYTES} bytes above that for 1 minute ({flac_short:?}, {flac_long:?})"
-        ),
-    ));
+    for format in ["flac", "m4a"] {
+        let (short, long) = (worker(format, SECONDS[0]), worker(format, SECONDS[1]));
+        let growth = short.zip(long).map(|((s, _), (l, _))| l - s);
+        checks.push((
+            growth.is_some_and(|g| g <= LOSSLESS_BOUND_BYTES),
+            format!(
+                "{format}: the worker's growth for 10 minutes is at most {LOSSLESS_BOUND_BYTES} bytes above that for 1 minute ({short:?}, {long:?})"
+            ),
+        ));
+    }
     for seconds in SECONDS {
         let mp3 = worker("mp3", seconds);
         checks.push((
@@ -441,30 +459,38 @@ pub(super) fn planted_wav(seconds: u32) -> Vec<u8> {
     engine::wav::encode_pcm16(&left, &right, 44_100)
 }
 
-/// The 1-minute files that the run reads back for [`file_checks`].
+/// The files that the run reads back for [`file_checks`]: the 1-minute
+/// file of each format, and the 10-minute M4A.
 #[derive(Debug, Default, PartialEq)]
 pub(super) struct Files {
     /// The SHA-256 of the WAV, in hex.
     pub wav_sha256: Option<String>,
     pub flac: Option<Vec<u8>>,
     pub mp3: Option<Vec<u8>>,
+    /// The M4A of 1 minute.
+    pub m4a_short: Option<Vec<u8>>,
+    /// The M4A of 10 minutes.
+    pub m4a_long: Option<Vec<u8>>,
 }
 
 /// Whether the run reads back the file of a save of `format` and `seconds`,
 /// and if so, whether whole (`true`, to decode it) or only its SHA-256.
+/// It reads the 1-minute file of each format, and each M4A whole.
 pub(super) fn reads_back(format: &str, seconds: u32) -> Option<bool> {
-    (seconds == SECONDS[0]).then_some(format != "wav")
+    (seconds == SECONDS[0] || format == "m4a").then_some(format != "wav")
 }
 
 impl Files {
-    /// Keeps what [`LAST_FILE`] gave for the save of `format`.
-    pub(super) fn keep(&mut self, format: &str, file: &Value) {
+    /// Keeps what [`LAST_FILE`] gave for the save of `format` and `seconds`.
+    pub(super) fn keep(&mut self, format: &str, seconds: u32, file: &Value) {
         let bytes = file["base64"]
             .as_str()
             .and_then(|b| crate::webdriver::base64_decode(b).ok());
         match format {
             "wav" => self.wav_sha256 = file["sha256"].as_str().map(String::from),
             "flac" => self.flac = bytes,
+            "m4a" if seconds == SECONDS[0] => self.m4a_short = bytes,
+            "m4a" => self.m4a_long = bytes,
             _ => self.mp3 = bytes,
         }
     }
@@ -619,8 +645,16 @@ fn wait_for_offer(p: &mut Page, mark: usize, format: &str, seconds: u32) -> Resu
     }
 }
 
-/// The checks of the 1-minute files: the WAV is the planted mix, the FLAC
-/// decodes to its samples, and the MP3 to its frames within the tolerance.
+/// Whether `m4a` decodes to the planted mix of `seconds`, bit for bit.
+pub(super) fn m4a_decodes_to_the_mix(m4a: Option<Vec<u8>>, seconds: u32) -> bool {
+    m4a.and_then(|b| engine::decode_bytes(b, Some("m4a")).ok())
+        .is_some_and(|audio| decodes_to(&audio, &planted_mix(seconds)))
+}
+
+/// The checks of the files: the 1-minute WAV is the planted mix, the
+/// 1-minute FLAC decodes to its samples, and the 1-minute MP3 to its frames
+/// within the tolerance.  Each M4A, of 1 and of 10 minutes, decodes to the
+/// samples of the mix of its length, bit for bit.
 pub(super) fn file_checks(files: Files) -> Vec<(bool, String)> {
     let want = planted_wav(SECONDS[0]);
     let samples = planted_mix(SECONDS[0]);
@@ -633,6 +667,10 @@ pub(super) fn file_checks(files: Files) -> Vec<(bool, String)> {
         .mp3
         .and_then(|b| engine::decode_bytes(b, Some("mp3")).ok())
         .map(|audio| audio.frames());
+    let m4a_ok = [
+        m4a_decodes_to_the_mix(files.m4a_short, SECONDS[0]),
+        m4a_decodes_to_the_mix(files.m4a_long, SECONDS[1]),
+    ];
     let wav_sha256 = files.wav_sha256;
     vec![
         (
@@ -656,12 +694,26 @@ pub(super) fn file_checks(files: Files) -> Vec<(bool, String)> {
                 SECONDS[0]
             ),
         ),
+        (
+            m4a_ok[0],
+            format!(
+                "m4a, {} s: the file decodes to the WAV's samples, bit for bit",
+                SECONDS[0]
+            ),
+        ),
+        (
+            m4a_ok[1],
+            format!(
+                "m4a, {} s: the file decodes to the samples of the mix, bit for bit",
+                SECONDS[1]
+            ),
+        ),
     ]
 }
 
 /// The check of `saves/` at the end: only the offered files, two of each
 /// format and the WAV of the save during playback, and so no WAV of a
-/// FLAC or MP3 save.
+/// FLAC, M4A or MP3 save.
 pub(super) fn saves_folder_check(names: &Value) -> (bool, String) {
     let names: Vec<&str> = names
         .as_array()
@@ -669,8 +721,12 @@ pub(super) fn saves_folder_check(names: &Value) -> (bool, String) {
         .unwrap_or_default();
     let count = |ext: &str| names.iter().filter(|n| n.ends_with(ext)).count();
     (
-        names.len() == 7 && count(".wav") == 3 && count(".flac") == 2 && count(".mp3") == 2,
-        format!("saves/ holds the 7 offered files and nothing else: {names:?}"),
+        names.len() == 9
+            && count(".wav") == 3
+            && count(".flac") == 2
+            && count(".m4a") == 2
+            && count(".mp3") == 2,
+        format!("saves/ holds the 9 offered files and nothing else: {names:?}"),
     )
 }
 
@@ -943,9 +999,9 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     }
     let mut saves = Vec::new();
     let mut files = Files::default();
-    for (format, row) in FORMATS {
+    for (format, row, kind) in FORMATS {
         for seconds in SECONDS {
-            let save = save_once(&mut p, o, format, row, seconds)?;
+            let save = save_once(&mut p, o, (format, row, kind), seconds)?;
             p.note(&format!("save: {save:?}"));
             if let Some(whole) = reads_back(format, seconds) {
                 let file = in_page(&mut p, LAST_FILE, json!([whole]), READ_WAIT_S)?;
@@ -953,7 +1009,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
                     "save: {format}, {seconds} s: the file starts with {:?}, {} bytes",
                     file["head"], file["size"]
                 ));
-                files.keep(format, &file);
+                files.keep(format, seconds, &file);
             }
             saves.push(save);
         }
@@ -1108,8 +1164,14 @@ fn click_save(
 }
 
 /// Restores the session of `seconds`, saves its mix as `format` through
-/// the Save menu (its item at `row`), and measures the save.
-fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> Result<Save> {
+/// the Save menu (its item at `row`), and measures the save.  The worker's
+/// `memory: encode` line has the `kind` of the encode.
+fn save_once(
+    p: &mut Page,
+    o: &Opts,
+    (format, row, kind): (&str, usize, Option<&str>),
+    seconds: u32,
+) -> Result<Save> {
     restore(p, seconds)?;
     p.idle(3.0)?;
     let before = in_page(
@@ -1137,10 +1199,12 @@ fn save_once(p: &mut Page, o: &Opts, format: &str, row: usize, seconds: u32) -> 
     let heap = heap_rise(&end["max"], &before);
     let offered_line = offered;
     let offered = Some(offer_of(Some(&offered_line), format, seconds)?);
-    let worker = p.log[mark..]
-        .iter()
-        .find(|l| l.contains(&format!("memory: encode {format} ")))
-        .and_then(|l| encode_line(l));
+    let worker = kind.and_then(|kind| {
+        p.log[mark..]
+            .iter()
+            .find(|l| l.contains(&format!("memory: encode {kind} ")))
+            .and_then(|l| encode_line(l))
+    });
     // V8 settles before the next page.
     p.idle(1.0)?;
     Ok(Save {
@@ -1247,6 +1311,8 @@ mod tests {
             save("flac", 600, 1.3, Some((131_072.0, 5e7))),
             save("mp3", 60, 1.1, Some((5e6, 1.44e6))),
             save("mp3", 600, 1.2, Some((5e7, 1.44e7))),
+            save("m4a", 60, 1.2, Some((65_536.0, 7e6))),
+            save("m4a", 600, 1.3, Some((131_072.0, 7e7))),
         ]
     }
 
@@ -1274,6 +1340,20 @@ mod tests {
         let mut flac = good();
         flac[3].worker = Some((65_536.0 + 1_048_577.0, 5e7));
         assert_eq!(failing(&flac).len(), 1);
+        let mut m4a = good();
+        m4a[7].worker = Some((65_536.0 + 1_048_577.0, 7e7));
+        let failed = failing(&m4a);
+        assert_eq!(failed.len(), 1, "{failed:?}");
+        assert!(
+            failed[0].starts_with("m4a: the worker's growth"),
+            "{failed:?}"
+        );
+        let mut m4a_missing = good();
+        m4a_missing[6].worker = None;
+        assert_eq!(failing(&m4a_missing).len(), 1);
+        let mut m4a_offer = good();
+        m4a_offer[7].offered = Some(("lloyd - mix.mp3".into(), 1.0, String::new()));
+        assert_eq!(failing(&m4a_offer).len(), 1);
         let mut mp3 = good();
         mp3[5].worker = Some((4.0 * 1.44e7 + 1_048_577.0, 1.44e7));
         assert_eq!(failing(&mp3).len(), 1);
@@ -1514,7 +1594,7 @@ mod tests {
     #[test]
     fn the_waits_are_the_sum_of_each_wait() {
         let first_restores = 2 * (SCRIPT_WAIT_S + 2 * RESTORE_WAIT_S);
-        let saves = 6 * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 5 * SCRIPT_WAIT_S + SAVE_IDLE_S);
+        let saves = 8 * (SCRIPT_WAIT_S + RESTORE_WAIT_S + 5 * SCRIPT_WAIT_S + SAVE_IDLE_S);
         let playing = 4 * SCRIPT_WAIT_S + RESTORE_WAIT_S + SAVE_IDLE_S + 2 * PLAY_WAIT_S + 180;
         // The start, the heap calibration and the long-task calibration.
         let counted = START_WAIT_S
@@ -1523,12 +1603,12 @@ mod tests {
             + 2 * PLANT_WAIT_S
             + first_restores
             + saves
-            + 3 * (60 + 180)
-            + 3 * READ_WAIT_S
+            + 4 * (60 + 180)
+            + 5 * READ_WAIT_S
             + playing
             + SCRIPT_WAIT_S;
         assert_eq!(WAITS_S, counted);
-        assert_eq!(WAITS_S, 2_330);
+        assert_eq!(WAITS_S, 2_880);
         const { assert!(STEP_LIMIT_S - WAITS_S < 300, "the limit is near the waits") };
     }
 
@@ -1559,17 +1639,21 @@ mod tests {
     #[test]
     fn the_saves_folder_holds_only_the_offered_files() {
         let names = |n: &[&str]| json!(n);
-        let seven = [
-            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.mp3", "6-1.mp3", "7-1.wav",
+        let nine = [
+            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.m4a", "6-1.m4a", "7-1.mp3",
+            "8-1.mp3", "9-1.wav",
         ];
-        assert!(saves_folder_check(&names(&seven)).0);
+        assert!(saves_folder_check(&names(&nine)).0);
         assert!(
-            !saves_folder_check(&names(&seven[..6])).0,
+            !saves_folder_check(&names(&nine[..8])).0,
             "no WAV of the save during playback"
         );
-        let mut left = seven.to_vec();
+        let mut no_m4a = nine.to_vec();
+        no_m4a.retain(|n| *n != "6-1.m4a");
+        assert!(!saves_folder_check(&names(&no_m4a)).0, "one M4A of two");
+        let mut left = nine.to_vec();
         left.push("5-1.wav");
-        assert!(!saves_folder_check(&names(&left)).0, "a WAV of an MP3 save");
+        assert!(!saves_folder_check(&names(&left)).0, "a WAV of an M4A save");
         assert!(!saves_folder_check(&Value::Null).0);
     }
 
@@ -1578,7 +1662,8 @@ mod tests {
     #[test]
     fn an_extra_file_in_saves_fails_the_check() {
         let names = json!([
-            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.mp3", "6-1.mp3", "7-1.wav", "x.tmp"
+            "1-1.wav", "2-1.wav", "3-1.flac", "4-1.flac", "5-1.m4a", "6-1.m4a", "7-1.mp3",
+            "8-1.mp3", "9-1.wav", "x.tmp"
         ]);
         assert!(!saves_folder_check(&names).0);
     }
@@ -1776,20 +1861,66 @@ mod tests {
     }
 
     #[test]
-    fn the_run_reads_back_the_1_minute_files() {
+    fn the_run_reads_back_the_1_minute_files_and_each_m4a() {
         assert_eq!(reads_back("wav", 60), Some(false));
         assert_eq!(reads_back("flac", 60), Some(true));
+        assert_eq!(reads_back("m4a", 60), Some(true));
         assert_eq!(reads_back("mp3", 60), Some(true));
         assert_eq!(reads_back("wav", 600), None);
+        assert_eq!(reads_back("flac", 600), None);
+        assert_eq!(reads_back("m4a", 600), Some(true));
+        assert_eq!(reads_back("mp3", 600), None);
+        let reads = FORMATS
+            .iter()
+            .flat_map(|(format, _, _)| SECONDS.map(|s| reads_back(format, s)))
+            .filter(Option::is_some)
+            .count();
+        assert_eq!(reads as u64, READS, "WAITS_S counts each read");
         let mut files = Files::default();
         let file = json!({"sha256": "abc", "base64": "AQI="});
-        files.keep("wav", &file);
-        files.keep("flac", &file);
+        files.keep("wav", 60, &file);
+        files.keep("flac", 60, &file);
         assert_eq!(files.wav_sha256.as_deref(), Some("abc"));
         assert_eq!(files.flac.as_deref(), Some(&[1u8, 2][..]));
         assert_eq!(files.mp3, None, "the FLAC is kept as the FLAC");
-        files.keep("mp3", &json!({"base64": "Aw=="}));
+        files.keep("mp3", 60, &json!({"base64": "Aw=="}));
         assert_eq!(files.mp3.as_deref(), Some(&[3u8][..]));
+        files.keep("m4a", 60, &json!({"base64": "BA=="}));
+        files.keep("m4a", 600, &json!({"base64": "BQ=="}));
+        assert_eq!(files.m4a_short.as_deref(), Some(&[4u8][..]));
+        assert_eq!(files.m4a_long.as_deref(), Some(&[5u8][..]));
+        assert_eq!(
+            files.mp3.as_deref(),
+            Some(&[3u8][..]),
+            "an M4A is kept as an M4A"
+        );
+    }
+
+    /// An M4A decodes to the planted mix of its length, bit for bit, or
+    /// fails.
+    #[test]
+    fn an_m4a_check_decodes_to_the_planted_mix() {
+        let seconds = 2;
+        let mix = planted_mix(seconds);
+        let m4a = |samples: &[i16]| {
+            m4a::alac_file(samples, 44_100, None, m4a::Order::FastStart).expect("an M4A")
+        };
+        assert!(m4a_decodes_to_the_mix(Some(m4a(&mix)), seconds));
+        assert!(!m4a_decodes_to_the_mix(None, seconds), "no file");
+        assert!(
+            !m4a_decodes_to_the_mix(Some(m4a(&mix[2..])), seconds),
+            "a frame short"
+        );
+        let mut changed = mix.clone();
+        changed[1001] += 1;
+        assert!(
+            !m4a_decodes_to_the_mix(Some(m4a(&changed)), seconds),
+            "one sample changed"
+        );
+        assert!(
+            !m4a_decodes_to_the_mix(Some(vec![0; 64]), seconds),
+            "not an M4A"
+        );
     }
 
     fn audio(samples: &[i16]) -> engine::decode::Audio {
@@ -1878,17 +2009,22 @@ mod tests {
             out
         };
         let short = super::super::flac_16(&left[1..], &right[1..], 44_100).expect("a FLAC");
+        let m4a = m4a::alac_file(&samples, 44_100, None, m4a::Order::FastStart).expect("an M4A");
         let wav = sha256_hex(&planted_wav(SECONDS[0]));
         let oks = |files: Files| -> Vec<bool> {
             file_checks(files).into_iter().map(|(ok, _)| ok).collect()
         };
+        // The 10-minute M4A of a run is too slow to make here:
+        // `an_m4a_check_decodes_to_the_planted_mix` passes that check.
         assert_eq!(
             oks(Files {
                 wav_sha256: Some(wav),
                 flac: Some(flac),
                 mp3: Some(mp3(left.len())),
+                m4a_short: Some(m4a.clone()),
+                m4a_long: None,
             }),
-            [true, true, true]
+            [true, true, true, true, false]
         );
         let short_mp3 = file_checks(Files {
             mp3: Some(mp3(50 * 44_100)),
@@ -1905,8 +2041,10 @@ mod tests {
                 wav_sha256: Some("0".repeat(64)),
                 flac: Some(short),
                 mp3: None,
+                m4a_short: None,
+                m4a_long: Some(m4a),
             }),
-            [false, false, false]
+            [false, false, false, false, false]
         );
     }
 
@@ -1975,7 +2113,7 @@ mod tests {
             STALL_S < save_cap_s(600),
             "a stall ends the long save first"
         );
-        assert_eq!(caps_s(), 3 * (60 + 180));
+        assert_eq!(caps_s(), 4 * (60 + 180));
     }
 
     #[test]

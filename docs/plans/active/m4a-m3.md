@@ -305,7 +305,14 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
   * `an_m4a_encode_error_names_m4a_encoding`, with the old arm: the status line was "Worker request failed: ...", not "M4A encoding failed: ...".
   * Then `web-test --browser chrome` passed: 189 `app` lib tests, 88 `stem-worker` tests and 30 `stem-protocol` tests.
   * `e2e save --browser chrome` passed in 2 minutes 24 s, with the MP3 item at row 3 of the menu.
-* [ ] Step 5: `xtask e2e save` saves M4A.
+* [x] Step 5: `xtask e2e save` saves M4A.  2026-11-10: `FORMATS` has the worker's kind, `LOSSLESS_BOUND_BYTES` bounds FLAC and M4A, and `Files` keeps both M4A files.  `READS` counts 5 reads, `WAITS_S` is 2,880 s, and `STEP_LIMIT_S` and the CI step are 50 minutes.  The `browser-tests` job is 75 minutes.  First failures, each with a stub of the old rule:
+  * `the_saves_folder_holds_only_the_offered_files`: the check of 7 files refused the 9 files.
+  * `the_run_reads_back_the_1_minute_files_and_each_m4a`: the 10-minute M4A gave `None`, not `Some(true)`.
+  * `the_waits_are_the_sum_of_each_wait`: with `FORMATS.len()` reads, `WAITS_S` was 2,850, not 2,880.
+  * `the_save_checks_pass_a_flat_run_and_fail_growth`: with the worker check of FLAC alone, the M4A growth failed no check.
+  * `an_m4a_check_decodes_to_the_planted_mix` and `the_file_checks_pass_the_planted_files_and_fail_wrong_ones`: an M4A check that always passes passed no file.
+  * `the_ci_step_limit_is_the_waits_limit` and `the_caps_leave_room_for_the_slowest_save`: 40 minutes, not 50, and caps of 720 s, not 960 s.
+  * `e2e save --browser chrome` passed in 2 minutes 48 s (168 s).  The M4A files were 2,296,677 bytes (1 minute) and 23,658,230 bytes (10 minutes).  The 10-minute WAV is 105,840,044 bytes, and the 10-minute FLAC 13,818,943 bytes.  Each M4A decoded to the planted mix, bit for bit.  The worker grew by 196,608 bytes in each M4A encode.  The page's JS heap measure was 2.12 MB and 3.95 MB, and its WebAssembly memory grew by 7.34 MB and 7.47 MB.  The longest slice was 1.1 ms.  The M4A saves took 0.56 s and 4.47 s, and the FLAC saves 1.45 s and 13.39 s.  So FLAC stays the slowest save, and `SLOWEST_SAVE_S` and the caps do not change.  The read of the 10-minute M4A took about 2 s, within `READ_WAIT_S`.
 * [ ] Step 6: the numbers and the close.
 * [ ] Review rounds.
 
@@ -318,6 +325,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, plan review round 1: two more saves push `WAITS_S` of `e2e save` past its limit of 40 minutes, which a compile-time assert checks.  So Step 5 raises the limits of the step and of the CI job.
 * 2026-11-10, implementer: the wasm bundle at `2193806` (the same code as `6983ca9`), from `trunk build --release`: `app_bg.wasm` 6,406,239 bytes, `decode-worker_bg.wasm` 1,381,067 bytes, `stem-worker_bg.wasm` 1,250,092 bytes.
 * 2026-11-10, implementer: the first `check --tier commit` of Step 4 failed in `an_aiff_decodes_through_a_fifo` of `engine`, on "the write to the FIFO".  No step of M3 changes `engine`.  The test passed 6 times alone, and the next tier run passed.  It looks like a race between the writer thread and the end of the read, under load.
+* 2026-11-10, implementer: the 10-minute M4A of `e2e save` is 23.7 MB, 22% of its WAV and 1.7 times its FLAC.  So ALAC gives a larger file than FLAC for these slow sines.
 
 ## Decision log
 
@@ -340,6 +348,9 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, agent (implementer): `end_stored_save` picks the encode with one `match` on the format, whose `Wav` arm offers the WAV and returns.  Reason: no arm can send a format to the wrong encode, and no arm is unreachable.
 * 2026-11-10, agent (implementer): TD-53 keeps the "FLAC encoding" and "MP3 encoding" labels as untested, and names the test of "M4A encoding".  Reason: Step 4 adds that test, so the M4A label is not a gap.
 
+* 2026-11-10, agent (implementer): `READS` is a constant, `FORMATS.len() + 1`, and a unit test counts `reads_back` over the formats and lengths against it.  Reason: `reads_back` compares text, so a `const fn` cannot call it.
+* 2026-11-10, agent (implementer): the unit test of `file_checks` gives no 10-minute M4A, so that check fails there.  `an_m4a_check_decodes_to_the_planted_mix` passes the check of the M4A on a mix of 2 s.  Reason: the debug build of `m4a` takes too long for an ALAC of 10 minutes.
+* 2026-11-10, agent (implementer): the `browser-tests` job comment gives "about 5 to 10 minutes to spare".  Reason: the steps before `e2e save` took about 15.3 minutes before M3, and M3 adds ALAC tests to `web-test`.
 ## Outcomes and retrospective
 
 Not started.

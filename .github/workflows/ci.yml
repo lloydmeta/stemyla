@@ -172,13 +172,15 @@ jobs:
     # Run 40894815433 (2026-10-29) took 18.6 minutes: `web-test` 9.6, the
     # other scenarios 4.0 and `e2e save` 3.3, after the setup.  `web-test`
     # took 7.8 minutes in run 40871041420, so it varies by about 2.  The
-    # limit is the steps before `e2e save` and its own limit of 40, with
-    # about 5 minutes to spare.  So a run of `e2e save` that waits in vain
+    # steps before `e2e save` took about 15.3 minutes before M3 of
+    # docs/plans/active/m4a.md, and its ALAC tests add to them.  The limit is
+    # those steps, the limit of `e2e save` of 50, and about 5 to 10 minutes
+    # to spare.  So a run of `e2e save` that waits in vain
     # ends on its own check.  Each test binary of `web-test` may take 10
     # minutes (xtask/src/web_test.rs), so a slow `web-test` uses the spare
     # minutes first.  A hung browser must not hold the runner for GitHub's 6 h
     # default.
-    timeout-minutes: 60
+    timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -216,12 +218,13 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e flac --browser chrome
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
         # It took 3.3 minutes in run 40894815433, with the save during
-        # playback of review round speed 4 of M8.  The limit is the longest
+        # playback of review round speed 4 of M8.  M3 of
+        # docs/plans/active/m4a.md adds two M4A saves.  The limit is the longest
         # that all the waits of a run can take
         # (`STEP_LIMIT_S` in xtask/src/e2e/save.rs, which a test keeps equal
         # to it).  A stopped step writes no save.log, but its output has
         # every note of the run.
-        timeout-minutes: 40
+        timeout-minutes: 50
       # Logs and screenshots of the scenarios, to see why one failed or
       # why the job ran out of time.
       - if: failure() || cancelled()

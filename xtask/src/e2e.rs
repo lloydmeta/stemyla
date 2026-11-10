@@ -28,9 +28,11 @@
 //!   case's file equals the arrays case's file, byte for byte, and the
 //!   worker removes the WAV.  Logs the times.
 //! * `save`: saves the mix of a stored song of 1 and of 10 minutes as WAV,
-//!   FLAC and MP3 through the Save menu.  The page's JS heap during a save
-//!   must not grow with the song, nor the worker's memory during a FLAC
-//!   encode, and an MP3 encode is bounded (M8, `e2e/save.rs`).
+//!   FLAC, M4A and MP3 through the Save menu.  The page's JS heap during a
+//!   save must not grow with the song, nor the worker's memory during a
+//!   FLAC or an M4A encode, and an MP3 encode is bounded.  Each M4A decodes
+//!   to the WAV's samples (M8, M3 of `docs/plans/active/m4a.md`,
+//!   `e2e/save.rs`).
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
 //!   (`--weights`, and `xtask roformer-selftest` output).
