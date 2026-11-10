@@ -158,7 +158,7 @@ Write the M4A box writer and a 16-bit stereo ALAC encoder, natively, with no bro
 Only if D1 takes the AAC save.  The stem worker encodes with WebCodecs `AudioEncoder` (`mp4a.40.2`, 256 kbps), and the `m4a` writer makes the M4A with M2's `esds` sample entry and an `elst` for the encoder delay.
 
 * The packet count of an AAC encode is not known exactly before the encode, because the encoder adds priming and flush packets.  So M4 reserves the head for an upper bound of packets and fills the rest with a `free` box, or writes `moov` last (`Order::MoovLast`).  M4 picks one and records it.  The first needs a change of `Layout`, which today wants exactly `packets()` sizes: M4 changes `m4a` with a test that fails first.
-* An AAC save also has the extension `m4a`.  So `e2e save` keys `FORMATS`, `Files`, `reads_back` and the worker check by the worker's kind, not by the extension.  Today `reads_back("m4a", …)` asks for a decode bit for bit, which an AAC save fails.
+* An AAC save also has the extension `m4a`.  So `e2e save` keys `FORMATS`, `Files`, `reads_back`, `saves_folder_check` and the worker check by the worker's kind, not by the extension.  Today `reads_back("m4a", …)` asks for a decode bit for bit, which an AAC save fails.
 * An AAC encode error gets its own label in the `Event::Error` arm of `app/src/lib.rs`.  Today its `_` arm gives "M4A encoding".
 * The menu shows "M4A (AAC 256 kbps)" only when `AudioEncoder.isConfigSupported` passes and a short test encode gives a packet.
 * The encode respects the encoder's queue (`encodeQueueSize`, `dequeue`), so its memory does not grow with the song.
@@ -300,6 +300,8 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-10, agent (M3 team leader): the Save menu is WAV, FLAC, M4A, MP3.  The `e2e save` step of CI has 50 minutes, and the `browser-tests` job 75, since the two M4A saves add their waits.  Detail: `plans/completed/m4a-m3.md`, Decision log.
 * 2026-11-10, orchestrator (intent review of M3, round 1): the crate `m4a` gives the head once, at the end, and `head_len()` before the encode.  The worker's `EncodeOut::reserve` makes the zeros in JS: in blocks of at most 64 KiB on the storage path, and as one JS part on the memory path.  So no head of zeros is in WebAssembly memory.  This changes the wording of D6 and of decision 0028 ("gives the head twice"), not its intent.  Decision 0028 stays as accepted.
 * 2026-11-10, orchestrator (intent review of M3, round 1): the M4 section keys `e2e save` by the worker's kind and gives the AAC error its own label, since an AAC save also has the extension `m4a`.
+* 2026-11-10, orchestrator (intent review of M3, round 2): decision 0028 gets an amendment for the sink of M3 (`c738fdd`).  Review round 4 ran on it and found 6 nits, reported and not fixed.  So `plans/completed/m4a-m3.md` keeps the numbers of 3 rounds, and the M3 Progress line holds those of 4 rounds.
+* 2026-11-10, orchestrator (intent review of M3, round 3, the last by decision 0024): 3 nits.  The M4 list names `saves_folder_check` too.  The two nits on the completed milestone plan are not fixed, as 4-4.
 
 ## Outcomes and retrospective
 
