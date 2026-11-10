@@ -566,6 +566,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
   * [x] 2026-11-10: review round 18 fixes, part 1: two tests of the hold (18-1, 18-2).
     * `held::tests::a_box_size_near_u64_max_ends_the_walk` has a second case: a size of `u64::MAX - 16` after the `ftyp` of 16 bytes puts the next box at `usize::MAX`.  With the read of that header as `at + 8`, the test panics with an overflow at `held.rs`, line 158 (18-1).
     * `the_hold_of_a_stream_with_moov_last_keeps_its_layout` now has tags of `MOST_TAG + 1` bytes in all, not `MOST_TAG + 5`.  So a `MOST_TAG` of 1 to 4 bytes too many now fails the test; with 4 too many, it gives "no known format at the start of the file" (18-2).
+  * [x] 2026-11-10: review round 19 found nothing, and it is the last round (decision 0024).  The mutants run found no mutant in the diff, which changed only tests.  The reviewer and the memory reviewer made the mutants of round 18 again, and the new tests killed each one.
 
 ## Surprises and discoveries
 
@@ -689,4 +690,53 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
 
 ## Outcomes and retrospective
 
-Not started.
+Done on 2026-11-10.
+
+What M2 achieved:
+
+* The app opens an M4A (ALAC or AAC-LC), an audio-only `.mp4`, a raw `.aac` (ADTS), an AIFF and an AIFC (PCM or `ima4`), as a song or as a stem, natively and in the browser.
+* The decode trims the AAC encoder delay and padding, from `elst` or from `iTunSMPB`.  The local check with the maintainer's real file gives 13,413,120 frames, as `afinfo` does, at a lag of 0 against Apple's decode.
+* The decode hides the tags and the art of each format from Symphonia (`engine::hidden`).  It refuses a file for its tags only past a memory bound (MEM-4).
+* A file opens behind junk bytes or behind leading ID3v2 tags, with `moov` first or last.
+* The view mends what Symphonia 0.6.1 refuses in a valid file:
+  * an `mvhd` timescale of 0;
+  * a `moov` of size 0;
+  * a last `mdat` of size 0;
+  * a large first `ftyp`.
+* A file with video, a protected file, an HE-AAC file and an AAC file of more than 2 channels each get a clear text.
+* IMA and Microsoft ADPCM open, with more than 2 channels (`engine::adpcm`).  A Microsoft ADPCM block whose step passes its bound gets a clear text.
+* A source that cannot seek has its own readers: `aiff_stream`, `tag_stream`, `mp4_stream`, `adts_split` and `held`.  Only a native `decode_path` of a FIFO is such a source.  Each source of the app can seek.
+* Wasm at 937d20e: `app_bg.wasm` 6,404,359 B (5,836,422 B before M2) and `decode-worker_bg.wasm` 1,382,030 B (809,845 B before).  `stem-worker_bg.wasm` did not change (1,250,988 B).
+
+The review, in numbers: 19 rounds, 189 agents, 12,410,055 tokens, 559.4 wall minutes, 4 interventions (all in round 2).  The log has 367 findings: 199 confirmed, 12 pre-existing, 53 refuted and 103 nits that got no validator.  13 of the found findings are blockers.
+
+| Rounds | Agents | Tokens | Wall minutes | Findings | Found | Blockers found |
+| - | - | - | - | - | - | - |
+| 1 to 3 | 46 | 2,949,823 | 99.9 | 71 | 42 | 1 |
+| 4 to 11 | 91 | 6,206,467 | 268.0 | 188 | 112 | 8 |
+| 12 to 16 | 36 | 2,506,085 | 139.4 | 70 | 33 | 2 |
+| 17 to 19 | 16 | 747,680 | 52.1 | 38 | 24 | 2 |
+
+What did not go well:
+
+* The scope of the stream path grew in rounds 12 to 16.  Each round closed a gap that only a source that cannot seek reaches, and each closure was new code with new findings:
+  * round 12 added `aiff_stream` and `tag_stream`;
+  * round 13 added `mp4_stream` and the skip of ID3v2 tags;
+  * round 14 added the three forms of chunk offsets;
+  * round 15 added the mend of a last `mdat` of size 0, and `StatedEnd`;
+  * round 16 added the hold of a stream with `moov` last (`held`).
+* Round 17 then found a panic and 19 missed mutants in `held`.  Rounds 12 to 18 cost 3,191,472 tokens and 186.7 wall minutes.  No source of the app reaches that path.  The scope rule of round 17 ended the loop: a round adds no new behaviour, and a gap that only a stream reaches goes to a TD.  Rounds 18 and 19 then found two test gaps, and then nothing.
+* The rule "if Symphonia can decode a type that you refuse, open it" (round 8) added `ima4`, ADPCM of more than 2 channels and the bound of a Microsoft ADPCM step.  Each one was new code in a late round, with its own findings in rounds 8 to 12.
+* 13 of the 19 mutants runs were partial, at their limit of time or with timeouts.  So a later round found the missed mutants of an earlier fix.
+* Tests at a size past a bound let mutants live: a tag of 100 bytes (17-4), and tags of `MOST_TAG + 5` bytes (18-2).
+* Many fixes made new doc nits in their own text, such as sentences of more than 25 words.
+* A Chrome update to 157 stopped the browser checks once, because the local chromedriver was 155.
+
+What to do differently:
+
+* At the start of a milestone, name the sources that the app reaches.  Send a gap of any other source to a TD from round 1, unless it puts memory at risk or makes a panic.
+* Before a late round opens a new format or a new reader, ask whether the plan promised it.
+* Test each bound at the bound and one past it.  Test each parse of a size from the file at `u64::MAX`, with checked arithmetic from the first commit.
+* Read each new Progress line and TD for sentences of more than 25 words before the commit.
+
+Debt: TD-80, TD-86 and TD-90 stay open.  TD-81 to TD-85 and TD-87 to TD-89 are closed.
