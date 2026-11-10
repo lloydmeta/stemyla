@@ -563,6 +563,9 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * Now `media_before_moov` adds each offset with `checked_add`, and ends the walk with `false` when it overflows.
     * `held::tests::a_moof_before_moov_is_media` kills the mutant that drops the `moof` arm.  The 2 MiB tags in both forms of `an_m4a_stream_with_moov_last_is_held_and_opens` kill the mutants of the header of the tags of zeros.
     * `the_hold_of_a_stream_with_moov_last_keeps_its_layout` holds the inputs of the validator: two tags of `MOST_TAG + 5` bytes in all, a file of exactly the limit, a `free` box of 64 bits before `mdat`, and a last `moov` of size 0.  It kills the mutants of the split, of `MOST_TAG`, of the bound, of the 64-bit size, of `byte_len`, and of the header offset of the second tag.  The mutant `/` to `%` of the split grows memory with no end, and a guard of 2 GB stops it.
+  * [x] 2026-11-10: review round 18 fixes, part 1: two tests of the hold (18-1, 18-2).
+    * `held::tests::a_box_size_near_u64_max_ends_the_walk` has a second case: a size of `u64::MAX - 16` after the `ftyp` of 16 bytes puts the next box at `usize::MAX`.  With the read of that header as `at + 8`, the test panics with an overflow at `held.rs`, line 158 (18-1).
+    * `the_hold_of_a_stream_with_moov_last_keeps_its_layout` now has tags of `MOST_TAG + 1` bytes in all, not `MOST_TAG + 5`.  So a `MOST_TAG` of 1 to 4 bytes too many now fails the test; with 4 too many, it gives "no known format at the start of the file" (18-2).
 
 ## Surprises and discoveries
 

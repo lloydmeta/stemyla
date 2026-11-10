@@ -192,6 +192,11 @@ mod tests {
         let ftyp = bx(b"ftyp", &[b"M4A ", &[0; 4]]);
         let head = [&ftyp[..], &[0, 0, 0, 1], b"free", &[0xFF; 8], &[0; 64]].concat();
         assert!(!media_before_moov(&head, 0));
+        // Finding 18-1 of review round 18: a size that puts the next box at
+        // `usize::MAX`, where the read of its header must not overflow.
+        let to_max = (u64::MAX - 16).to_be_bytes();
+        let head = [&ftyp[..], &[0, 0, 0, 1], b"free", &to_max, &[0; 64]].concat();
+        assert!(!media_before_moov(&head, 0));
     }
 
     /// Finding 17-3 of review round 17: a `moof` before any `moov` is media,

@@ -6336,7 +6336,7 @@ mod tests {
     }
 
     /// Findings 17-10, 17-14 and 17-30 of review round 17: the hold of a
-    /// stream with `moov` last.  Two leading tags of `MOST_TAG + 5` bytes in
+    /// stream with `moov` last.  Two leading tags of `MOST_TAG + 1` bytes in
     /// all show as two tags of zeros; a file of exactly the limit is held; a
     /// box of a size of 64 bits before `mdat` is stepped over; and a last
     /// `moov` of size 0 gets its size from the length of the hold.  Each
@@ -6353,7 +6353,7 @@ mod tests {
             [&[b'I', b'D', b'3', 4, 0, 0][..], &synchsafe].concat()
         };
         let most = 10 + 0x0FFF_FFFF_u64;
-        let (first, second) = (most - 10, 15);
+        let (first, second) = (most - 10, 11);
         let tags = Cursor::new(id3(first))
             .chain(std::io::repeat(0).take(first - 10))
             .chain(Cursor::new(id3(second)))
