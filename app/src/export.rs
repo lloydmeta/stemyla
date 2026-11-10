@@ -437,16 +437,20 @@ pub fn time_left(ms: f64) -> impl FnMut() -> bool {
 pub enum Format {
     Wav,
     Flac,
+    /// Apple Lossless (ALAC) in an M4A, which Logic Pro and GarageBand take.
+    M4a,
     Mp3,
 }
 
 impl Format {
-    pub const ALL: [Format; 3] = [Format::Wav, Format::Flac, Format::Mp3];
+    /// The items of the Save menu, in order: the lossless formats first.
+    pub const ALL: [Format; 4] = [Format::Wav, Format::Flac, Format::M4a, Format::Mp3];
 
     pub fn extension(self) -> &'static str {
         match self {
             Format::Wav => "wav",
             Format::Flac => "flac",
+            Format::M4a => "m4a",
             Format::Mp3 => "mp3",
         }
     }
@@ -456,6 +460,7 @@ impl Format {
         match self {
             Format::Wav => "WAV (16-bit, lossless)",
             Format::Flac => "FLAC (16-bit, lossless)",
+            Format::M4a => "M4A (16-bit Apple Lossless)",
             Format::Mp3 => "MP3 (192 kbps)",
         }
     }
@@ -556,6 +561,7 @@ mod web {
     pub enum JsSink {
         Wav(JsWav),
         Flac(JsChannels),
+        M4a(JsChannels),
         Mp3(JsChannels),
     }
 
@@ -565,6 +571,7 @@ mod web {
             match format {
                 Format::Wav => JsSink::Wav(JsWav::new(frames, sample_rate)),
                 Format::Flac => JsSink::Flac(JsChannels::new(frames)),
+                Format::M4a => JsSink::M4a(JsChannels::new(frames)),
                 Format::Mp3 => JsSink::Mp3(JsChannels::new(frames)),
             }
         }
@@ -575,7 +582,7 @@ mod web {
         fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
             match self {
                 JsSink::Wav(s) => s.write(at, left, right),
-                JsSink::Flac(s) | JsSink::Mp3(s) => s.write(at, left, right),
+                JsSink::Flac(s) | JsSink::M4a(s) | JsSink::Mp3(s) => s.write(at, left, right),
             }
         }
     }
@@ -1137,9 +1144,20 @@ mod tests {
     fn only_wav_is_made_without_the_worker() {
         assert!(!Format::Wav.needs_worker());
         assert!(Format::Flac.needs_worker());
+        assert!(Format::M4a.needs_worker());
         assert!(Format::Mp3.needs_worker());
         let extensions: Vec<&str> = Format::ALL.iter().map(|f| f.extension()).collect();
-        assert_eq!(extensions, ["wav", "flac", "mp3"]);
+        assert_eq!(extensions, ["wav", "flac", "m4a", "mp3"]);
+        let labels: Vec<&str> = Format::ALL.iter().map(|f| f.label()).collect();
+        assert_eq!(
+            labels,
+            [
+                "WAV (16-bit, lossless)",
+                "FLAC (16-bit, lossless)",
+                "M4A (16-bit Apple Lossless)",
+                "MP3 (192 kbps)",
+            ]
+        );
     }
 
     /// The mixes of `song`, for a follower's new jobs.
@@ -1709,7 +1727,7 @@ mod web_tests {
             let grew = crate::separator::page_wasm_mb() - before;
             let bytes = match sink {
                 JsSink::Wav(wav) => wav.into_bytes().length() as usize,
-                JsSink::Flac(c) | JsSink::Mp3(c) => 4 * c.left.length() as usize,
+                JsSink::Flac(c) | JsSink::M4a(c) | JsSink::Mp3(c) => 4 * c.left.length() as usize,
             };
             assert!(
                 bytes >= 4 * song.frames,

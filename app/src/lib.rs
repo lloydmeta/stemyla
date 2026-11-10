@@ -547,6 +547,7 @@ fn save_type(format: export::Format) -> &'static str {
     match format {
         export::Format::Wav => "audio/wav",
         export::Format::Flac => "audio/flac",
+        export::Format::M4a => "audio/mp4",
         export::Format::Mp3 => "audio/mpeg",
     }
 }
@@ -4350,13 +4351,15 @@ impl StemApp {
                             self.separating = None;
                             "Separation"
                         }
-                        stem_protocol::kind::MP3 | stem_protocol::kind::FLAC => {
+                        stem_protocol::kind::MP3
+                        | stem_protocol::kind::FLAC
+                        | stem_protocol::kind::ALAC => {
                             // The failed file's note never gets its reply.
                             self.save_notes.clear();
-                            if of == stem_protocol::kind::MP3 {
-                                "MP3 encoding"
-                            } else {
-                                "FLAC encoding"
+                            match of.as_str() {
+                                stem_protocol::kind::MP3 => "MP3 encoding",
+                                stem_protocol::kind::FLAC => "FLAC encoding",
+                                _ => "M4A encoding",
                             }
                         }
                         stem_protocol::kind::SELFTEST => "Self-test",
@@ -4534,8 +4537,8 @@ impl StemApp {
         chosen
     }
 
-    /// Whether the worker can encode a FLAC or an MP3 now: it runs, and it
-    /// has not stopped.
+    /// Whether the worker can encode a FLAC, an M4A or an MP3 now: it runs,
+    /// and it has not stopped.
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
     fn can_encode(&self) -> bool {
@@ -4755,11 +4758,16 @@ impl StemApp {
     #[cfg_attr(mutants, mutants::skip)]
     fn end_stored_save(&mut self, order: SaveOrder, wav: String, note: Option<String>) {
         let name = order.name.clone();
-        if order.format == export::Format::Wav {
-            offer_save_file(name.clone(), wav, order.format);
-            self.status = format!("Saved {name}.{}", note.unwrap_or_default());
-            return;
-        }
+        let encode: fn(&separator::Separator, &str, stem_protocol::Encode) = match order.format {
+            export::Format::Wav => {
+                offer_save_file(name.clone(), wav, order.format);
+                self.status = format!("Saved {name}.{}", note.unwrap_or_default());
+                return;
+            }
+            export::Format::Flac => separator::Separator::encode_flac,
+            export::Format::M4a => separator::Separator::encode_alac,
+            export::Format::Mp3 => separator::Separator::encode_mp3,
+        };
         let sep = self.separator.as_ref().filter(|s| s.stopped.is_none());
         let Some(sep) = sep else {
             wasm_bindgen_futures::spawn_local(async move {
@@ -4779,11 +4787,7 @@ impl StemApp {
             out: out.clone(),
             rate: order.what.rate,
         };
-        if order.format == export::Format::Flac {
-            sep.encode_flac(&name, source);
-        } else {
-            sep.encode_mp3(&name, source);
-        }
+        encode(sep, &name, source);
         self.status = format!("Encoding {name}…");
         self.posted_saves.insert(
             out,
@@ -4835,7 +4839,12 @@ impl StemApp {
                 self.save_notes.push(&name, note);
                 format!("Encoding {name}…{held}")
             }
-            (JsSink::Flac(_) | JsSink::Mp3(_), None) => {
+            (JsSink::M4a(c), Some(sep)) => {
+                sep.encode_alac(&name, c.into_encode(rate));
+                self.save_notes.push(&name, note);
+                format!("Encoding {name}…{held}")
+            }
+            (JsSink::Flac(_) | JsSink::M4a(_) | JsSink::Mp3(_), None) => {
                 format!("Could not save {name}: the encoding worker is not running.")
             }
         };

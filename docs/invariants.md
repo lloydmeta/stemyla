@@ -59,7 +59,7 @@ WebAssembly memory never shrinks, so a copy costs for the rest of the tab's life
 A typed array sent between the page and the worker goes in the message's transfer list, so it moves instead of being cloned, and the receiver does not copy it again without a reason.
 
 * Why: a structured clone of a stem doubles it until garbage collection, which Safari runs late.
-* Enforced by: `a_mix_is_transferred_not_copied`, `an_mp3_reply_reaches_the_page_as_sent`, `a_stored_mix_arrives_with_its_path_and_frames` (CI `browser-tests` job).  Since M4, `a_mix_is_transferred_not_copied` covers only the two arrays of the memory path.  On the storage path, no samples cross: `a_stored_mix_arrives_with_its_path_and_frames` checks an empty transfer list.  `a_stored_encode_asks_the_worker_with_paths_only` and `flac_and_mp3_saves_post_paths_then_offer_the_workers_file` (CI `browser-tests` job) check the same for a save's encode.  MEM-1's lint on `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec`, where the receiver copies.
+* Enforced by: `a_mix_is_transferred_not_copied`, `an_mp3_reply_reaches_the_page_as_sent`, `a_stored_mix_arrives_with_its_path_and_frames` (CI `browser-tests` job).  Since M4, `a_mix_is_transferred_not_copied` covers only the two arrays of the memory path.  On the storage path, no samples cross: `a_stored_mix_arrives_with_its_path_and_frames` checks an empty transfer list.  `a_stored_encode_asks_the_worker_with_paths_only` and `worker_saves_post_paths_then_offer_the_workers_file` (CI `browser-tests` job) check the same for a save's encode, of FLAC, M4A and MP3.  MEM-1's lint on `js_sys::Uint8Array::to_vec` and `js_sys::Float32Array::to_vec`, where the receiver copies.
 * Gaps: TD-26.
 
 ### MEM-3: GPU buffers are freed when dropped

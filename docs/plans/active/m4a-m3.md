@@ -298,7 +298,13 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * [x] Step 3: the memory of the encode.  2026-11-10: `an_alac_is_encoded_in_blocks` (memory path) and `a_stored_alac_holds_only_its_packet_table` (storage path).  From 10 s to 60 s, the packets grow by 538, from 108 to 646.  The peak grew by 2,152 bytes on each path, 4 bytes for each packet.  Stored, it went from 188,952 to 191,104 bytes.  In memory, it went from 172,479 to 174,631 bytes.  First failures:
   * a stub that also keeps each packet in a `Vec<u8>`: the peak grew by 9,490,792 bytes on each path, past the bound of 12 bytes for each packet.
   * a stub that makes the sizes with `Vec::new()`: the peak grew by 3,584 bytes stored and 5,376 bytes in memory, past the bound of 4 bytes for each packet (3,176 bytes).
-* [ ] Step 4: the page offers M4A.
+* [x] Step 4: the page offers M4A.  2026-11-10: `Format::M4a` in `Format::ALL` as `[Wav, Flac, M4a, Mp3]`, `encode_alac`, `save_type` `audio/mp4`, and the label "M4A encoding".  First failures:
+  * `only_wav_is_made_without_the_worker`, with `Format::M4a` out of `Format::ALL`: the extensions were `["wav", "flac", "mp3"]`, not `["wav", "flac", "m4a", "mp3"]`.
+  * `encode_alac_asks_the_worker_for_an_m4a_of_the_arrays`, with an `encode_alac` that posts `Request::Flac`: the kind was `flac`, not `alac`.
+  * `worker_saves_post_paths_then_offer_the_workers_file`, with the old `if ... else`: the M4A save posted `mp3`, not `alac`.
+  * `an_m4a_encode_error_names_m4a_encoding`, with the old arm: the status line was "Worker request failed: ...", not "M4A encoding failed: ...".
+  * Then `web-test --browser chrome` passed: 189 `app` lib tests, 88 `stem-worker` tests and 30 `stem-protocol` tests.
+  * `e2e save --browser chrome` passed in 2 minutes 24 s, with the MP3 item at row 3 of the menu.
 * [ ] Step 5: `xtask e2e save` saves M4A.
 * [ ] Step 6: the numbers and the close.
 * [ ] Review rounds.
@@ -311,6 +317,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, team leader: `origin/gh-pages` holds no `LICENSE*` file and no `THIRD-PARTY.md`.  So the published page gives no copy of a licence for any crate.  Step 2 adds a TD entry.
 * 2026-11-10, plan review round 1: two more saves push `WAITS_S` of `e2e save` past its limit of 40 minutes, which a compile-time assert checks.  So Step 5 raises the limits of the step and of the CI job.
 * 2026-11-10, implementer: the wasm bundle at `2193806` (the same code as `6983ca9`), from `trunk build --release`: `app_bg.wasm` 6,406,239 bytes, `decode-worker_bg.wasm` 1,381,067 bytes, `stem-worker_bg.wasm` 1,250,092 bytes.
+* 2026-11-10, implementer: the first `check --tier commit` of Step 4 failed in `an_aiff_decodes_through_a_fifo` of `engine`, on "the write to the FIFO".  No step of M3 changes `engine`.  The test passed 6 times alone, and the next tier run passed.  It looks like a race between the writer thread and the end of the read, under load.
 
 ## Decision log
 
@@ -329,6 +336,9 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, agent (implementer): `alac_into` calls `alac_packets`, which holds the encoder and the block buffers.  Reason: they are freed when it returns, before `head()` makes `moov` (Step 3, "Where the peak is").
 * 2026-11-10, agent (implementer): `an_alac_decodes_to_the_stem` encodes 10 s, not 30 s.  The lengths at each side of a packet are one test, `an_alac_of_each_length_is_the_reference_on_both_paths`.  The 65,536 Hz refusal runs on the memory path only.  Reason: the debug build encodes slowly, and the storage path takes the same `alac_into`.
 * 2026-11-10, agent (implementer): `errors_name_the_request_they_answer` sends `alac` at 96,000 Hz.  Reason: M4A refuses a rate above 65,535 Hz, so the request fails, as the MP3 one does.
+* 2026-11-10, agent (implementer): `flac_and_mp3_saves_post_paths_then_offer_the_workers_file` runs for M4A too, with the new name `worker_saves_post_paths_then_offer_the_workers_file`.  It asserts the kind of each request, so it is the test that the M4A save posts `Request::Alac`.  Reason: the loop already makes the stored save of each format, and MEM-2 names it.
+* 2026-11-10, agent (implementer): `end_stored_save` picks the encode with one `match` on the format, whose `Wav` arm offers the WAV and returns.  Reason: no arm can send a format to the wrong encode, and no arm is unreachable.
+* 2026-11-10, agent (implementer): TD-53 keeps the "FLAC encoding" and "MP3 encoding" labels as untested, and names the test of "M4A encoding".  Reason: Step 4 adds that test, so the M4A label is not a gap.
 
 ## Outcomes and retrospective
 

@@ -130,7 +130,7 @@ pub struct Separator {
     /// runs them in that order, and ends each with one `done`, `error` or
     /// `unstored`, so each reply belongs to the oldest one.
     separations: Rc<RefCell<VecDeque<Posted>>>,
-    /// Sent with every request but MP3 and FLAC encoding.
+    /// Sent with every request but MP3, FLAC and M4A encoding.
     settings: Settings,
     pub model_ready: bool,
     /// Whether browser storage holds a model file, usable or not.
@@ -515,6 +515,17 @@ impl Separator {
         post(&self.worker, &request, &Settings::default());
     }
 
+    /// Asks the worker to encode a stem or a mix as a 16-bit ALAC M4A; the
+    /// file comes back as [`Event::Alac`].  Arrays are transferred (MEM-2); a
+    /// stored WAV crosses as its path.
+    pub fn encode_alac(&self, name: &str, source: Encode) {
+        let request = Request::Alac {
+            name: Some(name.into()),
+            source,
+        };
+        post(&self.worker, &request, &Settings::default());
+    }
+
     /// Asks the worker to delete the model from browser storage and drop it.
     pub fn forget_model(&mut self) {
         if post(&self.worker, &Request::ForgetModel, &self.settings) {
@@ -696,6 +707,30 @@ export function spy_on_post(worker) {
                     },
             } => {
                 assert_eq!(name.as_deref(), Some("lloyd - bass.flac"));
+                assert_eq!(rate, Some(48_000));
+                assert_sent_as_they_are(&transfer, (&left, &right), (&l, &r));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_alac_asks_the_worker_for_an_m4a_of_the_arrays() {
+        let (request, transfer, left, right) = posted_encode(48_000, |sep, source| {
+            sep.encode_alac("lloyd - bass.m4a", source);
+        });
+        assert_eq!(request.kind(), "alac", "an alac request");
+        match request {
+            Request::Alac {
+                name,
+                source:
+                    Encode::Arrays {
+                        left: l,
+                        right: r,
+                        rate,
+                    },
+            } => {
+                assert_eq!(name.as_deref(), Some("lloyd - bass.m4a"));
                 assert_eq!(rate, Some(48_000));
                 assert_sent_as_they_are(&transfer, (&left, &right), (&l, &r));
             }

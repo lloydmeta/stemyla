@@ -64,7 +64,7 @@ const SECONDS: [u32; 2] = [60, 600];
 const STEMS: [&str; 2] = ["bass", "drums"];
 /// The formats, in the order of the saves, with their items' rows in the
 /// Save menu.
-const FORMATS: [(&str, usize); 3] = [("wav", 0), ("flac", 1), ("mp3", 2)];
+const FORMATS: [(&str, usize); 3] = [("wav", 0), ("flac", 1), ("mp3", 3)];
 /// D10: how much more the 10-minute save's JS heap measure may be than
 /// the 1-minute save's, in MB.
 pub(super) const PAGE_BOUND_MB: f64 = 4.0;

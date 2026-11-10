@@ -584,11 +584,12 @@ async fn a_wav_save_of_a_stored_song_offers_its_save_file() {
     );
 }
 
-/// D1, D4 and D5 of M8: a FLAC or MP3 save of a stored song posts a stored
-/// request, with nothing transferred, only after its WAV is complete.
-/// The worker's reply offers the worker's file, of the format's type.
+/// D1, D4 and D5 of M8: a FLAC, M4A or MP3 save of a stored song posts a
+/// stored request of its kind, with nothing transferred, only after its
+/// WAV is complete.  The worker's reply offers the worker's file, of the
+/// format's type.
 #[wasm_bindgen_test]
-async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
+async fn worker_saves_post_paths_then_offer_the_workers_file() {
     let id = "m8-offer-encoded";
     let frames = 10 * SECOND;
     let (shown, _) = stored_song(id, frames, 2).await;
@@ -596,14 +597,20 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
     let (mut app, worker) = page(id, shown, true);
     let worker = worker.expect("a worker");
     let mut outcomes = Vec::new();
-    for format in [export::Format::Flac, export::Format::Mp3] {
+    for format in [
+        export::Format::Flac,
+        export::Format::M4a,
+        export::Format::Mp3,
+    ] {
         app.start_save(Some(1), format);
         run_save(&mut app).await;
         let posted = requests(&worker);
         let encoding = app.status.clone();
         let (request, transfer) = posted.into_iter().next().expect("a request");
+        let kind = request.kind();
         let (name, wav, out, sent_frames) = match request {
             stem_protocol::Request::Flac { name, source, .. }
+            | stem_protocol::Request::Alac { name, source, .. }
             | stem_protocol::Request::Mp3 { name, source, .. } => match source {
                 stem_protocol::Encode::Stored {
                     wav, frames, out, ..
@@ -624,6 +631,10 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
                     name: name.clone(),
                     file,
                 },
+                export::Format::M4a => stem_protocol::Reply::Alac {
+                    name: name.clone(),
+                    file,
+                },
                 _ => stem_protocol::Reply::Mp3 {
                     name: name.clone(),
                     file,
@@ -634,6 +645,7 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
         let got = downloads(&sv_links().await);
         outcomes.push((
             format,
+            kind,
             name,
             transfer.length(),
             sent_frames,
@@ -647,8 +659,16 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
     app.load_demo();
     store::test_remove(store::SAVES).await;
     store::test_remove(&format!("sessions/{id}")).await;
-    for (format, name, transfer, sent_frames, wav_size, out, encoding, status, got) in outcomes {
+    for (format, kind, name, transfer, sent_frames, wav_size, out, encoding, status, got) in
+        outcomes
+    {
         let ext = format.extension();
+        let (want_kind, want_type) = match format {
+            export::Format::Flac => ("flac", "audio/flac"),
+            export::Format::M4a => ("alac", "audio/mp4"),
+            _ => ("mp3", "audio/mpeg"),
+        };
+        assert_eq!(kind, want_kind, "{ext}: the request of the format");
         assert_eq!(name, format!("lloyd - drums.{ext}"));
         assert_eq!(transfer, 0, "{ext}: no samples cross");
         assert_eq!(sent_frames, frames);
@@ -663,11 +683,6 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
         assert_eq!(got.len(), 1, "{ext}: one download");
         let (offered, blob) = &got[0];
         assert_eq!(offered, &name);
-        let want_type = if format == export::Format::Flac {
-            "audio/flac"
-        } else {
-            "audio/mpeg"
-        };
         assert_eq!(
             (blob.type_(), blob.size()),
             (want_type.to_string(), 7.0),
@@ -1003,8 +1018,8 @@ async fn a_failed_encode_waits_for_the_save_in_progress_and_not_for_a_new_song()
 
 /// D7 and D8 of M8: when the worker stops, the page removes the WAV and
 /// the output of each stored encode with no reply.  A stopped worker
-/// counts as no worker: the menu offers no FLAC or MP3, and a save in
-/// progress removes its WAV and posts nothing.
+/// counts as no worker: the menu offers no FLAC, M4A or MP3, and a save
+/// in progress removes its WAV and posts nothing.
 #[wasm_bindgen_test]
 async fn a_stopped_worker_leaves_no_save_files_and_takes_no_encode() {
     let id = "m8-stopped";
@@ -1360,4 +1375,27 @@ async fn two_save_failures_each_show_once() {
         let text = format!("Could not encode {name} in browser storage");
         assert_eq!(status.matches(&text).count(), 1, "{name}: {status}");
     }
+}
+
+/// M3 of `plans/active/m4a.md`: an `error` reply of an M4A encode names
+/// M4A encoding on the status line, as one of FLAC or MP3 names its own.
+#[wasm_bindgen_test]
+async fn an_m4a_encode_error_names_m4a_encoding() {
+    let id = "m3-alac-error";
+    let (shown, _) = stored_song(id, SECOND, 1).await;
+    let (mut app, _worker) = page(id, shown, true);
+    reply(
+        &mut app,
+        stem_protocol::Reply::Error {
+            of: stem_protocol::kind::ALAC.into(),
+            text: "ALAC encoder: the stem has no samples".into(),
+        },
+    );
+    let status = app.status.clone();
+    app.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(
+        status,
+        "M4A encoding failed: ALAC encoder: the stem has no samples"
+    );
 }
