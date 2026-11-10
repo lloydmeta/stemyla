@@ -1,9 +1,10 @@
 //! The boxes of an M4A file: `ftyp`, `moov` and the `mdat` header.
 //!
 //! The caller writes `head_len` zeros, then each packet, then the final
-//! head at position 0.  This is the order of `FlacOut::replace_header` in
-//! `worker/src/web/encode.rs`.  With `Order::MoovLast`, the caller writes
-//! the tail (the `moov`) after the last packet.
+//! head at position 0.  This is the order of `EncodeOut::reserve` and
+//! `EncodeOut::replace_head` in `worker/src/web/encode.rs`.  With
+//! `Order::MoovLast`, the caller writes the tail (the `moov`) after the
+//! last packet.
 
 use core::fmt;
 

@@ -19,9 +19,10 @@
 //! failed.  A malformed request, or a file outside `saves/`, gives `error`,
 //! and the worker removes nothing.
 //!
-//! A stored FLAC writes its stream header first, with the frame count still
-//! unknown, then each frame as it is encoded, then the header again.  It
-//! holds no list of encoded parts.
+//! A FLAC encode first reserves the length of its stream header with zeros,
+//! since the frame count is not known yet.  It then puts each frame as it
+//! is encoded, then the final header in place of the reserve.  It holds no
+//! list of encoded parts.
 //!
 //! The MP3 exception (D4 of the M8 plan, TD-59).  `rusty_mp3` 1.0.0 keeps
 //! every encoded frame until `finish()` at 256 kbps or less on MPEG-1 (its
@@ -222,7 +223,7 @@ impl Input {
 
 /// The output file of a stored encode, written through one sync access
 /// handle.
-struct OutFile {
+pub(super) struct OutFile {
     handle: JsValue,
     path: String,
     /// Bytes written from the start.
@@ -231,7 +232,7 @@ struct OutFile {
 
 impl OutFile {
     #[cfg_attr(mutants, mutants::skip)]
-    async fn open(path: &str) -> Result<Self, String> {
+    pub(super) async fn open(path: &str) -> Result<Self, String> {
         let handle = out_open(path)
             .await
             .map_err(|e| format!("the output file could not be opened: {}", js_text(&e)))?;
@@ -250,18 +251,31 @@ impl OutFile {
         Ok(())
     }
 
+    /// Writes the JS array `whole` after the bytes so far.  The caller
+    /// makes `whole` as a new array, never a view (MEM-5).
+    #[cfg_attr(mutants, mutants::skip)]
+    async fn append_array(&mut self, whole: &Uint8Array) -> Result<(), String> {
+        self.write_array(whole, self.at).await?;
+        self.at += f64::from(whole.length());
+        Ok(())
+    }
+
     /// Writes `bytes` at `at`, as a new array of their own, never a view
     /// of WebAssembly memory (MEM-5).
     #[cfg_attr(mutants, mutants::skip)]
     async fn write_at(&self, bytes: &[u8], at: f64) -> Result<(), String> {
-        let whole = Uint8Array::from(bytes);
-        out_write(&self.handle, &whole, at)
+        self.write_array(&Uint8Array::from(bytes), at).await
+    }
+
+    #[cfg_attr(mutants, mutants::skip)]
+    async fn write_array(&self, whole: &Uint8Array, at: f64) -> Result<(), String> {
+        out_write(&self.handle, whole, at)
             .await
             .map_err(|e| format!("the output file could not be written: {}", js_text(&e)))
     }
 
     #[cfg_attr(mutants, mutants::skip)]
-    async fn close(&self) -> Result<(), String> {
+    pub(super) async fn close(&self) -> Result<(), String> {
         out_close(&self.handle)
             .await
             .map_err(|e| format!("the output file could not be closed: {}", js_text(&e)))
@@ -275,17 +289,22 @@ impl OutFile {
     }
 }
 
-/// Where a FLAC encode puts its stream header and frames.
-enum FlacOut {
+/// Bytes of each write of zeros that [`EncodeOut::reserve`] makes on the
+/// storage path.
+const RESERVE_BLOCK: usize = 64 * 1024;
+
+/// Where a FLAC or an ALAC encode puts its head and its frames or packets:
+/// the sink.
+pub(super) enum EncodeOut {
     /// Each part as a `Uint8Array` in a JS array, for one `Blob` at the
     /// end (the memory path).
     Parts(js_sys::Array),
     File(OutFile),
 }
 
-impl FlacOut {
+impl EncodeOut {
     #[cfg_attr(mutants, mutants::skip)]
-    async fn put(&mut self, bytes: &[u8]) -> Result<(), String> {
+    pub(super) async fn put(&mut self, bytes: &[u8]) -> Result<(), String> {
         match self {
             Self::Parts(parts) => {
                 parts.push(&Uint8Array::from(bytes));
@@ -295,9 +314,34 @@ impl FlacOut {
         }
     }
 
-    /// Puts the final stream header in place of the first one.
+    /// Puts `len` zero bytes, as one unit that [`Self::replace_head`]
+    /// replaces.  Call it first in an encode, before each `put`.  JS makes
+    /// the zeros, so WebAssembly memory never holds them.  On the storage
+    /// path, each write is a new array of at most [`RESERVE_BLOCK`] bytes
+    /// (MEM-5).
     #[cfg_attr(mutants, mutants::skip)]
-    async fn replace_header(&mut self, bytes: &[u8]) -> Result<(), String> {
+    pub(super) async fn reserve(&mut self, len: usize) -> Result<(), String> {
+        match self {
+            Self::Parts(parts) => {
+                parts.push(&Uint8Array::new_with_length(len as u32));
+                Ok(())
+            }
+            Self::File(file) => {
+                for start in (0..len).step_by(RESERVE_BLOCK) {
+                    let n = RESERVE_BLOCK.min(len - start);
+                    file.append_array(&Uint8Array::new_with_length(n as u32))
+                        .await?;
+                }
+                Ok(())
+            }
+        }
+    }
+
+    /// Puts the final head in place of the reserve: part 0 on the memory
+    /// path, the bytes from 0 on the storage path.  So the reserve must be
+    /// the first put of the encode, with the length of `bytes`.
+    #[cfg_attr(mutants, mutants::skip)]
+    pub(super) async fn replace_head(&mut self, bytes: &[u8]) -> Result<(), String> {
         match self {
             Self::Parts(parts) => {
                 parts.set(0, Uint8Array::from(bytes).into());
@@ -398,9 +442,9 @@ async fn stored(
     let written = match codec {
         Codec::Mp3 => mp3_into(&input, rate, &mut file).await,
         Codec::Flac => {
-            let mut sink = FlacOut::File(file);
+            let mut sink = EncodeOut::File(file);
             let written = flac_into(&input, rate, &mut sink).await;
-            let FlacOut::File(back) = sink else {
+            let EncodeOut::File(back) = sink else {
                 unreachable!("a file stays a file")
             };
             file = back;
@@ -478,9 +522,9 @@ async fn mp3_into(input: &Input, rate: u32, file: &mut OutFile) -> Result<(), St
 /// parts, which stay outside WebAssembly memory.
 #[cfg_attr(mutants, mutants::skip)]
 async fn flac_blob(input: &Input, rate: u32) -> Result<Blob, String> {
-    let mut out = FlacOut::Parts(js_sys::Array::new());
+    let mut out = EncodeOut::Parts(js_sys::Array::new());
     flac_into(input, rate, &mut out).await?;
-    let FlacOut::Parts(parts) = out else {
+    let EncodeOut::Parts(parts) = out else {
         unreachable!("parts stay parts")
     };
     let options = web_sys::BlobPropertyBag::new();
@@ -489,12 +533,13 @@ async fn flac_blob(input: &Input, rate: u32) -> Result<Blob, String> {
         .map_err(|e| format!("FLAC file: {e:?}"))
 }
 
-/// Encodes `input` as a 16-bit FLAC into `out`: the stream header, each
-/// frame as soon as it is encoded, then the final stream header in place
-/// of the first.  It reads one FLAC frame of `input` at a time, so
-/// WebAssembly memory never holds the samples or the file (MEM-1, MEM-4).
+/// Encodes `input` as a 16-bit FLAC into `out`: a reserve of the stream
+/// header's length, each frame as soon as it is encoded, then the final
+/// stream header in place of the reserve.  It reads one FLAC frame of
+/// `input` at a time, so WebAssembly memory never holds the samples or the
+/// file (MEM-1, MEM-4).
 #[cfg_attr(mutants, mutants::skip)]
-async fn flac_into(input: &Input, rate: u32, out: &mut FlacOut) -> Result<(), String> {
+async fn flac_into(input: &Input, rate: u32, out: &mut EncodeOut) -> Result<(), String> {
     let fail = |e: &dyn std::fmt::Debug| format!("FLAC encoder: {e:?}");
     let frames = input.frames();
     if frames == 0 {
@@ -505,12 +550,13 @@ async fn flac_into(input: &Input, rate: u32, out: &mut FlacOut) -> Result<(), St
         .map_err(|e| fail(&e))?;
     let mut info = StreamInfo::new(rate as usize, 2, 16).map_err(|e| fail(&e))?;
     let mut sink = flacenc::bitsink::ByteSink::new();
-    // The frame count, the sizes and the MD5 are not known yet.
+    // The frame count, the sizes and the MD5 are not known yet, so this
+    // header gives only the length of the reserve.
     Stream::with_stream_info(info.clone())
         .write(&mut sink)
         .map_err(|e| fail(&e))?;
     let header_bytes = sink.as_slice().len();
-    out.put(sink.as_slice()).await?;
+    out.reserve(header_bytes).await?;
     let mut block = FrameBuf::with_size(2, FLAC_BLOCK).map_err(|e| fail(&e))?;
     let mut md5 = Context::new(16, 2);
     let (mut l, mut r) = (vec![0.0; FLAC_BLOCK], vec![0.0; FLAC_BLOCK]);
@@ -549,7 +595,7 @@ async fn flac_into(input: &Input, rate: u32, out: &mut FlacOut) -> Result<(), St
             sink.as_slice().len()
         ));
     }
-    out.replace_header(sink.as_slice()).await
+    out.replace_head(sink.as_slice()).await
 }
 
 /// Bytes of this worker's WebAssembly memory, which only ever grows.

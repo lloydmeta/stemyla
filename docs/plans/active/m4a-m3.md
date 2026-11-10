@@ -288,7 +288,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 ## Progress
 
 * [x] 2026-11-10: plan written by the team leader.  Plan review round 1 found 2 blockers, 7 should-fix and 4 nits.  Round 2 found 1 blocker, 8 should-fix and 4 nits.  The plan takes each (Decision log).
-* [ ] Step 1: one sink for FLAC and ALAC.
+* [x] Step 1: one sink for FLAC and ALAC.  2026-11-10: `EncodeOut` with `put`, `reserve` and `replace_head`.  `flac_into` reserves its stream header.  First failures, with a `reserve` that writes nothing: `a_reserve_is_one_unit_that_the_head_replaces` gave `w3@0 w65537@0`, not `w65536@0 w1@65536 w3@65537 w65537@0`.  `a_reserve_holds_its_zeros_outside_wasm_memory` gave a file of 0 bytes, not 1,048,576.  With a stub that makes its zeros in a `Vec`, the second test gave 65,584 bytes of WebAssembly memory on the file sink.  Then `web-test --browser chrome` passed: 80 `stem-worker` tests, with the FLAC tests unchanged.
 * [ ] Step 2: the wire kind `alac`, the worker's encode and the page's reply.
 * [ ] Step 3: the memory of the encode.
 * [ ] Step 4: the page offers M4A.
@@ -303,6 +303,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, team leader: `xtask e2e save` finds the worker's line by the format's extension.  For M4A the worker logs the kind `alac`, so Step 5 adds the kind to `FORMATS`.
 * 2026-11-10, team leader: `origin/gh-pages` holds no `LICENSE*` file and no `THIRD-PARTY.md`.  So the published page gives no copy of a licence for any crate.  Step 2 adds a TD entry.
 * 2026-11-10, plan review round 1: two more saves push `WAITS_S` of `e2e save` past its limit of 40 minutes, which a compile-time assert checks.  So Step 5 raises the limits of the step and of the CI job.
+* 2026-11-10, implementer: the wasm bundle at `2193806` (the same code as `6983ca9`), from `trunk build --release`: `app_bg.wasm` 6,406,239 bytes, `decode-worker_bg.wasm` 1,381,067 bytes, `stem-worker_bg.wasm` 1,250,092 bytes.
 
 ## Decision log
 
@@ -316,6 +317,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, agent (team leader, plan review rounds 1 and 2): `STEP_LIMIT_S` and the `e2e save` step of CI become 50 minutes, and the `browser-tests` job 75 minutes.  Reason: the two M4A saves add their waits, and a compile-time assert keeps the waits below the limit.  A run takes about 3 to 4 minutes; the limits stop only a hung run.
 * 2026-11-10, agent (team leader, plan review round 2): the memory test of Step 3 asserts two bounds at 10 s and 60 s: the parent's 12 bytes for each packet, and 4 bytes.  Reason: at these lengths the peak is in the loop, so the tighter bound tells `with_capacity` from a doubling vector.  Round 1 had said that no bound could; round 2 showed where the peak is.
 * 2026-11-10, agent (team leader, plan review round 2): `flac_into` uses `reserve` for its first stream header.  Reason: `reserve` then has a caller in Step 1, so no dead code fails clippy, and the FLAC's bytes stay the same.
+* 2026-11-10, agent (implementer): Step 1 has two tests, not one.  `a_reserve_is_one_unit_that_the_head_replaces` checks the writes, the bytes and the parts.  `a_reserve_holds_its_zeros_outside_wasm_memory` checks the peak.  Reason: the stub that writes nothing cannot fail a bound on the peak.  So the peak test also checks the size of the file, and a second stub with zeros in a `Vec` fails its bound.
 
 ## Outcomes and retrospective
 

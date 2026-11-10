@@ -13,7 +13,7 @@
 )]
 
 use super::*;
-use encode::{FLAC_BLOCK, MP3_BLOCK};
+use encode::{EncodeOut, FLAC_BLOCK, MP3_BLOCK, OutFile};
 use js_sys::{Object, Reflect};
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
@@ -1495,6 +1495,116 @@ async fn stored_encodes_write_whole_arrays_as_they_read() {
         "{writes} writes, fewer than the {} frames of the MP3",
         TONE_FRAMES / 1152
     );
+}
+
+/// The output of a sink test, in `saves/`.
+const SAVE_SINK: &str = "saves/1792640000000-1.out";
+/// What a sink test puts after its reserve.
+const MARKER: [u8; 3] = [7, 8, 9];
+
+/// A head of `len` bytes, with no zero, so a reserve left in place shows.
+fn head_of(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8 + 1).collect()
+}
+
+/// A sink on the file at [`SAVE_SINK`], made empty.
+async fn file_sink() -> EncodeOut {
+    plant_folder("saves").await;
+    EncodeOut::File(OutFile::open(SAVE_SINK).await.expect("the file opens"))
+}
+
+/// The parts of a sink of the memory path, as bytes.
+fn parts_of(parts: &js_sys::Array) -> Vec<Vec<u8>> {
+    parts
+        .iter()
+        .map(|part| Uint8Array::new(&part).to_vec())
+        .collect()
+}
+
+/// Step 1 of `plans/active/m4a-m3.md`: a reserve is one unit that the head
+/// replaces.  On the storage path, the zeros go in writes of at most 64
+/// KiB, each a whole array (MEM-5).  The head then goes in one write at 0.
+#[wasm_bindgen_test]
+async fn a_reserve_is_one_unit_that_the_head_replaces() {
+    let block = 64 * 1024;
+    for (len, reserve_writes) in [
+        (block + 1, format!("w{block}@0 w1@{block}")),
+        (block, format!("w{block}@0")),
+    ] {
+        fresh().await;
+        let head = head_of(len);
+        let mut out = file_sink().await;
+        start_order_spy();
+        let written = async {
+            out.reserve(len).await?;
+            out.put(&MARKER).await?;
+            out.replace_head(&head).await
+        }
+        .await;
+        let record = stop_order_spy();
+        written.expect("written");
+        let EncodeOut::File(file) = out else {
+            unreachable!("a file stays a file")
+        };
+        file.close().await.expect("closed");
+        assert_eq!(
+            record,
+            format!("{reserve_writes} w3@{len} w{len}@0"),
+            "{len} bytes: the reserve in blocks, the marker after it, then the head at 0"
+        );
+        let bytes = read_at(SAVE_SINK).await.expect("the file");
+        assert!(
+            bytes == [head.as_slice(), &MARKER].concat(),
+            "{len} bytes: the file is the head, then the marker"
+        );
+
+        let mut out = EncodeOut::Parts(js_sys::Array::new());
+        out.reserve(len).await.expect("reserved");
+        out.put(&MARKER).await.expect("put");
+        let EncodeOut::Parts(parts) = &out else {
+            unreachable!("parts stay parts")
+        };
+        assert!(
+            parts_of(parts) == [vec![0; len], MARKER.to_vec()],
+            "{len} bytes: the reserve is one part of zeros, then the marker"
+        );
+        out.replace_head(&head).await.expect("replaced");
+        let EncodeOut::Parts(parts) = out else {
+            unreachable!("parts stay parts")
+        };
+        assert!(
+            parts_of(&parts) == [head.clone(), MARKER.to_vec()],
+            "{len} bytes: the head replaces the reserve, and the marker stays"
+        );
+    }
+}
+
+/// MEM-1 and MEM-4: the zeros of a reserve are made in JS, not in
+/// WebAssembly memory, on each sink.
+#[wasm_bindgen_test]
+async fn a_reserve_holds_its_zeros_outside_wasm_memory() {
+    fresh().await;
+    let len = 1 << 20;
+    for mut out in [file_sink().await, EncodeOut::Parts(js_sys::Array::new())] {
+        let before = LIVE.with(Cell::get);
+        PEAK.with(|peak| peak.set(before));
+        out.reserve(len).await.expect("reserved");
+        let held = PEAK.with(Cell::get) - before;
+        let what = match &out {
+            EncodeOut::File(_) => "file",
+            EncodeOut::Parts(_) => "parts",
+        };
+        assert!(
+            held < 1024,
+            "MEM-1: a reserve of {len} bytes on the {what} sink held {held} bytes of \
+             WebAssembly memory.  Fix: make the zeros as JS arrays."
+        );
+        if let EncodeOut::File(file) = out {
+            file.close().await.expect("closed");
+            let size = read_at(SAVE_SINK).await.map(|b| b.len());
+            assert_eq!(size, Some(len), "the file holds the reserve");
+        }
+    }
 }
 
 /// The peak of the counting allocator during a stored encode of `seconds`
