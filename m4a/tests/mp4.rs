@@ -391,9 +391,9 @@ fn the_head_has_its_reserved_length_at_each_length() {
     }
 }
 
-/// Finding 2-1 of review round 2 of M3: `head` and `tail` make their bytes
-/// in one buffer of their final length, so the end of a long encode holds
-/// no buffer that grew by doubling.  Ten minutes at 44.1 kHz is 6,460
+/// Finding 2-1 of review round 2 of M3: `head` and `tail` give a buffer
+/// whose capacity is its final length, so the buffer that they give did
+/// not grow by doubling.  Ten minutes at 44.1 kHz is 6,460
 /// packets, and 20 minutes is past the 10,000 packets where the end is the
 /// peak of the worker's encode.
 #[test]
