@@ -1447,7 +1447,12 @@ async fn a_memory_save_posts_the_arrays_of_its_format() {
             other => panic!("{ext}: {other:?}"),
         };
         assert_eq!(name, Some(format!("lloyd - mix.{ext}")));
-        assert_eq!(left.length() as usize, frames, "{ext}");
+        assert_eq!(left.length() as usize, frames, "{ext}: the left array");
+        assert_eq!(right.length() as usize, frames, "{ext}: the right array");
+        assert!(
+            !js_sys::Object::is(&left.buffer(), &right.buffer()),
+            "{ext}: the two channels are two arrays"
+        );
         assert_eq!(transfer.length(), 2, "MEM-2: {ext}: both arrays cross");
         assert!(
             js_sys::Object::is(&transfer.get(0), &left.buffer())

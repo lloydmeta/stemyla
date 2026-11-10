@@ -653,7 +653,6 @@ async fn alac_blob(input: &Input, rate: u32) -> Result<Blob, String> {
 /// MEM-4).
 #[cfg_attr(mutants, mutants::skip)]
 async fn alac_into(input: &Input, rate: u32, out: &mut EncodeOut) -> Result<(), String> {
-    let fail = |e: m4a::Error| format!("ALAC encoder: {e}");
     let frames = input.frames();
     if frames == 0 {
         return Err("ALAC encoder: the stem has no samples".into());
@@ -665,12 +664,27 @@ async fn alac_into(input: &Input, rate: u32, out: &mut EncodeOut) -> Result<(), 
         None,
         Order::FastStart,
     )
-    .map_err(fail)?;
+    .map_err(|e| format!("ALAC encoder: {e}"))?;
     out.reserve(layout.head_len()).await?;
     let (sizes, cookie) = alac_packets(input, rate, layout.packets(), out).await?;
+    alac_end(&layout, &sizes, cookie, out).await
+}
+
+/// The end of an ALAC encode: makes the final head from the packet table
+/// `sizes` and the magic `cookie`, and puts it in place of the reserve.
+/// Above about 10,000 packets, this is the peak of the encode: the sizes
+/// and the head live together.  So it holds only the head, of
+/// `head_len()` bytes, beside the sizes.
+#[cfg_attr(mutants, mutants::skip)]
+pub(super) async fn alac_end(
+    layout: &Layout,
+    sizes: &[u32],
+    cookie: [u8; 24],
+    out: &mut EncodeOut,
+) -> Result<(), String> {
     let head = layout
-        .head(&SampleEntry::Alac { cookie }, &sizes)
-        .map_err(fail)?;
+        .head(&SampleEntry::Alac { cookie }, sizes)
+        .map_err(|e| format!("ALAC encoder: {e}"))?;
     if head.len() != layout.head_len() {
         return Err(format!(
             "ALAC encoder: the head grew from {} to {} bytes",

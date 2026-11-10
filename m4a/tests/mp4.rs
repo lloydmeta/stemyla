@@ -391,6 +391,34 @@ fn the_head_has_its_reserved_length_at_each_length() {
     }
 }
 
+/// Finding 2-1 of review round 2 of M3: `head` and `tail` make their bytes
+/// in one buffer of their final length, so the end of a long encode holds
+/// no buffer that grew by doubling.  Ten minutes at 44.1 kHz is 6,460
+/// packets, and 20 minutes is past the 10,000 packets where the end is the
+/// peak of the worker's encode.
+#[test]
+fn the_head_and_the_tail_are_made_at_their_final_capacity() {
+    for minutes in [10, 20] {
+        let frames = minutes * 60 * u64::from(RATE);
+        for order in [Order::FastStart, Order::MoovLast] {
+            let layout = Layout::new(Codec::Alac, frames, RATE, None, order).unwrap();
+            let sizes = vec![MAX_PACKET_BYTES as u32; layout.packets()];
+            let head = layout.head(&ENTRY, &sizes).unwrap();
+            assert_eq!(
+                head.capacity(),
+                layout.head_len(),
+                "{minutes} minutes, {order:?}: the head"
+            );
+            let tail = layout.tail(&ENTRY, &sizes).unwrap();
+            assert_eq!(
+                tail.capacity(),
+                layout.tail_len(),
+                "{minutes} minutes, {order:?}: the tail"
+            );
+        }
+    }
+}
+
 /// The worst case of a layout: its head and tail, and the largest packet
 /// for each packet.
 fn worst_case(layout: &Layout) -> u64 {

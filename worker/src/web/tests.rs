@@ -13,7 +13,7 @@
 )]
 
 use super::*;
-use encode::{EncodeOut, FLAC_BLOCK, MP3_BLOCK, OutFile};
+use encode::{EncodeOut, FLAC_BLOCK, MP3_BLOCK, OutFile, alac_end};
 use js_sys::{Object, Reflect};
 use m4a::FRAMES_PER_PACKET;
 use std::alloc::{GlobalAlloc, Layout, System};
@@ -2005,11 +2005,11 @@ async fn arrays_peak(codec: Codec, seconds: usize) -> usize {
 /// The growth of an ALAC encode's peak from 10 s to 60 s, on `path`, is the
 /// packet table only ("Memory of the encode", `plans/active/m4a-m3.md`).
 /// The parent allows 12 bytes for each packet more: 4 for its size, and
-/// about 8 in `moov`.  At these lengths the peak is in the loop, where only
-/// the sizes grow, so the growth is also at most 4 bytes for each packet.
-/// The 4-byte bound implies the 12-byte one here.  No test measures the
-/// end of the encode, where the sizes and `moov` live together.  Each bound
-/// has a fixed slack of 1 KiB.
+/// about 8 in `moov`.  That is the parent's bound for the end of the encode,
+/// which `the_end_of_an_alac_holds_only_its_head` measures.  At 10 s and
+/// 60 s the peak is in the loop, where only the sizes grow, so the growth is
+/// also at most 4 bytes for each packet.  The 4-byte bound implies the
+/// 12-byte one.  Each bound has a fixed slack of 1 KiB.
 fn assert_packet_table_growth(path: &str, ten: usize, sixty: usize) {
     let more = alac_packets_of(60) - alac_packets_of(10);
     let slack = 1024;
@@ -2025,8 +2025,8 @@ fn assert_packet_table_growth(path: &str, ten: usize, sixty: usize) {
         growth <= 12 * more + slack,
         "MEM-1: on the {path} path, an ALAC of 60 s held {growth} bytes more than one of 10 s, \
          more than 12 bytes for each of {more} more packets and {slack}, the parent's \
-         allowance.  At these lengths the 4-byte bound below implies it.  Fix: keep only \
-         the packet sizes, and put each packet at once."
+         bound for the end.  The 4-byte bound below implies it.  Fix: keep only the packet \
+         sizes, and put each packet at once."
     );
     assert!(
         growth <= 4 * more + slack,
@@ -2053,7 +2053,8 @@ async fn a_stored_alac_holds_only_its_packet_table() {
 }
 
 /// MEM-1 and MEM-4: an ALAC encode on the memory path holds its packet
-/// table, and no more, as the song grows.
+/// table, and no more, as the song grows.  A request with no name gets the
+/// reply name `stem.m4a`.
 #[wasm_bindgen_test]
 async fn an_alac_is_encoded_in_blocks() {
     let ten = arrays_peak(Codec::Alac, 10).await;
@@ -2069,6 +2070,51 @@ async fn an_alac_is_encoded_in_blocks() {
         Some("stem.m4a")
     );
     assert_packet_table_growth("memory", ten, sixty);
+}
+
+/// Finding 2-1 of review round 2 of M3: the end of an ALAC encode holds
+/// only the head beside the packet table, on each sink.  The layout has 20
+/// minutes, 12,920 packets: above about 10,000 packets the end is the peak
+/// of the encode.  The test makes the sizes, so it encodes nothing.
+#[wasm_bindgen_test]
+async fn the_end_of_an_alac_holds_only_its_head() {
+    fresh().await;
+    let frames = 20 * 60 * TONE_RATE as usize;
+    let layout = m4a::Layout::new(
+        m4a::Codec::Alac,
+        frames as u64,
+        TONE_RATE,
+        None,
+        m4a::Order::FastStart,
+    )
+    .expect("a layout");
+    assert!(layout.packets() > 10_000, "{} packets", layout.packets());
+    let sizes = vec![4_000_u32; layout.packets()];
+    let cookie = m4a::AlacEncoder::new(TONE_RATE).cookie();
+    let slack = 1024;
+    for mut out in [file_sink().await, EncodeOut::Parts(js_sys::Array::new())] {
+        out.reserve(layout.head_len()).await.expect("reserved");
+        let before = LIVE.with(Cell::get);
+        PEAK.with(|peak| peak.set(before));
+        let ended = alac_end(&layout, &sizes, cookie, &mut out).await;
+        let held = PEAK.with(Cell::get) - before;
+        assert!(ended.is_ok(), "{ended:?}");
+        let what = match &out {
+            EncodeOut::File(_) => "file",
+            EncodeOut::Parts(_) => "parts",
+        };
+        assert!(
+            held <= layout.head_len() + slack,
+            "MEM-1: the end of an ALAC of {} packets on the {what} sink held {held} bytes, \
+             more than its head of {} bytes and {slack}.  Fix: make the head in one buffer \
+             of `head_len()`, and hold nothing more.",
+            layout.packets(),
+            layout.head_len()
+        );
+        if let EncodeOut::File(file) = out {
+            file.close().await.expect("closed");
+        }
+    }
 }
 
 /// The MP3 exception of D4 of M8 (TD-59): a stored MP3 encode holds the

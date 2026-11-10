@@ -331,6 +331,11 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
     * 1-11 and 1-12: `each_request_names_its_type`, with `Request::kind` giving "" for each request but `init`: the kinds were `["init", "", ...]`.
     * 1-9: `an_alac_is_encoded_in_blocks`, with the default name from `codec.kind()`: `stem.alac`, not `stem.m4a`.
     * 1-8, 1-2 to 1-7 and 1-10 change text only.  A whole `web-test --browser chrome` took 279 s on this Mac (Surprises).
+  * Review round 2 fixes, 2026-11-10.  First failures:
+    * 2-1 a): `the_head_and_the_tail_are_made_at_their_final_capacity` (`m4a/tests/mp4.rs`), with `Vec::new()` in `head`: a capacity of 65,536, not 52,269.  With `Vec::new()` in `tail` alone: 65,536, not 52,233, for `MoovLast`.
+    * 2-1 b): `the_end_of_an_alac_holds_only_its_head`, with a hold of 100 bytes for each packet in `alac_end`: 1,395,997 bytes on the file sink, more than the head of 103,949 bytes and 1 KiB.
+    * 2-7: `a_memory_save_posts_the_arrays_of_its_format`, with `put_stereo` given the left array twice: the new assert "the two channels are two arrays" failed.  No older assert of the test failed it.
+    * 2-2 to 2-6 change text only.  Run 42777211457 of CI, after M1 and M2, gives the spare of 2-6.
 
 ## Surprises and discoveries
 
@@ -343,7 +348,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, implementer: the first `check --tier commit` of Step 4 failed in `an_aiff_decodes_through_a_fifo` of `engine`, on "the write to the FIFO".  No step of M3 changes `engine`.  The test passed 6 times alone, and the next tier run passed.  It looks like a race between the writer thread and the end of the read, under load.
 * 2026-11-10, implementer: the 10-minute M4A of `e2e save` is 23.7 MB, 22% of its WAV and 1.7 times its FLAC.  So ALAC gives a larger file than FLAC for these slow sines.
 * 2026-11-10, implementer: the wasm bundle after Step 5, from `trunk build --release`: `app_bg.wasm` 6,415,004 bytes (8,765 more), `decode-worker_bg.wasm` 1,381,067 bytes (the same), and `stem-worker_bg.wasm` 1,295,428 bytes.  So `m4a` adds 45,336 bytes, 3.6%, to `stem-worker_bg.wasm`.
-* 2026-11-10, implementer (review round 1): a whole `web-test --browser chrome` took 279 s on this Mac.  The `app` lib tests took 179 s and the `stem-worker` tests 31 s.  Before M3, they took about 174 s and 17 s.  So M3 adds about 19 s here, and about 40 s on CI, which takes about twice as long.  The steps before `e2e save` then take about 16 minutes on CI, and the job limit of 75 minutes leaves about 9 minutes.
+* 2026-11-10, implementer (review round 1): a whole `web-test --browser chrome` took 279 s on this Mac.  The `app` lib tests took 179 s and the `stem-worker` tests 31 s.  Before M3, they took about 174 s and 17 s.  So M3 adds about 19 s here.  The 15.3 minutes of the steps before `e2e save` on CI come from run 40894815433 of 2026-10-29, before M1 and M2, which add tests.  Run 42777211457 (2026-11-10, after M1 and M2) took 10.5 minutes for those steps, with `web-test` 5.9 minutes.  So M3 adds about 30 s on CI, and the job limit of 75 minutes leaves about 9 to 14 minutes (review round 2).
 
 ## Decision log
 
@@ -367,7 +372,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
 * 2026-11-10, agent (implementer): TD-53 keeps the "FLAC encoding" and "MP3 encoding" labels as untested, and names the test of "M4A encoding".  Reason: Step 4 adds that test, so the M4A label is not a gap.
 * 2026-11-10, agent (implementer): `READS` is a constant, `FORMATS.len() + 1`, and a unit test counts `reads_back` over the formats and lengths against it.  Reason: `reads_back` compares text, so a `const fn` cannot call it.
 * 2026-11-10, agent (implementer): the unit test of `file_checks` gives no 10-minute M4A, so that check fails there.  `an_m4a_check_decodes_to_the_planted_mix` passes the check of the M4A on a mix of 2 s.  Reason: the debug build of `m4a` takes too long for an ALAC of 10 minutes.
-* 2026-11-10, agent (implementer): the `browser-tests` job comment gives "about 9 minutes to spare", from the measure of review round 1 (Surprises).  The limit stays 75 minutes, since the spare is above 5 minutes.
+* 2026-11-10, agent (implementer): the `browser-tests` job comment gives "about 9 to 14 minutes to spare", from the measures of review rounds 1 and 2 (Surprises).  The limit stays 75 minutes, since the spare is above 5 minutes.
 
 ## Outcomes and retrospective
 

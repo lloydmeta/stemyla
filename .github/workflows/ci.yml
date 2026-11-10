@@ -172,15 +172,17 @@ jobs:
     # Run 40894815433 (2026-10-29) took 18.6 minutes: `web-test` 9.6, the
     # other scenarios 4.0 and `e2e save` 3.3, after the setup.  `web-test`
     # took 7.8 minutes in run 40871041420, so it varies by about 2.  The
-    # steps before `e2e save` took about 15.3 minutes before M3 of
-    # docs/plans/active/m4a.md.  M3 adds about 19 s to a local `web-test` of
-    # 279 s (2026-11-10), so about 40 s on CI, which takes about twice as
-    # long.  So the steps before take about 16 minutes.  The limit is those
-    # steps, the limit of `e2e save` of 50, and about 9 minutes to spare.  So
-    # a run of `e2e save` that waits in vain ends on its own check.  Each
-    # test binary of `web-test` may take 10 minutes (xtask/src/web_test.rs),
-    # so a slow `web-test` uses the spare minutes first.  A hung browser must
-    # not hold the runner for GitHub's 6 h default.
+    # steps before `e2e save` took about 15.3 minutes in run 40894815433.
+    # That was before M1, M2 and M3 of docs/plans/active/m4a.md, which add
+    # tests to those steps.  Run 42777211457 (2026-11-10, after M1 and M2)
+    # took 10.5 minutes for those steps, with `web-test` 5.9, and 2.8 for
+    # `e2e save`.  M3 adds about 19 s to a local `web-test` of 279 s, so
+    # about 30 s on CI.  The limit is those steps, the limit of `e2e save` of
+    # 50, and about 9 to 14 minutes to spare.  So a run of `e2e save` that
+    # waits in vain ends on its own check.  Each test binary of `web-test`
+    # may take 10 minutes (xtask/src/web_test.rs), so a slow `web-test` uses
+    # the spare minutes first.  A hung browser must not hold the runner for
+    # GitHub's 6 h default.
     timeout-minutes: 75
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
