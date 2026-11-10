@@ -141,6 +141,10 @@ The team leader measured the wasm bundle at `69e63db` (Surprises).
   * Any other description is the bare config.
   * Give a new `Error` variant, with a `Display` text, for each refusal.  Refuse a config of 0 bytes or more than `MAX_CONFIG_LEN`.  Refuse a descriptor without tag 4 or tag 5, and a size past the end.
   * No panic on any input: each read checks the length.
+* `m4a`: `AacConfig::read(config) -> Result<AacConfig, Error>`, the fields of an AudioSpecificConfig that the worker checks (ISO/IEC 14496-3, 1.6.2.1).
+  * The fields: the object type (with the escape 31), the rate (the index table of 1.6.3.4, and index 15 with its 24-bit rate), the channel configuration and `frameLengthFlag`.
+  * It is a second reader beside `engine::aac_config`.  `engine::aac_config` is `pub(crate)`, and `engine` takes `m4a` only as a dev-dependency.  The doc of `AacConfig` says so.
+  * Native tests: `12 10`, HE-AAC `2b 92 08 00`, 1 channel, the 960 flag, the escape 31, index 15, and a cut at each bit.  None panics.
 * `Order::MoovLast`: its doc says that the AAC save uses it, since the packet count is known only at the end.
 * Tests in `m4a/tests/mp4.rs`:
   * Chrome's description `12 10` gives `12 10`.
@@ -164,7 +168,7 @@ The wire, the worker and the page's side of the reply change in one commit (PROT
 * `worker/src/web.rs`: `serve` sends `Request::Aac` to `encode(Codec::Aac, ...)`.  `handle` keeps `aac` out of the `queued` list.
 * `worker/src/web/encode.rs`:
   * `Codec::Aac`, with `kind()` `aac`, `extension()` `m4a`, and `reply()` `Reply::Aac`.
-  * Constants: `LEAD_IN` (2048 frames), `AAC_BLOCK` (4096 frames each read), and `QUEUE_MOST` (the most `AudioData` in the encoder's queue, for example 4).  The bit rate comes from the constant of `stem-protocol`.
+  * Constants: `LEAD_IN` (2048 frames), `AAC_BLOCK` (4096 frames each read), `QUEUE_MOST` (the most `AudioData` in the encoder's queue, for example 4), and `OUT_MOST` (the most frames sent and not yet back as packets, for example 32,768).  The bit rate comes from the constant of `stem-protocol`.
   * The encoder config: `codec: "mp4a.40.2"`, the rate, 2 channels, `bitrate: 256000`, `bitrateMode: "constant"`.
   * `aac_delay(rate)`, the probe, with the save's exact config.  Encode 16,384 frames of 2 channels, with 1.0 at frame 4096 and 0 elsewhere.  Flush, and decode the packets with `AudioDecoder` and the bare config.  The delay is the frame of the largest absolute sample, minus 4096.  Refuse, with "AAC encoder: ..." texts: a peak below 0.25, a delay of 8192 frames or more, or a delay below 0.
   * Close each `AudioData` after its `encode`, and close each encoder and decoder at the end, on every path, errors included.  WebCodecs keeps a copy of each input, and Safari collects garbage late (MEM-2, "Why").  Unclosed blocks of a long song could hold about 1 GB of JS memory (MEM-4).
@@ -173,19 +177,22 @@ The wire, the worker and the page's side of the reply change in one commit (PROT
   * The chunk queue, the description and the error belong to one encode, not to the module.  Two encodes can run at once in the worker.
   * `aac_into(input, rate, out: &mut EncodeOut)`:
     1. Refuse 0 frames with "AAC encoder: the stem has no samples".
-    2. Refuse a rate that is not in the AAC table of sampling frequencies (ISO/IEC 14496-3, 1.6.3.4), with its own text.  The check of item 10 uses the same table.
+    2. Refuse a rate that is not in the AAC table of sampling frequencies (ISO/IEC 14496-3, 1.6.3.4), with its own text.  The check of item 10 uses the same table, the table of `m4a::AacConfig`.
     3. `isConfigSupported` of the config.  If it fails, "AAC encoder: this browser has no AAC encoder".
     4. `aac_delay(rate)`.
-    5. `Layout::new` of an upper bound of frames, `Order::MoovLast`, with an `Edit` and a `Gapless` tag, only to refuse 4 GiB and to give `head_len()` before the encode.  The bound is `(ceil((LEAD_IN + frames + delay) / 1024) + 8) x 1024`.
+    5. `Layout::new` of an upper bound of frames, `Order::MoovLast`, with an `Edit` and a `Gapless` tag, only to refuse 4 GiB and to give `head_len()` before the encode.  The bound is `(ceil((LEAD_IN + frames + delay) / 1024) + 8) x 1024`.  Its `config_len` is `MAX_CONFIG_LEN`, since the description does not exist yet.
     6. `out.reserve(layout.head_len())`.
     7. Make the encoder.  Its output callback copies each chunk into a new `Uint8Array` in JS, and keeps it in a JS queue.  It keeps the description of the first output.  Its error callback keeps the error.
     8. Encode `LEAD_IN` frames of silence, then the source in blocks of `AAC_BLOCK`, as `f32-planar` `AudioData` with timestamps from the frame count.  An `f32-planar` `AudioData` takes one buffer, with the left plane then the right plane.  Read the source with `Input::read`, as ALAC does.  After each `encode`, wait for `dequeue` while `encodeQueueSize` is above `QUEUE_MOST`.  Add the listener first, then read `encodeQueueSize` again, so the wait cannot miss an event.  Then put each chunk of the JS queue into `out`, and push its size.
+       * Also bound the outputs in flight.  By the WebCodecs spec, `encode` can lower `encodeQueueSize` at once, and outputs come only as tasks ([W3C WebCodecs](https://www.w3.org/TR/webcodecs/)).  `Input::read` is sync, so a loop that never yields to a task gets no output until `flush`.
+       * So after each block, yield one task (for example a `setTimeout` of 0).  Then, while `frames sent - 1024 x packets received` is above `OUT_MOST` frames (for example 32,768), wait for the next output or error.
+       * If no output comes within a time limit (for example 10 s), end the encode with "AAC encoder: the encoder gave no output".  So an encoder that holds its output until `flush` fails with a clear text, and does not hang.
     9. `flush`, then put the last chunks.  An encoder error at any time ends the encode with "AAC encoder: <the error>".
-    10. Take the config from the description with `m4a::audio_specific_config`.  Refuse a missing description.  Refuse a config that is not object type 2, 2 channels and the encode's rate, with an "AAC encoder: ..." text.  Also refuse `frameLengthFlag` 1 (960 frames), which the app's decode refuses (`engine/src/decode.rs`, `frames_960`).
+    10. Take the config from the description with `m4a::audio_specific_config`, and read its fields with `m4a::AacConfig::read`.  Refuse a missing description.  Refuse a config that is not object type 2, 2 channels and the encode's rate, with an "AAC encoder: ..." text.  Also refuse `frameLengthFlag` 1 (960 frames), which the app's decode refuses (`engine/src/decode.rs`, `frames_960`).
     11. `packets = sizes.len()`.  Refuse `packets x 1024 < skip + frames`, with "AAC encoder: the encoder gave too few packets".
     12. The final layout: `Layout::new(m4a::Codec::Aac { channels: 2, config_len }, packets x 1024, rate, Some(Edit { skip, frames }), Order::MoovLast)`, then `with_gapless(Gapless { delay: skip, padding, frames })`.
-    13. `out.put(&layout.tail(...))`, then check that `layout.head(...)` has the reserve's length, then `out.replace_head(...)`.
-  * On the storage path, put each chunk with `append_array` of the JS array, so WebAssembly memory holds no packet.  On the memory path, push the JS array into the parts.  So no write is a view (MEM-5), and no packet is copied into WebAssembly memory.
+    13. `aac_end(layout, sizes, config, out)`: `out.put(&layout.tail(...))`, then check that `layout.head(...)` has the reserve's length, then `out.replace_head(...)`.  Step 3 calls `aac_end` alone.
+  * `EncodeOut::put_array(&Uint8Array)`: on the storage path, it calls `append_array` of the JS array, so WebAssembly memory holds no packet.  On the memory path, it pushes the JS array into the parts.  Each chunk goes through it.  So no write is a view (MEM-5), and no packet is copied into WebAssembly memory.
   * The sizes: `Vec::with_capacity` of the bound's packets.  Drop the block buffers and the encoder before the tail and head are made.
   * `aac_blob`: a `Blob` of type `audio/mp4` from the parts.  `stored` and `encode` pick the encode with a `match` on the codec, with no `else` arm.  Today `stored` sends each codec that is not FLAC to `alac_into`.
   * The module doc names the AAC encode: its probe, its lead-in, its queue, and its `moov` last.
@@ -205,6 +212,7 @@ The wire, the worker and the page's side of the reply change in one commit (PROT
     * `an_aac_is_the_m4a_of_its_packets`: the file equals the bytes of `m4a` for the fake's packets.  These are a 36-byte head, the packets in order, then `moov`.  Its `elst` has the skip `LEAD_IN + d` and the source's frames, and it has `iTunSMPB`.  Build the expected file in the test with `Layout`, `tail` and `head`.  For `d` of 1024, 2112 and 2624, and lengths 1, 1023, 1024, 1025 and `3 x 4096 + 7` frames.
     * `an_aac_encodes_the_lead_in_then_the_source`: the fake sees `LEAD_IN` silent frames, then the source's `f32` samples in order.  The rounding is that of the WAV (`s / 32768`) on the storage path.
     * `an_aac_waits_for_the_encoders_queue`: the largest `encodeQueueSize` that the fake sees is at most `QUEUE_MOST + 1`.  The stub of the first failure: no wait.
+    * `an_aac_waits_for_the_encoders_output`: a fake whose `encodeQueueSize` stays 0 and whose outputs come on a timer.  The largest lag of frames sent over frames back is at most `OUT_MOST + AAC_BLOCK`.  The largest JS chunk queue stays below a fixed count.  The stub of the first failure: no output wait.  A second fake that gives no output before `flush` gets "AAC encoder: the encoder gave no output".
     * `an_aac_takes_the_config_out_of_safaris_description`: Safari's description gives `esds` with `12 10`.
     * `an_aac_closes_each_audio_data`: the fake counts each `AudioData` that it gets and each `close`.  After an encode, after an encoder error in the middle of an encode, and after each refusal below, no `AudioData`, encoder or decoder stays open.  The stub of the first failure: no `close`.
     * The refusals, each with its own text:
@@ -220,7 +228,8 @@ The wire, the worker and the page's side of the reply change in one commit (PROT
     * The reply's `Blob` has type `audio/mp4`, and a reply with no name gets `stem.m4a`.
   * The helpers that match each codec (`last_file`, `arrays_file`, `stored_peak`, `encode_stored`, the reply helpers) take `Codec::Aac`.
 * `docs/tech-debt.md`: a new TD entry, "CI cannot run the real AAC encode" (the CI TD of this plan, number 92 at the start).  Chromium on Linux has no AAC encoder for WebCodecs (issue 40942807).  So CI tests the AAC encode only with the fake encoder.  The real encode runs only on a Mac: the Step 4 test and `e2e save`.  The fix: a CI runner with an AAC encoder, such as `macos-latest`.  The TD also records an assumption: the worker's probe measures the delay through `AudioDecoder`, which must trim nothing.  Only macOS shows this (Step 4).  Name it in VERIFY-1's "Gaps" in `docs/invariants.md`.  TD-53 and TD-54 name the AAC arm and encode where they list the others.
-* Docs of this step (DOC-1): `docs/ARCHITECTURE.md` (the line of `stem-worker`, and the worker's save texts), `docs/invariants.md` (MEM-1 and MEM-5 "Enforced by"), and the module docs.
+* Docs of this step (DOC-1): `docs/ARCHITECTURE.md` (the diagram's worker node, the line of `stem-worker`, the worker's save texts, and the memory-on-phones paragraph: the AAC packet table, the two queues and the probe), `docs/invariants.md` (MEM-1 and MEM-5 "Enforced by"), and the module docs.
+* `docs/references/browser-quirks.md`: Safari's AAC encoder, its three quirks (the silent first 1024 frames, the whole `ES_Descriptor` that its own decoder refuses, and 72 kbit/s in variable mode), and the worker's answer to each.
 * Acceptance: `cargo run -p xtask -- web-test --browser chrome` passes the new tests of `worker`, `protocol` and `app`, each failing first.
 
 ### Step 3: the memory of the AAC encode
@@ -230,8 +239,9 @@ The wire, the worker and the page's side of the reply change in one commit (PROT
   * In the loop, the peak grows by the sizes only: 4 bytes for each packet, with a slack of 1 KiB.
   * At the end, the sizes and the tail live together: at most 12 bytes for each packet, with a slack of 1 KiB.  Measure the end alone, as `the_end_of_an_alac_holds_only_its_head` does.
 * The same on the memory path, as `an_alac_is_encoded_in_blocks` does.
-* The JS heap of the worker, where Chrome gives `performance.memory`: the chunks in the JS queue stay below a fixed count.  The implementer decides how to measure, and records it.  If no measure is possible, the queue test of Step 2 is the bound, and the Progress line says so.
+* The JS heap of the worker, where Chrome gives `performance.memory`: the chunks in the JS queue stay below a fixed count.  The implementer decides how to measure, and records it.  TD-11 says that the workers have no `performance.memory`.  If no measure is possible, the two queue tests of Step 2 are the bound, and the Progress line says so.
 * The first failures: a stub that keeps each packet in a `Vec<u8>` of WebAssembly memory, and a stub that makes the sizes with `Vec::new()`.  If a stub does not fail on a path, stop and tell the team leader with the numbers.  Do not loosen a bound to pass.
+* `docs/invariants.md`, MEM-1 "Enforced by": the AAC memory tests of this step.
 * Acceptance: `cargo run -p xtask -- web-test --browser chrome` passes the tests, which failed first.
 
 ### Step 4: the real encode
@@ -276,10 +286,10 @@ The wire, the worker and the page's side of the reply change in one commit (PROT
 
 * `xtask/src/e2e/save.rs`:
   * `FORMATS` gets the row `("m4a", 4, Some("aac"))`.  Each check, `Files`, `reads_back`, `Files::keep`, `saves_folder_check` and the worker check key a save by its kind, not by its extension.  The kind of the WAV save is `wav`, from the page, not from the worker.  The implementer chooses the form, such as `(kind, extension, row)`, and records it.
-  * Whether the run saves AAC: the page's probe line.  The run waits for it after the start, with a wait of its own in `WAITS_S`.  On macOS, the run fails if the page does not offer AAC: Chrome and Safari encode AAC there through the system.  On Linux, it fails if the page offers AAC, since the CI TD of Step 2 then needs an update.  Elsewhere, it follows the page.  A pure function decides it, with unit tests.
+  * Whether the run saves AAC: the page's probe line.  Each restore is a reload, so each save has a new page and a new probe.  Before each save, after the restore, the run waits for the probe line of that page.  `WAITS_S` has one such wait for each save.  The line of the first page decides whether the run saves AAC.  On macOS, the run fails if the page does not offer AAC: Chrome and Safari encode AAC there through the system.  On Linux, it fails if the page offers AAC, since the CI TD of Step 2 then needs an update.  Elsewhere, it follows the page.  A pure function decides it, with unit tests.
   * The worker check of `aac`: the growth for 10 minutes is at most `LOSSLESS_BOUND_BYTES` above that for 1 minute.  Rename the constant if its name then misleads.
-  * `reads_back`: each AAC file, of 1 and 10 minutes, is read whole.  `file_checks`: each AAC decodes through `engine::decode_bytes(bytes, Some("m4a"))` to the planted mix's frames exactly.  Its cross-correlation with the planted mix peaks at lag 0 over lags of -1024 to 1024.  The mix repeats every 3,142 frames, so no other peak is in this range.  Its error to the mix, over the whole file and over the first 4096 frames, is below a bound.  The implementer measures the bound in both browsers, sets it with a margin, and records it.
-  * The planted stems are sines of about 14 Hz and 28 Hz, so the cross-correlation is almost flat near lag 0.  So also assert that the error at lag 0 is less than at lags of -2, -1, 1 and 2.  Record the margins of both browsers.  The exact length and the error bounds are the main checks.  Step 4's test, with a signal that has no period, is the strong check of the lag.  If a run shows a peak at lag 1 or -1, stop and tell the team leader with the numbers.
+  * `reads_back`: each AAC file, of 1 and 10 minutes, is read whole.  `file_checks`: each AAC decodes through `engine::decode_bytes(bytes, Some("m4a"))` to the planted mix's frames exactly.  Its cross-correlation with the planted mix peaks at lag 0 over lags of -1024 to 1024.  Compute it on the first 10 s only.  `xtask` and `engine` build at opt-level 0, and lags over the whole 10-minute file are about 5.4 x 10^10 multiply-adds for each channel.  The mix repeats every 3,142 frames, so no other peak is in this range.  Its error to the mix, over the whole file and over the first 4096 frames, is below a bound.  The implementer measures the bound in both browsers, sets it with a margin, and records it.
+  * The planted stems are sines of about 14 Hz and 28 Hz, so the cross-correlation is almost flat near lag 0.  So also assert that the error at lag 0 is less than at lags of -2, -1, 1 and 2, over the whole file.  Record the margins of both browsers.  The exact length and the error bounds are the main checks.  Step 4's test, with a signal that has no period, is the strong check of the lag.  If a run shows a peak at lag 1 or -1, stop and tell the team leader with the numbers.
   * `saves_folder_check`: 11 files with an AAC save (4 of `.m4a`), and 9 without.
   * The waits: two more saves and two more reads.  `WAITS_S`, `READS`, `STEP_LIMIT_S` and their tests change with them.  `the_ci_step_limit_is_the_waits_limit` keeps `STEP_LIMIT_S` equal to the CI step.  Compare the AAC save times with `SLOWEST_SAVE_S`, and update the caps if AAC is slower.
   * The heap, WebAssembly, slice and read checks run for each item of `FORMATS` that the run saves.
@@ -319,6 +329,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  A failed
 ## Progress
 
 * [x] 2026-11-10: plan written by the team leader, after the spike of "Facts".  Plan review round 1 found 1 blocker, 7 should-fix and 9 nits.  The plan takes each (Decision log).  Round 2 found 1 blocker, 3 should-fix and 6 nits, and the plan takes each too.
+* [x] 2026-11-10: a new team leader took over after the first one stopped by accident.  The orchestrator asked for one more plan review, the last.  It found 0 blockers, 3 should-fix and 4 nits, and the plan takes each (Decision log).
 * [ ] Step 1: the AudioSpecificConfig of a description.
 * [ ] Step 2: the wire kind `aac`, the worker's encode and the page's reply.
 * [ ] Step 3: the memory of the AAC encode.
@@ -342,9 +353,9 @@ Each step is one commit, and each commit passes `check --tier commit`.  A failed
 * 2026-11-10, agent (team leader): the encoder config has `bitrateMode: "constant"`.  Reason: Safari's variable mode gave 72 kbit/s, so the label "256 kbps" would be wrong there.
 * 2026-11-10, agent (team leader): the save writes an `iTunSMPB` tag beside the `elst` entry.  Reason: D7 trims either, and Apple's tools read `iTunSMPB`.
 * 2026-11-10, agent (team leader): the page probes the encoder itself at start, with no worker message.  Reason: both browsers give `AudioEncoder` on the page and in a worker.  The worker's own probe fails a save with the "AAC encoding" label.
-
 * 2026-11-10, agent (team leader, plan review round 1): the skip of the real-encode test gets a `SKIP_ALLOWLIST` entry (VERIFY-1).  The label test of "AAC encoding" moves to Step 2, with the label.  Each `AudioData`, encoder and decoder is closed, with a test (MEM-4).  The encoder config is one constant in `stem-protocol` (LAYER-1).  WebCodecs goes through inline JS, not `web-sys`.  A CI test links the probe to the menu.  `e2e save` also checks the error at lags near 0.
 * 2026-11-10, agent (team leader, plan review round 2): `Encoded::Failed` gets a field for an encoder failure.  So a failed stored AAC encode shows "AAC encoding failed", with no second encode.  Reason: the storage path is the main path, and its text would blame storage.  The config constant is the only copy, outside `mod kind`.  The worker refuses a rate with no AAC index and the 960-frame flag.
+* 2026-11-10, agent (team leader, the last plan review): the encode also bounds the outputs in flight (`OUT_MOST`).  `encodeQueueSize` alone does not bound the JS chunks.  `m4a::AacConfig` reads the config's fields, a second reader beside `engine::aac_config` (LAYER-1).  `e2e save` waits for the probe of each page, and takes the lag on the first 10 s only.
 
 ## Outcomes and retrospective
 
