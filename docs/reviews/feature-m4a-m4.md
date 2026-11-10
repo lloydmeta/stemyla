@@ -79,6 +79,16 @@
 | 2026-11-11 | 4 | 6f08b7f | 4-1 | reviewer, memory-reviewer, wire-reviewer, docs-reviewer | should-fix | yes | weak-test | VERIFY-1 | worker/src/web/aac.rs:167 | no test covers the time limit on the flush of the probe's encoder | confirmed | none | 27418d3 review round 4 fixes |
 | 2026-11-11 | 4 | 6f08b7f | 4-2 | reviewer, wire-reviewer, docs-reviewer | nit | - | doc | TD-21 | worker/src/web/tests/aac.rs:1210 | the doc of the queue-wait test says the fake fails before the wait | unvalidated | none | reported, not fixed |
 | 2026-11-11 | 4 | 6f08b7f | 4-3 | reviewer | nit | - | doc | DOC-1 | worker/src/web/aac.rs:293 | the docs of OUTPUT_WAIT and set_output_wait_ms name only the wait for an output | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 6 | 4b3d8bc | 6-1 | docs-reviewer, reviewer, memory-reviewer | should-fix | no | doc | DOC-1 | docs/plans/active/m4a.md:236 | the Debt list of the M4 Progress line leaves out TD-94 | confirmed | none | reported, not fixed |
+| 2026-11-11 | 6 | 4b3d8bc | 6-2 | reviewer, wire-reviewer, docs-reviewer | nit | - | doc | none | docs/plans/active/m4a.md:316 | the Decision log says the texts of TD-92 and browser-quirks.md came in round 6 | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 6 | 4b3d8bc | 6-3 | supply-chain-reviewer | nit | - | doc | DOC-1 | xtask/src/review.rs:1169 | the doc of KNOWN_MISSED names only the rounds of PR #39 | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 6 | 4b3d8bc | 6-4 | docs-reviewer | nit | - | doc | none | docs/plans/completed/m4a-m4.md:424 | the retrospective says afconvert gives the priming | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 6 | 4b3d8bc | 6-5 | docs-reviewer | nit | - | doc | none | docs/plans/completed/m4a-m4.md:436 | a retrospective sentence does not say that the fix was removed | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 6 | 4b3d8bc | 6-6 | docs-reviewer | nit | - | doc | TD-21 | docs/README.md:22 | the index line names the browser's encoder, not the page's probe, as the condition | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 7 | 8331229 | 7-1 | reviewer, docs-reviewer | nit | - | doc | DOC-1 | docs/plans/active/m4a.md:236 | the M4 Progress line and the Decision log do not name TD-95 | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 7 | 8331229 | 7-2 | reviewer, docs-reviewer | nit | - | doc | none | README.md:16 | README names only Chrome on Windows, as certain; TD-94 names Chrome and Edge | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 7 | 8331229 | 7-3 | docs-reviewer | nit | - | doc | DOC-1 | docs/README.md:20 | the index line of the parent plan says it saves only an ALAC M4A | unvalidated | none | reported, not fixed |
+| 2026-11-11 | 7 | 8331229 | 7-4 | reviewer | nit | - | doc | none | docs/tech-debt.md:511 | the command of TD-95 needs the runner and SAFARIDRIVER that web-test sets | unvalidated | none | reported, not fixed |
 
 ## Rounds
 
@@ -89,3 +99,5 @@
 | 3 | 6 | 559815 | 15.3 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
 | 4 | 5 | 333411 | 16.4 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
 | 5 | 3 | 200953 | 8.1 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
+| 6 | 7 | 368344 | 8.3 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
+| 7 | 2 | 138614 | 12.2 | 0 | 1 | 0 (auto mode; a fallback prompt is not counted) | mutants: none: tested 0 (caught 0, missed 0, unviable 0), timeouts 0, not tested 0, known 0; no mutants in the diff | - | - | - | - | - | - |
