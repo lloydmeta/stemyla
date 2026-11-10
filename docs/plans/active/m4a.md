@@ -253,6 +253,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, M2: Symphonia 0.6.1 refuses an M4A whose `mvhd` timescale is 0 (TD-82).  Review round 7 of M2 opens it: the view gives `mvhd` the media timescale, and TD-82 is closed.
 * 2026-11-08, orchestrator: two CI runs failed when the runners downloaded Trunk, wasm-bindgen and wasm-opt from GitHub Releases (HTTP 504), and a rerun failed the same way.  The test, clippy and rustfmt jobs passed, and `check --tier push` passed here, with its Trunk line.  This is an outage outside the repo.
 * 2026-11-08: the README of Symphonia on GitHub lists `opus`, `he-aac` and `he-aac-v2` features.  The published 0.6.1 has none of them.  Read the features of the pinned version, not the README.
+* 2026-11-10, orchestrator: Chrome updated itself to 157 during round 17 of M2, and WebDriver refused a session with chromedriver 155.  The orchestrator installed Chrome for Testing chromedriver 157.0.8103.38 (mac-x64) outside the repo, as the README says.  Then `web-test` (30 tests) and `e2e decode` passed on `937d20e`.
 
 ## Decision log
 
