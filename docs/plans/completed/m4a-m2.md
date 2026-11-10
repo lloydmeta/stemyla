@@ -582,6 +582,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
     * `an_he_aac_stream_cut_after_its_header_gives_the_he_aac_text` now holds the stream with no packet 0 and 8, whose first header is at packet 14: it gets `HE_AAC_TEXT` as ADTS and as M4A, so the check reads on past 8 packets.  It also holds a stream of 70 packets of SBR data with no header, then the rest: it opens, since the check stops at 64.  Its doc now says which case reads on.  The loop of 8 packets only, and a bound of 128, each fail the test.
     * `the_header_of_an_sbr_fill_is_read` now holds an EXT_SBR_DATA_CRC fill of 3 bytes, with no room for a header after the CRC, and one of 4 bytes with a header.  The bounds `< 4 + 17` and `< 4 + crc + 5` each fail it.  It also holds an empty fill just before ID_END, which is no SBR fill; with no arm for a count of 0, the test fails (21-10).
   * [x] 2026-11-10: review round 22 fixes, part 1: the bound of 64 packets on both sides (22-1).  `an_he_aac_stream_cut_after_its_header_gives_the_he_aac_text` now has a stream whose first header is at index 63, which gets `HE_AAC_TEXT`, and one whose first header is at index 64, which opens.  They take the place of the stream with its first header at 70, which pinned the bound only from 15 to 70.  `MOST_CHECK_PACKETS` at 63, 65 and 15 each fail the test.
+  * [x] 2026-11-10: review round 23 found one nit and no blocker or should-fix, so it is the last round of the intent review (decision 0024).  The mutants run found no mutant in the diff.  The reviewer and the memory reviewer set `MOST_CHECK_PACKETS` to 63, 65 and 15, and the test failed each time.  The close-out fixes nit 23-1: the doc of `first_packets_of_lc` names the stop at 64 packets.
 
 ## Surprises and discoveries
 
@@ -723,7 +724,7 @@ What M2 achieved:
 * A source that cannot seek has its own readers: `aiff_stream`, `tag_stream`, `mp4_stream`, `adts_split` and `held`.  Only a native `decode_path` of a FIFO is such a source.  Each source of the app can seek.
 * Wasm at 937d20e: `app_bg.wasm` 6,404,359 B (5,836,422 B before M2) and `decode-worker_bg.wasm` 1,382,030 B (809,845 B before).  `stem-worker_bg.wasm` did not change (1,250,988 B).
 
-The review, in numbers: 19 rounds, 189 agents, 12,410,055 tokens, 559.4 wall minutes, 4 interventions (all in round 2).  The log has 367 findings: 199 confirmed, 12 pre-existing, 53 refuted and 103 nits that got no validator.  13 of the found findings are blockers.
+The review, in numbers: 23 rounds, 211 agents, 13,392,805 tokens, 628.7 wall minutes, 4 interventions (all in round 2).  Rounds 20 to 23 came after the intent review.  The log has 391 findings: 212 confirmed, 12 pre-existing, 57 refuted and 110 nits that got no validator.  16 of the found findings are blockers.
 
 | Rounds | Agents | Tokens | Wall minutes | Findings | Found | Blockers found |
 | - | - | - | - | - | - | - |
@@ -731,6 +732,7 @@ The review, in numbers: 19 rounds, 189 agents, 12,410,055 tokens, 559.4 wall min
 | 4 to 11 | 91 | 6,206,467 | 268.0 | 188 | 112 | 8 |
 | 12 to 16 | 36 | 2,506,085 | 139.4 | 70 | 33 | 2 |
 | 17 to 19 | 16 | 747,680 | 52.1 | 38 | 24 | 2 |
+| 20 to 23 | 22 | 982,750 | 69.3 | 24 | 13 | 3 |
 
 What did not go well:
 
@@ -753,5 +755,12 @@ What to do differently:
 * Before a late round opens a new format or a new reader, ask whether the plan promised it.
 * Test each bound at the bound and one past it.  Test each parse of a size from the file at `u64::MAX`, with checked arithmetic from the first commit.
 * Read each new Progress line and TD for sentences of more than 25 words before the commit.
+
+The intent review, after round 19:
+
+* Intent review round 1 found that the HE-AAC check of the packets could refuse a valid AAC-LC file.  A packet that matches SBR by chance, repeated over a silent intro, gave the HE-AAC text.  Its reader also read past the end of a packet.  The fix (5d0d605) added an SBR header to the check.
+* That fix made a new gap that the app can reach.  It needed the header in the first packet, so an HE-AAC `.aac` stream cut away from a header opened as its core at half the band, with no text.  Round 20 found it, and the check now reads on to the first header, up to 64 packets.
+* Rounds 21 and 22 found that no test ran the read-on or pinned its bound.  The tests now cover a header at index 14, 63 and 64.  Round 23 found nothing to fix.
+* Lesson: a fix of a check must keep each case that the check closed before.  Test the fix with the inputs of the earlier finding too, here an HE-AAC stream from each start point.
 
 Debt: TD-80, TD-86 and TD-90 stay open.  TD-81 to TD-85 and TD-87 to TD-89 are closed.

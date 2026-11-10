@@ -1255,8 +1255,8 @@ const MOST_CHECK_PACKETS: usize = 64;
 /// a fill element before its end (`aac_config::has_sbr_fill`), and one of
 /// them starts with an SBR header (`aac_config::has_sbr_header`; item 1 of
 /// the intent review of M2).  With no header in the first packets, it reads
-/// on while each has SBR data, to the first header (finding 20-1 of review
-/// round 20).  A packet of AAC-LC can end in bits
+/// on while each has SBR data, to the first header, for at most
+/// [`MOST_CHECK_PACKETS`] packets (finding 20-1 of review round 20).  A packet of AAC-LC can end in bits
 /// that look like SBR data by chance: 21 of the 13,100 packets of the
 /// maintainer's file from Apple do.  Each packet of a silent intro can be
 /// the same, so the header lowers the chance about 8 times.  Symphonia 0.6.1 finds that data too
