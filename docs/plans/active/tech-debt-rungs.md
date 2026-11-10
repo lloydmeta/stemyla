@@ -4,6 +4,8 @@
 
 `docs/tech-debt.md` holds 63 open entries.  Many of them wait for a harness phase, a person or an upstream crate.  Some of them are small test or check gaps that an agent can close with native tests only.  This plan sorts the entries by impact and effort, and closes them in rungs.  Each rung is one PR.  Rung 1 closes the gaps of high impact and low effort.  Rung 2 closes the gaps of high impact and medium effort, which need a browser or a GPU.  Rung 3 is one PR for the wire format (TD-16), since it changes PROTO-1's surface.
 
+On 2026-11-11, the maintainer gave rung 2 a new theme: Safari and verification.  Safari is the browser of the maintainer and of the iPhone.  But CI never runs it, and its local runs fail in ways that nobody has sorted.  Rung 2 also gives one command that installs the dev tools at their pins, and moves the tools to their new releases.  The old rung 2 entries that do not fit the theme wait for a later rung.
+
 Impact: an entry that weakens the enforcement of a strict rule (MEM-*, PROTO-*, GPU-*, LAYER-1, DEPS-1, RT-1), or that can give a wrong result to a user, has high impact.  An entry that concerns only the cost or the measure of the harness has low impact.
 
 Effort: low means native tests or a CI line, with no browser, GPU or model.  Medium means a browser test, a GPU run on the maintainer's Mac, a new tool, or a change of behaviour.  High means a redesign or a new subsystem.
@@ -30,6 +32,33 @@ Files that rung 1 touches: `.github/workflows/ci.yml`, `CLAUDE.md`, `README.md`,
 
 A change to `xtask/src/review.rs` routes all six reviewers (TD-33).  So the removal of TD-69's `KNOWN_MISSED` entry goes in the last commit of M1.
 
+The triage of the entries that M4A (PR #43) added, on 2026-11-11, at `ee3728e`:
+
+| Group | Entries | Why |
+| - | - | - |
+| Rung 2 | TD-8 (the bullet of the wasm GPU tests), TD-51, TD-92, TD-93, TD-95 | Safari and verification. |
+| A choice for the maintainer | TD-94 | A fallback rate for Windows changes the files. |
+| Its own PR | TD-91 | The entry asks for its own PR. |
+| Upstream or design | TD-79, TD-80, TD-86, TD-90 | Each waits for a reference digest, a Symphonia change, or a design. |
+| Left for a later rung | TD-7, TD-53, TD-57, TD-64, TD-66 | The old rung 2 entries that are not Safari or tools (Decision log, 2026-11-11). |
+
+The facts of the tools on 2026-11-11, from crates.io:
+
+* Trunk: the pin is 0.21.14, and the latest is 0.22.1 (2026-10-26).  0.22.0 locks the dist folder, and keeps the lock file there ([v0.22.0](https://github.com/trunk-rs/trunk/releases/tag/v0.22.0)).
+* wasm-bindgen and wasm-bindgen-cli: the pin is 0.2.129, and the latest is 0.2.130 (2026-10-30).  `js-sys`, `web-sys`, `wasm-bindgen-futures` and `wasm-bindgen-test` move with it.
+* cargo-mutants: the pin, 27.1.0, is the latest.
+* wgpu: 30.0.1 is the latest.  Its `trunk` branch still reads `GPUAdapterInfo.subgroupMinSize` as a `u32` (`wgpu/src/backend/webgpu.rs`), so no release fixes TD-93.  The nearest issue is [gfx-rs/wgpu#10882](https://github.com/gfx-rs/wgpu/issues/10882).
+* GitHub-hosted standard runners are free in a public repository ([Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)).  `macos-latest` is a standard runner: arm64, an Apple M1 of 3 cores ([hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).  It cannot run nested virtualization, and GitHub states nothing about its GPU.
+
+The Safari failures that the repo records (`references/local-browser-testing.md`, `references/browser-quirks.md`, `plans/completed/m4a-m4.md`):
+
+* `safaridriver` sessions that time out while they connect, and a stale session that is "already paired".
+* Audio that Safari keeps suspended while macOS reports the user idle, which fails `e2e smoke` and `audio-resume`.
+* In `e2e storage`, WebKit's "AbortError: Fetch is aborted" in place of the abort reason, and a `?model_url=` download that sometimes times out.
+* In `web-test`, `an_output_left_behind_by_a_busy_page_is_replaced` skips after the test before it, and `a_stored_file_removed_after_it_was_opened_is_a_read_error` is flaky.
+* `lastModified` in whole seconds, and a `setTimeout` that races a `MessageChannel` in another order.
+* TD-93 and TD-95.  `xtask web-test` stops at the first crate that fails, so TD-93 hid TD-95.
+
 ## Plan of work
 
 ### M1: rung 1, high impact and low effort (one PR)
@@ -47,18 +76,22 @@ Each step is one commit.  Each step adds a test that fails on the gap first, the
 
 Acceptance of M1: `cargo run -p xtask -- check --tier push` passes; CI passes, the nightly step included; `docs/tech-debt.md` lists TD-22, TD-40, TD-42 and TD-69 under `## Closed`, and TD-41 if step 5 closes it.
 
-### M2: rung 2, high impact and medium effort (one PR)
+### M2: rung 2, Safari and verification (one PR)
 
-These steps need a browser, a GPU run on the maintainer's Mac, or a new tool.
+Branch `tech-debt/2026-11-11`, from `main` at `ee3728e`.  Each step is one commit, with a test that fails on the gap first.  The Safari runs need the maintainer's Mac, with Develop > Allow Remote Automation on.  Never quit the maintainer's Safari.
 
-1. TD-7 (DEPS-1): vet `cargo-deny`, then add a `deny.toml` with a licence allowlist and a registry allowlist of crates.io only.  Add a CI step that runs it.  Acceptance: a test crate with a GPL licence, and one from a git source, each fail the step.  Close TD-7, or narrow it to the vendored copy.
-2. TD-51 (VERIFY-1): run `engine`'s tests on `wasm32` in `xtask web-test`.  Acceptance: a `usize` product in `Filter::apply` fails on `wasm32`.  Close TD-51.
-3. TD-66 (VERIFY-1): move the checks of `note_run` and `run` in `xtask/src/e2e/weights.rs` into pure functions, with tests.  Call `gpu` and `load_format` from `worker/src/web/tests.rs`.  Run `cargo mutants` on M9's files on a quiet machine.  Remove the TD-66 entries of `KNOWN_MISSED` in the last commit.  Close TD-66.
-4. TD-64: check only the tiles of the stored choice; a first run still checks all four.  GPU-2: check it against the CPU and in a browser.  Acceptance: a test that a stored choice of two tiles compiles two f16 variants.  Close TD-64.
-5. TD-57: the player gives its own loop with `Hint::Reading`, and `wanted_blocks` follows it while a seek holds.  Acceptance: a native test that sets a loop behind the head counts no underrun at the old loop's start.  Close TD-57.
-6. TD-53 (VERIFY-1): add browser tests that deliver an MP3 and a FLAC reply of the memory path to `App`, with a spy on the link.  Add a test of `store::usage`.  Narrow TD-53 to what is left.
+1. `xtask setup` (VERIFY-1, BUILD-1).  One table in `xtask` holds the pin of each dev tool.  The tools are Trunk, wasm-bindgen-cli (its version comes from `Cargo.lock`), cargo-mutants, the nightly of TD-22 and the `wasm32-unknown-unknown` target.  `xtask setup` installs each tool that is missing or at another version, with `cargo install --locked` or `rustup`.  `xtask setup --check` only reports.  CI installs its tools with `xtask setup`.  Acceptance: a pure function that maps the installed versions to the actions has a test for each case.  A test fails when `README.md` or `ci.yml` names another pin than the table.
+2. wasm-bindgen 0.2.129 to 0.2.130, with `js-sys`, `web-sys`, `wasm-bindgen-futures` and `wasm-bindgen-test` at their matching releases (DEPS-1).  The release is under a month old, so pin it exactly.  Acceptance: `check --tier push`, and `web-test` in Chrome and Safari, give the same results as before the change.
+3. Trunk 0.21.14 to 0.22.1.  Check that `xtask publish` does not copy Trunk's lock file to `gh-pages`, and that `filehash = false` keeps the worker names.  Acceptance: `trunk build --release` gives the same file names in `app/dist`, and a test fails when `publish` would copy the lock file.
+4. `xtask web-test` runs each crate, then lists each crate that failed.  Acceptance: a test of the pure summary fails when a failure before the last crate is lost.
+5. TD-95 (VERIFY-1): find why the test build of the decode worker decodes nothing in Safari, and fix the test or the code.  Acceptance: `web-test --browser safari` passes the 12 tests of `decode-worker`.  If the cause is outside the repo, record it in `references/browser-quirks.md`, and narrow TD-95 to it.
+6. TD-93 (VERIFY-1): `web-test` sets `WASM_BINDGEN_NO_DEBUG=1` for `stem-worker` in Safari only, and prints why.  Run `e2e selftest --browser safari` with the weights, for the release build.  Write a draft wgpu issue for the maintainer to file.  Acceptance: the two GPU tests pass in a Safari `web-test`, and a test of the env choice fails for Chrome or another crate.  Narrow TD-93 to the upstream fix.
+7. TD-8 (VERIFY-1, the bullet of the wasm GPU tests): a wasm test reads `STEMYLA_REQUIRE` at compile time, with `option_env!`.  `web-test` passes it to the build.  Acceptance: with `STEMYLA_REQUIRE=gpu` and no adapter, a GPU skip in a wasm test fails.  Remove that bullet of TD-8.
+8. TD-51 (VERIFY-1): run `engine`'s tests on wasm32 in `web-test`.  Acceptance: a `usize` product in `Filter::apply` fails on wasm32.  Close TD-51.
+9. Safari flakes.  First measure: run the whole Safari `web-test` 5 times, and each `e2e` scenario that needs no GPU 3 times.  Record a table of each failure, with its cause, in Surprises.  Then fix each cause.  No test or scenario is retried; only a WebDriver session start may end a stale session and try once more.  A cause outside the repo gets a clear error, a line in `references/local-browser-testing.md`, and a TD.  For the idle audio, try `caffeinate -u` for the length of an `e2e` run.  Acceptance: after the fixes, 5 Safari `web-test` runs and 3 runs of each scenario pass, or each failure left has a TD.
+10. A macOS job in CI (TD-92).  It runs on `macos-latest`, and is not a required check.  It runs `xtask setup`, `safaridriver --enable`, the Safari `web-test`, and the Safari `e2e` scenarios that need no GPU.  It also runs `a_real_aac_decodes_to_the_source` and `e2e save` in Chrome, with the real AAC encoder.  Acceptance: the job passes on the PR; with no AAC encoder the AAC test fails, not skips.  Narrow TD-92, or close it.
 
-Acceptance of M2: `check --tier push`, `xtask web-test` and CI pass.  The PR names the GPU run of step 4 and the browser.
+Acceptance of M2: `check --tier push` passes on the maintainer's Mac.  CI passes, the macOS job included.  `web-test --browser safari` passes on the Mac.  `docs/tech-debt.md` lists TD-51 and TD-95 under `## Closed`, or each has a narrowed entry with its cause.
 
 ### M3: rung 3, the wire format (one PR)
 
@@ -77,9 +110,13 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 ## Decisions for the maintainer
 
 1. TD-22, the nightly in CI.  Options: A, a pinned nightly in a new CI step; B, `trybuild` as a dev-dependency (a new crate, DEPS-1); C, leave TD-22 open.  Recommendation: A.  Reason: no new crate, and the pin keeps CI stable.  Answer: none on 2026-11-06; the agent applied A, with `nightly-2026-10-30` (Decision log).  On 2026-11-07, the maintainer accepted A and the pin.
-2. TD-7, a new tool in CI.  Options: A, `cargo-deny` from a pinned release binary; B, from `cargo install --locked` with a pinned version; C, leave TD-7 open.  Recommendation: A, after the DEPS-1 vet.  Reason: a release binary does not build a large tree in CI.  Answer: open.
+2. TD-7, a new tool in CI.  Options: A, `cargo-deny` from a pinned release binary; B, from `cargo install --locked` with a pinned version; C, leave TD-7 open.  Recommendation: A, after the DEPS-1 vet.  Reason: a release binary does not build a large tree in CI.  Answer: open.  On 2026-11-11, the maintainer left TD-7 for a later rung (question 5).
 3. TD-16, a protocol version.  Options: A, a version in `Alive`, and the page refuses a mismatch; B, required fields only, with no version.  Recommendation: A.  Reason: a page and a worker of two builds can meet through a cached worker script.  Answer: open.
-4. The mode.  Recommendation: not orchestrated.  Each milestone is one PR and about one session, with the maintainer present for M2's GPU runs.  Answer: 2026-11-06, the maintainer: do M1 while away, with no PR, and give the work as patches.
+4. The mode.  Recommendation: not orchestrated.  Each milestone is one PR and about one session, with the maintainer present for M2's GPU runs.  Answer: 2026-11-06, the maintainer: do M1 while away, with no PR, and give the work as patches.  For M2: not orchestrated, on the branch `tech-debt/2026-11-11`, with one PR.
+5. M2's scope.  Options: A, Safari, the tools, and TD-8 and TD-51; B, A and TD-7; C, B and the rest of the old rung 2 (TD-53, TD-57, TD-64, TD-66).  Recommendation: A.  Reason: the size of rung 1, with one theme.  Answer: 2026-11-11, the maintainer: A.
+6. A macOS job in CI.  Options: A, a job that is not a required check at first; B, a required check at once; C, no CI change.  Recommendation: A.  Reason: a Safari flake on a new runner must not block merges until a few runs pass.  Answer: 2026-11-11, the maintainer: A, if the free tier has macOS runners.  It has: standard runners are free in a public repository (Context).
+7. TD-93.  Options: A, `WASM_BINDGEN_NO_DEBUG=1` for `stem-worker` in Safari only, `e2e selftest` in Safari, and a draft wgpu issue; B, A, and the agent files the issue; C, a test-only polyfill of `subgroupMinSize`.  Recommendation: A.  Reason: the test sees what Safari gives, and a person posts to an outside project.  Answer: 2026-11-11, the maintainer: A.
+8. What a fix of a Safari flake may do.  Options: A, fix the cause, and retry only a WebDriver session start, once; B, no retry; C, one retry of a scenario.  Recommendation: A.  Reason: a retried test hides an intermittent fault of the app.  Answer: 2026-11-11, the maintainer: A.
 
 ## Progress
 
@@ -104,7 +141,8 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] Review round 14: no findings, and no missed mutant.  The stop rule of decision 0024 holds.  The log stays in the same file.
   * [x] 2026-11-08: `check --tier push` passed on the tree of the last commit of M1, on the maintainer's Mac.
   * [x] 2026-11-08: CI passed on `5b3fbf6`, the last code commit of M1, the nightly step included (run 42405974754).
-* [ ] M2: rung 2.
+* [x] 2026-11-11: the triage of TD-79 to TD-95, the new M2, and the answers to questions 5 to 8.
+* [ ] M2: rung 2, Safari and verification.
 * [ ] M3: rung 3.
 
 ## Surprises and discoveries
@@ -130,6 +168,10 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-08, agent: 4 mutants of `expected_copies` stay missed, as equivalent.  A `let` that ends in `.to_vec()` always has an `=` before it, so `map_or(n - 3, ..)` and `.min(n - 3)` change nothing.  `at * 1` adds only the `=`, which is not a type name.  The timeout of `index *= 2` is a loop that never ends.
 
 * 2026-11-06, agent: the skill items TD-47 and TD-48 go with the next harness PR, not rung 1.  Reason: a change to the `review-rounds` skill belongs with P1 and P3, which change the same skill.
+
+* 2026-11-11, maintainer: M2 takes Safari and the tools.  TD-7, TD-53, TD-57, TD-64 and TD-66 wait for a later rung.  The maintainer asked for an easy setup of the tools, such as a Makefile target.
+* 2026-11-11, agent: the setup of the tools is the command `xtask setup`, not a Makefile.  Reason: BUILD-1 allows only Rust for the build.
+* 2026-11-11, agent: the branch `tech-debt/2026-11-11` moved by fast-forward from `ff633a3` to `ee3728e`, so that M2 starts with TD-92 to TD-95 in the register.
 
 ## Outcomes and retrospective
 
