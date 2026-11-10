@@ -5,7 +5,8 @@
 //! * `smoke`: drop generated stems, Play (every lane from browser storage),
 //!   change the tempo.
 //! * `decode`: the decode worker writes the session files of a 44.1 kHz
-//!   WAV, a 48 kHz WAV and the generated stems, equal to the native decode;
+//!   WAV, a 48 kHz WAV, an ALAC M4A with an `elst` delay and the generated
+//!   stems, equal to the native decode;
 //!   a reload opens a complete session as stored lanes with no decode, and decodes a
 //!   session of the M4 layout (`e2e/decode.rs`).
 //! * `playback`: a song restored with six stems plays every lane, "original"
@@ -27,9 +28,12 @@
 //!   case's file equals the arrays case's file, byte for byte, and the
 //!   worker removes the WAV.  Logs the times.
 //! * `save`: saves the mix of a stored song of 1 and of 10 minutes as WAV,
-//!   FLAC and MP3 through the Save menu.  The page's JS heap during a save
-//!   must not grow with the song, nor the worker's memory during a FLAC
-//!   encode, and an MP3 encode is bounded (M8, `e2e/save.rs`).
+//!   FLAC, M4A (ALAC) and MP3 through the Save menu.  It also saves M4A
+//!   (AAC) where the page offers it.  The page's JS heap during a save must
+//!   not grow with the song, nor the worker's memory during a FLAC, an
+//!   ALAC or an AAC encode, and an MP3 encode is bounded.  Each ALAC M4A
+//!   decodes to the WAV's samples, and each AAC M4A to the mix's length at
+//!   lag 0 (M8, M3 and M4 of `docs/plans/completed/m4a.md`, `e2e/save.rs`).
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
 //!   (`--weights`, and `xtask roformer-selftest` output).

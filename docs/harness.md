@@ -21,6 +21,7 @@ Two principles shape it:
 | `working-with-agents.md`, kept complete by `docs-check` | guide, for people | how to drive agents lived in one person's head and in old transcripts | phase 1 |
 | `xtask docs-check` (`the_map_and_docs_match_the_code`) | sensor, computational | docs drift from code (on 2026-10-19: `synth` missing from the map, `stem-protocol` from two crate lists) | phase 1 |
 | CI runs `cargo test -p roformer-gpu --lib` and `--doc` | sensor, computational | `--exclude roformer-gpu` also dropped the crate's tests that need no GPU, and its doctests, so they never ran in CI | phase 2 |
+| CI and `check --tier push` run `cargo test -p engine` alone | sensor, computational | `--workspace` builds merge the features of other members into `engine`.  For example, the default feature `audio` of `app` turns on the `cpal` feature of `engine`.  Then a test of `engine` can pass on a feature that `engine` does not turn on | M4A (M1) |
 | `browser tests (Chrome)` is a required check in the `main` ruleset | sensor, on GitHub | a PR could merge while the browser tests failed | phase 2 |
 | `every_kernel_fits_the_default_limits`, naga over every shader (GPU-1) | sensor, computational | a kernel over WebGPU's default limits fails only on a real adapter, on some GPUs; only the tile memory was checked before | phase 2 |
 | `STEMYLA_REQUIRE` and `test_support::skip` (VERIFY-1) | sensor, computational | a test with no GPU or no fixture returned early and passed, so a run that checked nothing looked like evidence | phase 2 |

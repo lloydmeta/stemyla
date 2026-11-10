@@ -10,6 +10,8 @@ use lanes::{LaneAudio, Shown, ShownLane};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
+#[cfg(target_arch = "wasm32")]
+pub mod aac_probe;
 pub mod assemble;
 pub mod decoder;
 pub mod export;
@@ -547,6 +549,7 @@ fn save_type(format: export::Format) -> &'static str {
     match format {
         export::Format::Wav => "audio/wav",
         export::Format::Flac => "audio/flac",
+        export::Format::M4a | export::Format::Aac => "audio/mp4",
         export::Format::Mp3 => "audio/mpeg",
     }
 }
@@ -564,6 +567,27 @@ fn offer_save_file(name: String, path: String, format: export::Format) {
             store::remove_file(&path).await;
         }
     });
+}
+
+/// Why a stored encode failed (D4 of M8): the worker's text, and the label
+/// of the encode when its encoder failed, not browser storage.
+#[cfg(target_arch = "wasm32")]
+struct EncodeFailure {
+    why: String,
+    encoder: Option<&'static str>,
+}
+
+/// The label of an encode of the request `kind` on the status line, as in
+/// "AAC encoding failed: ...".
+#[cfg(target_arch = "wasm32")]
+fn encoding_label(kind: &str) -> &'static str {
+    match kind {
+        stem_protocol::kind::MP3 => "MP3 encoding",
+        stem_protocol::kind::FLAC => "FLAC encoding",
+        stem_protocol::kind::ALAC => "M4A encoding",
+        stem_protocol::kind::AAC => "AAC encoding",
+        _ => "Encoding",
+    }
 }
 
 /// The status line of a save that browser storage could not hold, of a song
@@ -652,15 +676,17 @@ pub fn about_menu(ui: &mut egui::Ui) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const WELCOME: &str = "Drop a folder of stems (or several WAV/MP3/FLAC files), or press Demo song.";
+const WELCOME: &str =
+    "Drop a folder of stems (or several WAV/MP3/FLAC/M4A/AIFF files), or press Demo song.";
 #[cfg(target_arch = "wasm32")]
-const WELCOME: &str = "Press Open song… (or drop a song, or several WAV/MP3/FLAC stems, on the page), or press Demo song.";
+const WELCOME: &str = "Press Open song… (or drop a song, or several WAV/MP3/FLAC/M4A/AIFF stems, on the page), or press Demo song.";
 
 /// What the song picker offers: the formats `engine` decodes, as
 /// extensions, since iOS Safari treats `audio/*` as video (WebKit bug
-/// 242110).
+/// 242110).  `.mp4` is there for an `.mp4` of audio only; the head check
+/// refuses one that holds video.
 #[cfg(target_arch = "wasm32")]
-const SONG_FILES: &str = ".mp3,.wav,.flac";
+const SONG_FILES: &str = ".mp3,.wav,.flac,.m4a,.mp4,.aac,.aif,.aiff,.aifc";
 
 /// The status line while the files open: "Opening "<name>"…".
 #[cfg(target_arch = "wasm32")]
@@ -878,7 +904,11 @@ async fn open_saved(
                 new_session: false,
             })
         }
-        Decode::Undecodable(text) | Decode::Reset(text) => Err(anyhow::anyhow!(text)),
+        Decode::Undecodable(text) => {
+            let files: Vec<&str> = chosen.iter().map(|(file, _)| file.as_str()).collect();
+            Err(undecodable_error(&text, &files))
+        }
+        Decode::Reset(text) => Err(anyhow::anyhow!(text)),
         Decode::OnThePage(failure) if resetting(decoder) => Err(anyhow::anyhow!(
             "a reset stopped the decode ({})",
             failure.why()
@@ -950,6 +980,9 @@ async fn open_on_the_page(
             .await
             .map_err(|e| anyhow::anyhow!(e))?;
         heads.push((n.clone(), head, file.size() as u64));
+    }
+    if let Some(file) = video_in_heads(&heads) {
+        return Err(anyhow::Error::new(Refused(video_text(file))));
     }
     if let Some(why) = refusal_of_heads(&heads, limit) {
         let refusal = PageRefusal {
@@ -1161,7 +1194,12 @@ async fn restore_stored(
             let mix_frames = store::usable_mix_frames(id, &meta).await;
             match decode_session(id, &sources, mix_frames, decoder).await {
                 Decode::Song(song) => song,
-                Decode::Undecodable(text) | Decode::Reset(text) => {
+                Decode::Undecodable(text) => {
+                    let files: Vec<&str> =
+                        meta.files.iter().map(|(file, _)| file.as_str()).collect();
+                    return Some(Err(undecodable_error(&text, &files)));
+                }
+                Decode::Reset(text) => {
                     return Some(Err(anyhow::anyhow!(text)));
                 }
                 Decode::OnThePage(_) if resetting(decoder) => {
@@ -1412,6 +1450,11 @@ pub struct StemApp {
     /// and its end until it ends (finding 2-1 of review round 2 of M8).
     #[cfg(target_arch = "wasm32")]
     save_reports: Vec<String>,
+    /// Whether this browser can save AAC, from the probe at start (M4 of
+    /// `plans/completed/m4a.md`).  `None` until the probe ends, and the Save
+    /// menu does not offer AAC until then.
+    #[cfg(target_arch = "wasm32")]
+    aac_encoder: std::rc::Rc<std::cell::Cell<Option<bool>>>,
 }
 
 /// What a save makes: its file's name and format, and what it reads (D8
@@ -1667,10 +1710,43 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
+/// The name of the first file of `heads` (name, first bytes, size) whose
+/// head shows a track of video (D4 of `plans/completed/m4a.md`).  The page
+/// refuses such a song before any whole read, with [`video_text`].
+pub fn video_in_heads(heads: &[(String, Vec<u8>, u64)]) -> Option<&str> {
+    use engine::decode::{HeadLength, head_length};
+    heads
+        .iter()
+        .find(|(_, head, bytes)| head_length(head, *bytes) == HeadLength::Video)
+        .map(|(file, _, _)| file.as_str())
+}
+
+/// The error of a song that the decode worker could not decode (`text`).
+/// For a song of one stem file in `files` (original names), it names that
+/// file, as the head check does (finding 1-17 of review round 1 of M2), as
+/// a [`Refused`] line.
+pub fn undecodable_error(text: &str, files: &[&str]) -> anyhow::Error {
+    let stems: Vec<&&str> = files
+        .iter()
+        .filter(|file| engine::song::is_stem(&engine::song::stem_name(file)))
+        .collect();
+    match stems.as_slice() {
+        [file] => anyhow::Error::new(Refused(format!("Not opened: {file}.  {text}"))),
+        _ => anyhow::anyhow!("{text}"),
+    }
+}
+
+/// The status line of a song whose file `file` holds video.  It is a
+/// [`Refused`] line, shown as it is: the words of [`PageRefusal`] say "too
+/// long", which is wrong for a video.
+pub fn video_text(file: &str) -> String {
+    format!("Not opened: {file}.  {}", engine::decode::VIDEO_TEXT)
+}
+
 /// The refusal before any whole read of a song, from the head of each of
 /// its files (`heads`: name, first bytes, size), for the `limit` of its
-/// lanes.  It refuses a WAV or FLAC whose head states a length past the
-/// limit.  It also refuses a file larger than the largest file of its
+/// lanes.  It refuses a WAV, FLAC, M4A or AIFF whose head states a length
+/// past the limit.  It also refuses a file larger than the largest file of its
 /// stated length, or of the limit if it states none
 /// (`engine::decode::largest_file`).  `None` when the song can be read one
 /// file at a time.
@@ -1681,6 +1757,8 @@ pub fn refusal_of_heads(heads: &[(String, Vec<u8>, u64)], limit: usize) -> Optio
         let length = head_length(head, *bytes);
         let cap = largest_file(length, limit);
         match length {
+            // Not a length: `video_in_heads` refuses it first.
+            HeadLength::Video => {}
             HeadLength::Frames(frames) if frames > limit as u64 => {
                 longest = longest.max(Some(frames));
             }
@@ -2029,6 +2107,8 @@ impl Default for StemApp {
             save_queue: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             save_reports: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            aac_encoder: std::rc::Rc::default(),
         }
     }
 }
@@ -2067,6 +2147,10 @@ impl StemApp {
             Ok(s) => app.separator = Some(s),
             Err(e) => log::warn!("stem separation unavailable: {e}"),
         }
+        // M4 of `plans/completed/m4a.md`: the Save menu offers AAC once the
+        // browser's encoder passes the probe.
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(app.probe_aac(aac_probe::PROBE_MS));
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(async {
             // Save files that a reload, or a page that stopped, left (D7
@@ -3165,7 +3249,9 @@ impl StemApp {
             #[cfg(target_arch = "wasm32")]
             if ui
                 .button("Open song…")
-                .on_hover_text("Choose an MP3, WAV or FLAC file, or several stems of one song")
+                .on_hover_text(
+                    "Choose an M4A, MP3, WAV, FLAC or AIFF file, or several stems of one song",
+                )
                 .clicked()
             {
                 let ctx = ui.ctx().clone();
@@ -4207,6 +4293,7 @@ impl StemApp {
         let mut encoded = Vec::new();
         let mut worker_stopped = false;
         for ev in sep.take_events() {
+            let encode_kind = ev.encode_kind().unwrap_or_default();
             match ev {
                 Event::ModelLoading => {
                     sep.model_loading = true;
@@ -4240,7 +4327,10 @@ impl StemApp {
                     }
                 }
                 Event::Log(text) => log::info!("separator: {text}"),
-                Event::Mp3 { name, file } | Event::Flac { name, file } => match file {
+                Event::Mp3 { name, file }
+                | Event::Flac { name, file }
+                | Event::Alac { name, file }
+                | Event::Aac { name, file } => match file {
                     stem_protocol::Encoded::Bytes(bytes) => {
                         store::download(&name, &bytes, "audio/mpeg");
                         let note = self.save_notes.take(&name);
@@ -4252,9 +4342,17 @@ impl StemApp {
                         self.status = format!("Saved {name}.{note}");
                     }
                     stem_protocol::Encoded::Stored { path } => encoded.push((path, None)),
-                    stem_protocol::Encoded::Failed { path, text } => {
-                        encoded.push((path, Some(text)))
-                    }
+                    stem_protocol::Encoded::Failed {
+                        path,
+                        text,
+                        in_encoder,
+                    } => encoded.push((
+                        path,
+                        Some(EncodeFailure {
+                            why: text,
+                            encoder: in_encoder.then(|| encoding_label(encode_kind)),
+                        }),
+                    )),
                 },
                 Event::Bench(text) => {
                     log::info!("separator: {text}");
@@ -4297,14 +4395,13 @@ impl StemApp {
                             self.separating = None;
                             "Separation"
                         }
-                        stem_protocol::kind::MP3 | stem_protocol::kind::FLAC => {
+                        stem_protocol::kind::MP3
+                        | stem_protocol::kind::FLAC
+                        | stem_protocol::kind::ALAC
+                        | stem_protocol::kind::AAC => {
                             // The failed file's note never gets its reply.
                             self.save_notes.clear();
-                            if of == stem_protocol::kind::MP3 {
-                                "MP3 encoding"
-                            } else {
-                                "FLAC encoding"
-                            }
+                            encoding_label(&of)
                         }
                         stem_protocol::kind::SELFTEST => "Self-test",
                         stem_protocol::kind::BENCH => "Benchmark",
@@ -4463,7 +4560,7 @@ impl StemApp {
                     );
                     ui.separator();
                 }
-                for format in export::Format::ALL {
+                for format in self.save_formats() {
                     // A stopped worker counts as no worker.
                     let can = !format.needs_worker() || self.can_encode();
                     if ui
@@ -4481,8 +4578,30 @@ impl StemApp {
         chosen
     }
 
-    /// Whether the worker can encode a FLAC or an MP3 now: it runs, and it
-    /// has not stopped.
+    /// The formats of the Save menu: AAC only after the probe at start
+    /// passed (M4 of `plans/completed/m4a.md`).
+    #[cfg(target_arch = "wasm32")]
+    fn save_formats(&self) -> Vec<export::Format> {
+        export::offered(self.aac_encoder.get() == Some(true)).collect()
+    }
+
+    /// Probes the browser's AAC encoder within `ms`, logs the result, and
+    /// keeps it for the Save menu.
+    #[cfg(target_arch = "wasm32")]
+    fn probe_aac(&self, ms: u32) -> impl std::future::Future<Output = ()> + use<> {
+        let kept = self.aac_encoder.clone();
+        async move {
+            let result = aac_probe::aac_encoder(ms).await;
+            match &result {
+                Ok(()) => log::info!("export: AAC encoder: yes"),
+                Err(why) => log::info!("export: AAC encoder: no ({why})"),
+            }
+            kept.set(Some(result.is_ok()));
+        }
+    }
+
+    /// Whether the worker can encode a FLAC, an M4A or an MP3 now: it runs,
+    /// and it has not stopped.
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
     fn can_encode(&self) -> bool {
@@ -4702,11 +4821,17 @@ impl StemApp {
     #[cfg_attr(mutants, mutants::skip)]
     fn end_stored_save(&mut self, order: SaveOrder, wav: String, note: Option<String>) {
         let name = order.name.clone();
-        if order.format == export::Format::Wav {
-            offer_save_file(name.clone(), wav, order.format);
-            self.status = format!("Saved {name}.{}", note.unwrap_or_default());
-            return;
-        }
+        let encode: fn(&separator::Separator, &str, stem_protocol::Encode) = match order.format {
+            export::Format::Wav => {
+                offer_save_file(name.clone(), wav, order.format);
+                self.status = format!("Saved {name}.{}", note.unwrap_or_default());
+                return;
+            }
+            export::Format::Flac => separator::Separator::encode_flac,
+            export::Format::M4a => separator::Separator::encode_alac,
+            export::Format::Mp3 => separator::Separator::encode_mp3,
+            export::Format::Aac => separator::Separator::encode_aac,
+        };
         let sep = self.separator.as_ref().filter(|s| s.stopped.is_none());
         let Some(sep) = sep else {
             wasm_bindgen_futures::spawn_local(async move {
@@ -4726,11 +4851,7 @@ impl StemApp {
             out: out.clone(),
             rate: order.what.rate,
         };
-        if order.format == export::Format::Flac {
-            sep.encode_flac(&name, source);
-        } else {
-            sep.encode_mp3(&name, source);
-        }
+        encode(sep, &name, source);
         self.status = format!("Encoding {name}…");
         self.posted_saves.insert(
             out,
@@ -4782,7 +4903,17 @@ impl StemApp {
                 self.save_notes.push(&name, note);
                 format!("Encoding {name}…{held}")
             }
-            (JsSink::Flac(_) | JsSink::Mp3(_), None) => {
+            (JsSink::M4a(c), Some(sep)) => {
+                sep.encode_alac(&name, c.into_encode(rate));
+                self.save_notes.push(&name, note);
+                format!("Encoding {name}…{held}")
+            }
+            (JsSink::Aac(c), Some(sep)) => {
+                sep.encode_aac(&name, c.into_encode(rate));
+                self.save_notes.push(&name, note);
+                format!("Encoding {name}…{held}")
+            }
+            (JsSink::Flac(_) | JsSink::M4a(_) | JsSink::Mp3(_) | JsSink::Aac(_), None) => {
                 format!("Could not save {name}: the encoding worker is not running.")
             }
         };
@@ -4814,7 +4945,7 @@ impl StemApp {
     /// The reply of a stored encode (D4, D7 and D8 of M8).
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
-    fn stored_encode_ended(&mut self, path: String, failed: Option<String>) {
+    fn stored_encode_ended(&mut self, path: String, failed: Option<EncodeFailure>) {
         let Some(posted) = self.posted_saves.remove(&path) else {
             log::warn!("save: a reply for {path}, which no save asked for");
             if failed.is_none() {
@@ -4831,11 +4962,18 @@ impl StemApp {
             order,
             ..
         } = posted;
-        let Some(why) = failed else {
+        let Some(EncodeFailure { why, encoder }) = failed else {
             offer_save_file(name.clone(), path, format);
             self.status = format!("Saved {name}.{}", note.unwrap_or_default());
             return;
         };
+        // M4 of `plans/completed/m4a.md`: the encoder failed, not browser
+        // storage, so a second encode in memory fails the same way.
+        if let Some(label) = encoder {
+            log::warn!("save: {name}: the encoder failed: {why}");
+            self.report_save(format!("{label} failed: {why}"));
+            return;
+        }
         log::warn!("save: {name}: the worker could not encode it: {why}");
         // Only for the shown song with the same lanes (D8).
         let order =
@@ -6234,6 +6372,57 @@ mod tests {
         head
     }
 
+    /// The head of a stereo `ima4` AIFC of `blocks` blocks of 64 frames at
+    /// `rate`, and the size of its file: 34 bytes for each block of each
+    /// channel.
+    fn ima4_head(rate: u32, blocks: u32) -> (Vec<u8>, u64) {
+        let zeros = u64::from(rate).leading_zeros();
+        let exponent = (16_383 + 63 - zeros) as u16;
+        let mantissa = u64::from(rate) << zeros;
+        let mut comm = Vec::from(2_u16.to_be_bytes());
+        comm.extend_from_slice(&blocks.to_be_bytes());
+        comm.extend_from_slice(&16_u16.to_be_bytes());
+        comm.extend_from_slice(&exponent.to_be_bytes());
+        comm.extend_from_slice(&mantissa.to_be_bytes());
+        comm.extend_from_slice(b"ima4");
+        comm.extend_from_slice(&[0, 0]);
+        let data = u64::from(blocks) * 34 * 2;
+        let mut head = Vec::from(*b"FORM");
+        let form_at = head.len();
+        head.extend_from_slice(&[0; 4]);
+        head.extend_from_slice(b"AIFC");
+        head.extend_from_slice(b"COMM");
+        head.extend_from_slice(&(comm.len() as u32).to_be_bytes());
+        head.extend_from_slice(&comm);
+        head.extend_from_slice(b"SSND");
+        head.extend_from_slice(&((data + 8) as u32).to_be_bytes());
+        head.extend_from_slice(&[0; 8]);
+        let bytes = head.len() as u64 + data;
+        head[form_at..form_at + 4].copy_from_slice(&((bytes - 8) as u32).to_be_bytes());
+        (head, bytes)
+    }
+
+    /// Finding 9-1 of review round 9: the `COMM` of an `ima4` AIFC counts
+    /// blocks of 64 frames.  A song of 6 minutes of 96 kHz stereo `ima4`
+    /// passes the heads under a limit of 7 minutes, and one of 8 minutes is
+    /// refused for its stated length.
+    #[test]
+    fn the_heads_count_the_frames_of_an_ima4_aifc() {
+        let limit = 7 * 60 * 44_100;
+        let file = |minutes: u32| {
+            let (head, bytes) = ima4_head(96_000, minutes * 60 * 96_000 / 64);
+            ("lloyd.aifc".to_string(), head, bytes)
+        };
+        assert_eq!(refusal_of_heads(&[file(6)], limit), None, "6 minutes");
+        assert_eq!(
+            refusal_of_heads(&[file(8)], limit),
+            Some(TooLongToOpen::Stated {
+                frames: 8 * 60 * 44_100
+            }),
+            "8 minutes"
+        );
+    }
+
     /// D3 of the catch-up plan: the page refuses a song before it reads a
     /// whole file, from the head of each file.  A WAV or FLAC states its
     /// length; a file that states none is refused when it is larger than
@@ -6302,6 +6491,101 @@ mod tests {
             refusal_of_heads(&[mp3(mp3_cap + 1)], limit),
             Some(TooLongToOpen::Large { .. })
         ));
+    }
+
+    /// A short ALAC M4A whose one track is patched to a video track, as
+    /// `app/src/decode_tests.rs` makes it: (name, head, size).
+    fn video_head(name: &str) -> (String, Vec<u8>, u64) {
+        let mut file = m4a::alac_file(&[0; 2 * 4096], 44_100, None, m4a::Order::FastStart)
+            .expect("the writer takes it");
+        let handler = file
+            .windows(4)
+            .position(|w| w == b"soun")
+            .expect("a sound handler");
+        file[handler..handler + 4].copy_from_slice(b"vide");
+        let size = file.len() as u64;
+        (name.to_string(), file, size)
+    }
+
+    /// D4 of the M4A plan: a head that shows a video track refuses the
+    /// song with a status line of its own, for a song of one file and of
+    /// 3 files.  `refusal_of_heads` does not take a video as a length.
+    #[test]
+    fn a_video_in_the_heads_refuses_the_song() {
+        let wav = |name: &str| {
+            (
+                name.to_string(),
+                wav_head(44_100, 4 * 44_100),
+                44 + 4 * 44_100,
+            )
+        };
+        assert_eq!(
+            video_in_heads(&[video_head("lloyd.mp4")]),
+            Some("lloyd.mp4")
+        );
+        let three = [
+            wav("lloyd.wav"),
+            video_head("acme.mp4"),
+            video_head("beachape.m4a"),
+        ];
+        assert_eq!(video_in_heads(&three), Some("acme.mp4"));
+        assert_eq!(video_in_heads(&[wav("lloyd.wav")]), None);
+        let error = anyhow::Error::new(Refused(video_text("acme.mp4")));
+        assert_eq!(
+            open_error_text("Could not load", &error),
+            "Not opened: acme.mp4.  This file holds video.  Open an audio file, such as M4A, MP3, WAV or FLAC."
+        );
+        assert_eq!(refusal_of_heads(&[video_head("lloyd.mp4")], 1), None);
+    }
+
+    /// Finding 1-17 of review round 1 of M2: when the decode worker cannot
+    /// decode a song of one stem file, the status line names that file, as
+    /// the head check does.  A song of several stems keeps the text alone.
+    #[test]
+    fn an_undecodable_song_of_one_file_names_it() {
+        let text = engine::decode::VIDEO_TEXT;
+        let one = undecodable_error(text, &["lloyd.mp4"]);
+        assert_eq!(
+            open_error_text("Could not load", &one),
+            video_text("lloyd.mp4")
+        );
+        let with_mix = undecodable_error(text, &["mix.wav", "lloyd.mp4"]);
+        assert_eq!(
+            open_error_text("Could not load", &with_mix),
+            video_text("lloyd.mp4")
+        );
+        let several = undecodable_error("no audio", &["bass.wav", "drums.wav"]);
+        assert_eq!(
+            open_error_text("Could not load", &several),
+            "Could not load: no audio"
+        );
+    }
+
+    /// The head of an ALAC M4A that states more than the limit refuses it,
+    /// from the `mdhd` in its head, though its `moov` ends after the head.
+    #[test]
+    fn the_head_of_a_long_m4a_states_its_length() {
+        let frames = (1_u64 << 27) + 4096;
+        let layout = m4a::Layout::new(
+            m4a::Codec::Alac,
+            frames,
+            44_100,
+            None,
+            m4a::Order::FastStart,
+        )
+        .expect("the writer takes it");
+        let entry = m4a::SampleEntry::Alac { cookie: [0; 24] };
+        let sizes = vec![20; layout.packets()];
+        let head = layout.head(&entry, &sizes).expect("the head");
+        assert!(head.len() > engine::decode::HEAD_BYTES);
+        let size = (head.len() + 20 * layout.packets()) as u64;
+        let first = Vec::from(&head[..engine::decode::HEAD_BYTES]);
+        assert_eq!(
+            refusal_of_heads(&[("lloyd.m4a".to_string(), first, size)], 100 * 44_100),
+            Some(TooLongToOpen::Stated {
+                frames: frames as usize
+            })
+        );
     }
 
     /// Finding 1-3 of review round 1: when `meta` gives the song's length,

@@ -18,6 +18,11 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
 * `plans/active/tech-debt-rungs.md`: the open entries of `tech-debt.md`, sorted by impact and effort, and closed in three PRs.
+* `plans/completed/m4a.md`: done on 2026-11-11 in PR #43: the app opens M4A (AAC-LC and ALAC) and AIFF songs.  It saves a stem or the mix as an ALAC M4A, or an AAC M4A where the browser can encode it at 256 kbit/s.
+* `plans/completed/m4a-m4.md`: M4 of `plans/completed/m4a.md`, done on 2026-11-11: the Save menu offers an AAC M4A where the page's probe of an AAC encoder at 256 kbit/s passes.  The stem worker encodes the file through WebCodecs.
+* `plans/completed/m4a-m3.md`: M3 of `plans/completed/m4a.md`, done on 2026-11-10: the Save menu offers an ALAC M4A, which the stem worker encodes in blocks on both save paths.
+* `plans/completed/m4a-m2.md`: M2 of `plans/completed/m4a.md`, done on 2026-11-10: the app opens M4A, audio-only `.mp4`, raw `.aac` and AIFF, and trims the AAC encoder delay.  Its retrospective gives the cost of 19 review rounds and the lesson on scope.
+* `plans/completed/m4a-m1.md`: M1 of `plans/completed/m4a.md`, done on 2026-11-08: the `m4a` crate makes an M4A file of 16-bit stereo ALAC, with a safe port of the `alac-encoder` encoder.
 * `plans/completed/harness-phase-3b.md`: phase 3b of that plan, done on 2026-11-02 in PR #41: orchestrated mode by default for big tasks, a stricter fix rule, a model for each agent role, local checks by tier, cleanup, and PR bodies with attention comments.  Its retrospective gives the cost, what went well and what went wrong.
 * `plans/completed/harness-phase-3b-m8.md`: M8 of that plan, done on 2026-11-02, the close-out: the parts of phase 3b in `harness.md`, the gaps that it leaves, and proposals for the later phases.
 * `plans/completed/harness-phase-3b-m7.md`: M7 of that plan, done on 2026-11-02: a PR template, `xtask pr-body` checks a PR body, and `xtask attention` lists the lines for inline comments (decision 0027).
@@ -74,6 +79,8 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0025-a-model-for-each-agent-role.md`: each agent role gets a model and an effort, chosen by a measurement on logged findings (accepted).
 * `decisions/0026-local-checks-by-tier.md`: local checks run by tier and by changed paths; the full set before a push (accepted).
 * `decisions/0027-pr-body-and-attention-comments.md`: a PR body with a summary for people and a section for agents, and inline comments where a person must look (accepted).
+* `decisions/0028-m4a-with-alac-as-the-save-format.md`: the app saves 16-bit stereo ALAC M4A, written by the Pure crate `m4a` with a safe port of `alac-encoder` 0.3.0 (accepted, amended 2026-11-08 and 2026-11-10).
+* `decisions/0029-m4a-is-apache-2-only.md`: the crate `m4a` is Apache-2.0 only, since its ALAC encoder is a port of Apple's Apache-2.0 reference (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References

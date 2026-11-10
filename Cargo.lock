@@ -180,6 +180,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "alac-encoder"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0a32a4e6eec2ede679898711c25120685f4cd472be57be0b98642312232b9f29"
+dependencies = [
+ "log",
+]
+
+[[package]]
 name = "aligned"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -279,6 +288,7 @@ dependencies = [
  "flacenc",
  "js-sys",
  "log",
+ "m4a",
  "stem-protocol",
  "synth",
  "wasm-bindgen",
@@ -2599,6 +2609,7 @@ dependencies = [
  "engine",
  "flacenc",
  "js-sys",
+ "m4a",
  "rusty_mp3",
  "stem-protocol",
  "wasm-bindgen",
@@ -3023,6 +3034,8 @@ dependencies = [
  "dsp",
  "flacenc",
  "js-sys",
+ "m4a",
+ "oxideav-aac",
  "realfft",
  "rusty_mp3",
  "symphonia",
@@ -4819,6 +4832,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "m4a"
+version = "0.1.0"
+dependencies = [
+ "alac-encoder",
+ "symphonia",
+]
+
+[[package]]
 name = "macerator"
 version = "0.2.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5838,6 +5859,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
 dependencies = [
  "ttf-parser",
+]
+
+[[package]]
+name = "oxideav-aac"
+version = "0.1.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35453ffa827080f322dba5d2233879f008627d4ffb07c496c0c6fe3190b35048"
+dependencies = [
+ "oxideav-core",
+]
+
+[[package]]
+name = "oxideav-core"
+version = "0.1.43"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ce90bfbe978dfc46d0c98d137b7c4566ac8eaae8c9209585eb53a8aedb0ef53c"
+dependencies = [
+ "bytemuck",
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -7451,6 +7492,7 @@ dependencies = [
  "flacenc",
  "half",
  "js-sys",
+ "m4a",
  "roformer",
  "roformer-gpu",
  "rusty_mp3",
@@ -7546,8 +7588,12 @@ dependencies = [
  "lazy_static",
  "symphonia-bundle-flac",
  "symphonia-bundle-mp3",
+ "symphonia-codec-aac",
+ "symphonia-codec-adpcm",
+ "symphonia-codec-alac",
  "symphonia-codec-pcm",
  "symphonia-core",
+ "symphonia-format-isomp4",
  "symphonia-format-riff",
  "symphonia-metadata",
 ]
@@ -7572,6 +7618,39 @@ checksum = "98ea5ffc8716bff677dfb3b01b420c7b758de901a72b8c330bf2040ab74b4add"
 dependencies = [
  "lazy_static",
  "log",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-codec-aac"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f5bf8e39552d34a3c4c98333370e62f48c92456d2e814f273b5c3ad7c4a5f45c"
+dependencies = [
+ "lazy_static",
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-codec-adpcm"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "445932ecb0c59362fde9c082dd63a75380650c5077fdb8b80b8cac850442a74c"
+dependencies = [
+ "log",
+ "symphonia-core",
+]
+
+[[package]]
+name = "symphonia-codec-alac"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "920a78f96f3cf62932d0c497959c0cc2100ef36b03c7ca1417b260f432a482d8"
+dependencies = [
+ "log",
+ "symphonia-common",
  "symphonia-core",
 ]
 
@@ -7608,6 +7687,18 @@ dependencies = [
  "log",
  "num-complex",
  "smallvec",
+]
+
+[[package]]
+name = "symphonia-format-isomp4"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e681a70e1870d34e02abf1dbc51e4267c3f1827801474e8870be8c689fc4dc3"
+dependencies = [
+ "log",
+ "symphonia-common",
+ "symphonia-core",
+ "symphonia-metadata",
 ]
 
 [[package]]
@@ -9949,6 +10040,7 @@ dependencies = [
  "flacenc",
  "half",
  "hound",
+ "m4a",
  "proc-macro2",
  "quote",
  "roformer",

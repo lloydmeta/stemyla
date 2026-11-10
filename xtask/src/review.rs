@@ -51,6 +51,7 @@ pub const REVIEWERS: &[Reviewer] = &[
             "roformer-gpu/src/**",
             "synth/src/**",
             "dsp/src/**",
+            "m4a/src/**",
             "**/clippy.toml",
             ".claude/rules/memory.md",
         ],
@@ -1175,12 +1176,31 @@ pub struct Known {
 /// statement in front of a body mutant.  Then the entry goes stale, and its
 /// mutant goes to the validator, so nothing is hidden.
 pub const KNOWN_MISSED: &[Known] = &[
-    // M8, round 2, finding 2-15.
+    // M8, round 2, finding 2-15.  Since Step 6 of M4 of
+    // `docs/plans/completed/m4a.md`, `restore` gives the mark of the log at
+    // its reload, so its body has two mutants (TD-39).
     Known {
         debt: "TD-39",
         file: "xtask/src/e2e/save.rs",
-        mutation: "replace restore -> Result<()> with Ok(())",
+        mutation: "replace restore -> Result<usize> with Ok(0)",
         code: "let id = session_id(seconds);",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace restore -> Result<usize> with Ok(1)",
+        code: "let id = session_id(seconds);",
+        offset: 1,
+    },
+    // M4 of `docs/plans/completed/m4a.md`, review round 2, finding 2-10:
+    // `check_heap` only gives the result of `heap_report` to a `Page`, which
+    // only a live WebDriver makes (TD-39).
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace check_heap with ()",
+        code: "match heap_report(measured, ok, what) {",
         offset: 1,
     },
     // M8, round 2, finding 2-17.
@@ -1188,7 +1208,7 @@ pub const KNOWN_MISSED: &[Known] = &[
         debt: "TD-39",
         file: "xtask/src/e2e/save.rs",
         mutation: "replace save_once -> Result<Save> with Ok(Default::default())",
-        code: "restore(p, seconds)?;",
+        code: "let page = restore(p, seconds)?;",
         offset: 1,
     },
     // M8, round speed 2, finding 2-16.
@@ -2111,6 +2131,7 @@ mod tests {
             ),
             ("synth/src/lib.rs", "memory-reviewer", "synth/src/**"),
             ("dsp/src/mix.rs", "memory-reviewer", "dsp/src/**"),
+            ("m4a/src/lib.rs", "memory-reviewer", "m4a/src/**"),
             ("dsp/clippy.toml", "memory-reviewer", "**/clippy.toml"),
             (
                 ".claude/rules/memory.md",
@@ -4308,6 +4329,15 @@ exit 2
     const SAVE_LINES: &[(&str, usize, &str)] =
         &[(SAVE_RS, 503, CODE_503), (SAVE_RS, 427, CODE_427)];
 
+    /// The first line of the body of the function whose line starts with
+    /// `signature` in `text`.  cargo-mutants puts the mutant of a body on
+    /// it.
+    fn first_body_line(text: &str, signature: &str) -> Option<String> {
+        let mut lines = text.lines().skip_while(|l| !l.starts_with(signature));
+        lines.by_ref().find(|l| l.trim_end().ends_with('{'))?;
+        lines.find(|l| !l.trim().is_empty()).map(String::from)
+    }
+
     #[test]
     fn the_mutant_of_2_17_is_known() {
         let missed = format!("{LINE_2_17}\n");
@@ -4783,8 +4813,20 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     #[test]
     fn the_real_list_knows_2_17_and_not_1_41_or_1_54() {
         let missed = format!("{LINE_1_41}\n{LINE_2_17}\n{LINE_1_54}\n");
+        // Finding 1-3 of review round 1 of M4: the line of the body mutant is
+        // the first statement of `save_once` in the real file, so a new
+        // first statement shows as a drift.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let real = std::fs::read_to_string(root.join(SAVE_RS)).expect("save.rs");
+        let first = first_body_line(&real, "fn save_once(");
+        assert!(first.is_some(), "save_once has a body");
+        let line_at = move |file: &str, n: usize| match (file, n) {
+            (SAVE_RS, 503) => first.clone(),
+            (SAVE_RS, 427) => Some(CODE_427.to_string()),
+            _ => None,
+        };
         assert_eq!(
-            split(&missed, KNOWN_MISSED, lines_of(SAVE_LINES)),
+            split(&missed, KNOWN_MISSED, line_at),
             Split {
                 to_validate: vec![LINE_1_41, LINE_1_54],
                 known: vec![(LINE_2_17, "TD-39")],

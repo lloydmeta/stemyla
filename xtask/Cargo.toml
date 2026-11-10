@@ -8,6 +8,8 @@ anyhow = "1"
 dsp = { version = "0.1.0", path = "../dsp" }
 engine = { version = "0.1.0", path = "../engine" }
 hound = "3.5.1"
+# Writes the ALAC M4A that `e2e decode` drops (TD-52).
+m4a = { version = "0.1.0", path = "../m4a" }
 # Writes the FLAC clip of `e2e separate --flac`.  Pinned: below 1.0, and
 # its API changes with each minor version (DEPS-1).
 flacenc = { version = "=0.5.1", default-features = false }

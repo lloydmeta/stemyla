@@ -9,7 +9,7 @@ cpal = { version = "0.18.2", optional = true }
 cute-dsp = { version = "=0.0.41", optional = true }
 dsp = { version = "0.1.0", path = "../dsp" }
 realfft = "3.5.0"
-symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "wav", "pcm"] }
+symphonia = { version = "0.6.1", default-features = false, features = ["flac", "mp3", "wav", "pcm", "isomp4", "alac", "aac", "aiff", "adpcm"] }
 timestretch = { version = "=0.15.0", optional = true }
 web-time = "1.1.0"
 wsola = { version = "=0.2.0", optional = true }
@@ -25,6 +25,15 @@ flacenc = { version = "=0.5.1", default-features = false }
 # Makes MP3 files with sound in them for the decoder's tests.  The same
 # exact pin as `worker/Cargo.toml` (DEPS-1).
 rusty_mp3 = "=1.0.0"
+# Makes the M4A fixtures of the decoder's tests: every test that needs an
+# M4A uses this writer (TD-52).
+m4a = { version = "0.1.0", path = "../m4a" }
+# Makes AAC packets for the decoder's tests (D3 (a) of the M4A plan).  A
+# test-only crate; it does not ship.  MIT; 0.1.0 on 2026-05-04 and 0.1.7
+# on 2026-09-01; https://github.com/OxideAV/oxideav-aac.  Pinned: below
+# 1.0 and young (DEPS-1).  Its one dependency, `oxideav-core`, is also a
+# test-only crate here, and has `unsafe` code; `Cargo.lock` pins it.
+oxideav-aac = "=0.1.7"
 
 [features]
 default = ["stretch-timestretch", "stretch-wsola", "stretch-cute"]

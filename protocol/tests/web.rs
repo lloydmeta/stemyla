@@ -354,49 +354,111 @@ fn an_mp3_request_keeps_its_name_and_rate() {
     }
 }
 
+/// The kinds whose reply carries a `Blob`, and whose requests and replies
+/// have the same form.
+const BLOB_KINDS: [&str; 3] = ["flac", "alac", "aac"];
+
+/// The request of the `kind` of [`BLOB_KINDS`].
+fn blob_request(kind: &str, name: Option<String>, source: Encode) -> Request {
+    match kind {
+        "flac" => Request::Flac { name, source },
+        "alac" => Request::Alac { name, source },
+        "aac" => Request::Aac { name, source },
+        other => panic!("{other} is not a kind of BLOB_KINDS"),
+    }
+}
+
+/// The reply of the `kind` of [`BLOB_KINDS`].
+fn blob_reply(kind: &str, name: &str, file: Encoded) -> Reply {
+    let name = name.to_string();
+    match kind {
+        "flac" => Reply::Flac { name, file },
+        "alac" => Reply::Alac { name, file },
+        "aac" => Reply::Aac { name, file },
+        other => panic!("{other} is not a kind of BLOB_KINDS"),
+    }
+}
+
+/// The name and source of an encode request.
+fn encode_request(r: Request) -> Option<(Option<String>, Encode)> {
+    match r {
+        Request::Mp3 { name, source }
+        | Request::Flac { name, source }
+        | Request::Alac { name, source }
+        | Request::Aac { name, source } => Some((name, source)),
+        _ => None,
+    }
+}
+
+/// The name and file of an encode reply.
+fn encode_reply(r: Reply) -> Option<(String, Encoded)> {
+    match r {
+        Reply::Mp3 { name, file }
+        | Reply::Flac { name, file }
+        | Reply::Alac { name, file }
+        | Reply::Aac { name, file } => Some((name, file)),
+        _ => None,
+    }
+}
+
+/// The request of `kind` after its trip, which first asserts the `type`
+/// on the wire.
+fn blob_trip(kind: &str, r: &Request) -> ToWorker {
+    let (msg, transfer) = r.to_js(&Settings::default());
+    assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
+    ToWorker::from_js(&post(&msg, &transfer)).expect("decodes")
+}
+
 #[wasm_bindgen_test]
-fn a_flac_request_keeps_its_name_and_rate() {
-    let (left, right) = (samples(&[0.1]), samples(&[0.2]));
-    let r = Request::Flac {
-        name: Some("bass.flac".into()),
-        source: Encode::Arrays {
-            left: left.clone(),
-            right: right.clone(),
-            rate: Some(48_000),
-        },
-    };
-    match request_trip(&r, &Settings::default()).request {
-        Request::Flac {
-            name,
-            source:
+fn a_blob_kind_request_keeps_its_name_and_rate() {
+    for kind in BLOB_KINDS {
+        let (left, right) = (samples(&[0.1]), samples(&[0.2]));
+        let r = blob_request(
+            kind,
+            Some(format!("bass.{kind}")),
+            Encode::Arrays {
+                left: left.clone(),
+                right: right.clone(),
+                rate: Some(48_000),
+            },
+        );
+        let got = blob_trip(kind, &r).request;
+        assert_eq!(got.kind(), kind);
+        match encode_request(got) {
+            Some((
+                name,
                 Encode::Arrays {
                     left: l,
                     right: r,
                     rate,
                 },
-        } => {
-            assert_eq!(name.as_deref(), Some("bass.flac"));
-            assert_eq!(rate, Some(48_000));
-            assert_eq!((l.to_vec(), r.to_vec()), (vec![0.1], vec![0.2]));
+            )) => {
+                assert_eq!(name, Some(format!("bass.{kind}")));
+                assert_eq!(rate, Some(48_000));
+                assert_eq!((l.to_vec(), r.to_vec()), (vec![0.1], vec![0.2]));
+            }
+            other => panic!("{kind}: {other:?}"),
         }
-        other => panic!("{other:?}"),
+        assert_eq!(left.length() + right.length(), 0, "{kind}: transferred");
+        let none = blob_request(
+            kind,
+            None,
+            Encode::Arrays {
+                left: samples(&[0.1]),
+                right: samples(&[0.2]),
+                rate: None,
+            },
+        );
+        let got = blob_trip(kind, &none).request;
+        assert_eq!(got.kind(), kind);
+        assert!(
+            matches!(
+                encode_request(got),
+                Some((None, Encode::Arrays { rate: None, .. }))
+            ),
+            "{kind}: no name and no rate"
+        );
     }
-    assert_eq!(left.length() + right.length(), 0, "transferred");
-    let none = Request::Flac {
-        name: None,
-        source: Encode::Arrays {
-            left: samples(&[0.1]),
-            right: samples(&[0.2]),
-            rate: None,
-        },
-    };
-    assert!(matches!(
-        request_trip(&none, &Settings::default()).request,
-        Request::Flac {
-            source: Encode::Arrays { rate: None, .. },
-            ..
-        }
-    ));
 }
 
 fn stored_encode() -> Encode {
@@ -412,24 +474,42 @@ fn stored_encode() -> Encode {
 /// cross.
 #[wasm_bindgen_test]
 fn a_stored_encode_names_its_files_and_transfers_nothing() {
-    for r in [
-        Request::Flac {
-            name: Some("lloyd - mix.flac".into()),
-            source: stored_encode(),
-        },
-        Request::Mp3 {
-            name: Some("lloyd - mix.mp3".into()),
-            source: stored_encode(),
-        },
+    for (kind, r) in [
+        (
+            "flac",
+            Request::Flac {
+                name: Some("lloyd - mix.flac".into()),
+                source: stored_encode(),
+            },
+        ),
+        (
+            "alac",
+            Request::Alac {
+                name: Some("lloyd - mix.m4a".into()),
+                source: stored_encode(),
+            },
+        ),
+        (
+            "aac",
+            Request::Aac {
+                name: Some("lloyd - mix.m4a".into()),
+                source: stored_encode(),
+            },
+        ),
+        (
+            "mp3",
+            Request::Mp3 {
+                name: Some("lloyd - mix.mp3".into()),
+                source: stored_encode(),
+            },
+        ),
     ] {
         let (msg, transfer) = r.to_js(&Settings::default());
-        assert_eq!(transfer.length(), 0, "{}: no samples cross", r.kind());
+        assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
+        assert_eq!(transfer.length(), 0, "{kind}: no samples cross");
         let got = ToWorker::from_js(&post(&msg, &transfer)).expect("decodes");
-        assert_eq!(got.request.kind(), r.kind());
-        let (name, source) = match got.request {
-            Request::Flac { name, source } | Request::Mp3 { name, source } => (name, source),
-            other => panic!("{other:?}"),
-        };
+        assert_eq!(got.request.kind(), kind);
+        let (name, source) = encode_request(got.request).expect("an encode request");
         assert!(name.is_some_and(|n| n.starts_with("lloyd - mix.")));
         match source {
             Encode::Stored {
@@ -453,7 +533,7 @@ fn a_stored_encode_names_its_files_and_transfers_nothing() {
 /// not read as a default.
 #[wasm_bindgen_test]
 fn an_encode_must_name_one_source_with_whole_frames_and_an_output() {
-    for kind in ["flac", "mp3"] {
+    for kind in ["flac", "alac", "aac", "mp3"] {
         let err = |json: &str| {
             let e = ToWorker::from_js(&from_json(&json.replace("KIND", kind)))
                 .expect_err(&format!("{kind}: {json}"));
@@ -506,14 +586,8 @@ fn an_encode_must_name_one_source_with_whole_frames_and_an_output() {
         );
         assert!(
             matches!(
-                ToWorker::from_js(&least).map(|w| w.request),
-                Ok(Request::Flac {
-                    source: Encode::Stored { rate: 1, .. },
-                    ..
-                } | Request::Mp3 {
-                    source: Encode::Stored { rate: 1, .. },
-                    ..
-                })
+                ToWorker::from_js(&least).map(|w| (w.request.kind(), encode_request(w.request))),
+                Ok((k, Some((_, Encode::Stored { rate: 1, .. })))) if k == kind
             ),
             "{kind}: 1 Hz decodes as 1"
         );
@@ -523,14 +597,8 @@ fn an_encode_must_name_one_source_with_whole_frames_and_an_output() {
         );
         assert!(
             matches!(
-                ToWorker::from_js(&most).map(|w| w.request),
-                Ok(Request::Flac {
-                    source: Encode::Stored { rate: u32::MAX, .. },
-                    ..
-                } | Request::Mp3 {
-                    source: Encode::Stored { rate: u32::MAX, .. },
-                    ..
-                })
+                ToWorker::from_js(&most).map(|w| (w.request.kind(), encode_request(w.request))),
+                Ok((k, Some((_, Encode::Stored { rate: u32::MAX, .. })))) if k == kind
             ),
             "{kind}: u32::MAX Hz is the most"
         );
@@ -784,18 +852,21 @@ fn an_mp3_reply_transfers_its_file() {
 /// A `Blob` is not transferable: it crosses as a reference to the same
 /// file, so the reply keeps it whole and the page does not copy it.
 #[wasm_bindgen_test]
-fn a_flac_reply_keeps_its_blob() {
-    let parts = Array::of1(&Uint8Array::from(&b"fLaC"[..]));
-    let file = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
-    match reply_trip(&Reply::Flac {
-        name: "bass.flac".into(),
-        file: Encoded::Blob(file),
-    }) {
-        Reply::Flac {
-            name,
-            file: Encoded::Blob(file),
-        } => assert_eq!((name.as_str(), file.size()), ("bass.flac", 4.0)),
-        other => panic!("{other:?}"),
+fn a_blob_reply_keeps_its_blob() {
+    for kind in BLOB_KINDS {
+        let parts = Array::of1(&Uint8Array::from(&b"fLaC"[..]));
+        let file = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
+        let reply = blob_reply(kind, "bass", Encoded::Blob(file));
+        let (msg, transfer) = reply.to_js();
+        assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
+        let got = Reply::from_js(&post(&msg, &transfer)).expect("decodes");
+        assert_eq!(got.kind(), kind);
+        match encode_reply(got) {
+            Some((name, Encoded::Blob(file))) => {
+                assert_eq!((name.as_str(), file.size()), ("bass", 4.0), "{kind}")
+            }
+            other => panic!("{kind}: {other:?}"),
+        }
     }
 }
 
@@ -803,74 +874,97 @@ fn a_flac_reply_keeps_its_blob() {
 /// reason it failed, and transfers nothing.
 #[wasm_bindgen_test]
 fn a_stored_encode_reply_names_its_file_or_why_it_failed() {
-    let made = |name: &str, file: Encoded, flac: bool| {
-        let name = name.to_string();
-        if flac {
-            Reply::Flac { name, file }
-        } else {
-            Reply::Mp3 { name, file }
-        }
+    let made = |kind: &str, file: Encoded| match kind {
+        "mp3" => Reply::Mp3 {
+            name: "bass".into(),
+            file,
+        },
+        blob_kind => blob_reply(blob_kind, "bass", file),
     };
-    for flac in [true, false] {
+    for kind in ["flac", "alac", "aac", "mp3"] {
         let stored = made(
-            "bass",
+            kind,
             Encoded::Stored {
                 path: "saves/1-2.flac".into(),
             },
-            flac,
         );
-        let (_, transfer) = stored.to_js();
-        assert_eq!(transfer.length(), 0, "nothing crosses");
-        let file = match reply_trip(&stored) {
-            Reply::Flac { name, file } | Reply::Mp3 { name, file } => {
-                assert_eq!(name, "bass");
-                file
-            }
-            other => panic!("{other:?}"),
-        };
+        let (msg, transfer) = stored.to_js();
+        assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
+        assert_eq!(transfer.length(), 0, "{kind}: nothing crosses");
+        let got = reply_trip(&stored);
+        assert_eq!(got.kind(), kind);
+        let (name, file) = encode_reply(got).expect("an encode reply");
+        assert_eq!(name, "bass");
         assert!(
             matches!(&file, Encoded::Stored { path } if path == "saves/1-2.flac"),
-            "{file:?}"
+            "{kind}: {file:?}"
         );
-        let failed = made(
-            "bass",
-            Encoded::Failed {
-                path: "saves/1-2.mp3".into(),
-                text: "QuotaExceededError: the disk is full".into(),
-            },
-            flac,
-        );
-        let (_, transfer) = failed.to_js();
-        assert_eq!(transfer.length(), 0, "nothing crosses");
-        match reply_trip(&failed) {
-            Reply::Flac {
-                file: Encoded::Failed { path, text },
-                ..
+        // M4 of `plans/completed/m4a.md`: a failure of the encoder, or of
+        // browser storage.
+        for in_encoder in [false, true] {
+            let failed = made(
+                kind,
+                Encoded::Failed {
+                    path: "saves/1-2.mp3".into(),
+                    text: "QuotaExceededError: the disk is full".into(),
+                    in_encoder,
+                },
+            );
+            let (msg, transfer) = failed.to_js();
+            assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
+            assert_eq!(transfer.length(), 0, "{kind}: nothing crosses");
+            let got = reply_trip(&failed);
+            assert_eq!(got.kind(), kind);
+            match encode_reply(got) {
+                Some((
+                    _,
+                    Encoded::Failed {
+                        path,
+                        text,
+                        in_encoder: got,
+                    },
+                )) => {
+                    assert_eq!(path, "saves/1-2.mp3");
+                    assert_eq!(text, "QuotaExceededError: the disk is full");
+                    assert_eq!(got, in_encoder, "{kind}: in_encoder");
+                }
+                other => panic!("{kind}: {other:?}"),
             }
-            | Reply::Mp3 {
-                file: Encoded::Failed { path, text },
-                ..
-            } => {
-                assert_eq!(path, "saves/1-2.mp3");
-                assert_eq!(text, "QuotaExceededError: the disk is full");
-            }
-            other => panic!("{other:?}"),
         }
     }
 }
 
-/// Nit 2-7 of review round 2 of M8: an MP3 reply carries bytes and a FLAC
-/// reply a `Blob`.  A reply made with the other codec's payload does not
-/// arrive.
+/// M4 of `plans/completed/m4a.md`, TD-16: a failed reply with no `in_encoder`,
+/// as an older worker sends, is a failure of browser storage.
+#[wasm_bindgen_test]
+fn a_failed_reply_without_in_encoder_is_a_storage_failure() {
+    for kind in ["flac", "alac", "aac", "mp3"] {
+        let json = format!(
+            r#"{{"type": "{kind}", "name": "bass", "path": "saves/1-1.m4a", "failed": "full"}}"#
+        );
+        let got = Reply::from_js(&from_json(&json)).map(encode_reply);
+        assert!(
+            matches!(
+                &got,
+                Ok(Some((_, Encoded::Failed { in_encoder: false, text, .. }))) if text == "full"
+            ),
+            "{kind}: {got:?}"
+        );
+    }
+}
+
+/// Nit 2-7 of review round 2 of M8: an MP3 reply carries bytes, and a FLAC
+/// or an ALAC reply a `Blob`.  A reply made with the other codec's payload
+/// does not arrive.
 #[wasm_bindgen_test]
 fn a_reply_with_the_other_codecs_file_is_refused() {
-    let flac = Reply::Flac {
-        name: "bass.flac".into(),
-        file: Encoded::Bytes(Uint8Array::from(&[1u8][..])),
-    };
-    let (msg, transfer) = flac.to_js();
-    let e = Reply::from_js(&post(&msg, &transfer)).expect_err("refused");
-    assert_eq!(e.text, "flac message: no file");
+    for kind in BLOB_KINDS {
+        let blob_kind = blob_reply(kind, "bass", Encoded::Bytes(Uint8Array::from(&[1u8][..])));
+        let (msg, transfer) = blob_kind.to_js();
+        assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
+        let e = Reply::from_js(&post(&msg, &transfer)).expect_err("refused");
+        assert_eq!(e.text, format!("{kind} message: no file"));
+    }
     let mp3 = Reply::Mp3 {
         name: "bass.mp3".into(),
         file: Encoded::Blob(blob(&[1])),
@@ -881,46 +975,56 @@ fn a_reply_with_the_other_codecs_file_is_refused() {
 }
 
 #[wasm_bindgen_test]
-fn a_flac_reply_without_a_file_is_refused() {
-    for (json, why) in [
+fn an_encode_reply_without_its_file_is_refused() {
+    let mut cases = vec![
         (
-            r#"{"type": "flac", "name": "bass.flac", "file": 1}"#,
-            "no file",
-        ),
-        (r#"{"type": "flac", "name": "bass.flac"}"#, "no file"),
-        (r#"{"type": "mp3", "name": "bass.mp3"}"#, "no bytes"),
-        (
-            r#"{"type": "mp3", "name": "bass.mp3", "bytes": [1]}"#,
+            r#"{"type": "mp3", "name": "bass.mp3"}"#.to_string(),
             "no bytes",
         ),
         (
-            r#"{"type": "flac", "name": "bass.flac", "path": 3}"#,
-            "path must be a path",
+            r#"{"type": "mp3", "name": "bass.mp3", "bytes": [1]}"#.to_string(),
+            "no bytes",
         ),
         (
-            r#"{"type": "mp3", "name": "bass.mp3", "path": "saves/1-1.mp3", "failed": 3}"#,
+            r#"{"type": "mp3", "name": "bass.mp3", "path": "saves/1-1.mp3", "failed": 3}"#
+                .to_string(),
             "failed must be text",
         ),
-    ] {
-        let kind = if json.contains(r#""type": "flac""#) {
-            "flac"
-        } else {
-            "mp3"
-        };
-        let e = Reply::from_js(&from_json(json)).expect_err(json);
+    ];
+    for kind in BLOB_KINDS {
+        for (json, why) in [
+            (r#"{"type": "KIND", "name": "bass", "file": 1}"#, "no file"),
+            (r#"{"type": "KIND", "name": "bass"}"#, "no file"),
+            (
+                r#"{"type": "KIND", "name": "bass", "path": 3}"#,
+                "path must be a path",
+            ),
+            (
+                r#"{"type": "KIND", "name": "bass", "path": "saves/1-1.m4a", "failed": 3}"#,
+                "failed must be text",
+            ),
+            (
+                r#"{"type": "KIND", "name": "bass", "path": "saves/1-1.m4a", "failed": "x", "in_encoder": "yes"}"#,
+                "in_encoder must be true or false",
+            ),
+        ] {
+            cases.push((json.replace("KIND", kind), why));
+        }
+    }
+    for (json, why) in cases {
+        let kind = stem_protocol::kind_of(&from_json(&json));
+        let e = Reply::from_js(&from_json(&json)).expect_err(&json);
         assert_eq!(e.kind, kind, "{json}");
         assert_eq!(e.text, format!("{kind} message: {why}"), "{json}");
     }
-    // Nit 1-13 of review round 1 of M8: an MP3 carries bytes, and a FLAC a
-    // `Blob`, never the other way round.
-    let flac_with_bytes = from_json(r#"{"type": "flac", "name": "bass.flac"}"#);
-    let _ = Reflect::set(
-        &flac_with_bytes,
-        &"bytes".into(),
-        &Uint8Array::from(&[1u8][..]),
-    );
-    let e = Reply::from_js(&flac_with_bytes).expect_err("refused");
-    assert_eq!(e.text, "flac message: no file");
+    // Nit 1-13 of review round 1 of M8: an MP3 carries bytes, and a FLAC or
+    // an ALAC a `Blob`, never the other way round.
+    for kind in BLOB_KINDS {
+        let with_bytes = from_json(&format!(r#"{{"type": "{kind}", "name": "bass"}}"#));
+        let _ = Reflect::set(&with_bytes, &"bytes".into(), &Uint8Array::from(&[1u8][..]));
+        let e = Reply::from_js(&with_bytes).expect_err("refused");
+        assert_eq!(e.text, format!("{kind} message: no file"));
+    }
     let mp3_with_a_blob = from_json(r#"{"type": "mp3", "name": "bass.mp3"}"#);
     let _ = Reflect::set(&mp3_with_a_blob, &"file".into(), &blob(&[1]));
     let e = Reply::from_js(&mp3_with_a_blob).expect_err("refused");

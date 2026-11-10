@@ -405,6 +405,7 @@ check: skip: cargo clippy -p app --all-targets -- -D warnings (no changed member
 check: skip: cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings (no changed member is in the closure of the wasm32 packages)
 check: run: cargo test -p xtask --lib --test rules --test docs --test review (these tests read the whole repo, and xtask is not a dependent of a changed member)
 check: run: cargo test --workspace --exclude roformer-gpu (the changed members and their dependents are every member but roformer-gpu)
+check: skip: cargo test -p engine (the crate tests do not build engine with a member outside its closure and dependents; tier push runs it)
 check: skip: cargo test -p roformer-gpu --lib (roformer-gpu is not a dependent of a changed member)
 check: skip: cargo test -p roformer-gpu --doc (roformer-gpu is not a dependent of a changed member)
 check: skip: STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release (it needs a GPU adapter, and tier push runs it when its paths change GPU code; GPU-2 asks for it on a kernel change, and a pass counts for GPU-3 only on a real GPU named in the PR)
@@ -444,7 +445,7 @@ fn the_dry_run_prints_each_strict_hit_and_tier_push() {
             "check: run: cargo fmt --all --check (tier push runs every line)",
         ]
     );
-    assert_eq!(stdout.lines().count(), 7 + 17);
+    assert_eq!(stdout.lines().count(), 7 + 18);
 }
 
 #[test]

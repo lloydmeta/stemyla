@@ -1,12 +1,12 @@
 # Local browser testing
 
-Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 26.7.1, Safari 27.0), as of 2026-10-19.  The commands and their prerequisites are in `README.md` (browser tests); this is what that machine adds.
+Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 26.7.1, Safari 27.0), as of 2026-10-19.  Since 2026-11-10, the maintainer also runs them on an Apple silicon Mac (arm64).  The commands and their prerequisites are in `README.md` (browser tests); this is what those machines add.
 
 ## Which browser
 
 * Safari is the local default.  `safaridriver` failed every session for part of 2026-10-18 ("The session timed out while connecting to a Safari instance") and worked again later that day.  Try Safari first.  If a session times out, quit Safari and retry: on 2026-10-22, sessions timed out while Safari was open, also outside the sandbox, and worked once it was quit.  If they still time out, use `--browser chrome` and say in the PR that Safari is unverified.
 * A probe that leaves its WebDriver session open makes later sessions fail with "already paired with another WebDriver session".  End stale sessions before retrying.
-* Chrome needs a Chrome for Testing chromedriver of Chrome's major version, for mac-x64, in `CHROMEDRIVER` ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)).  Keep it outside the repo and reuse it rather than downloading it again each session.  Chrome updates itself: on 2026-10-29 it went from 155 to 156 during a run, and chromedriver 155 still drove it, with a warning ("has not been tested with Chrome version 156").
+* Chrome needs a Chrome for Testing chromedriver of Chrome's major version, in `CHROMEDRIVER`.  Take the build for the CPU of the Mac: `mac-x64` for an Intel Mac, `mac-arm64` for Apple silicon ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)).  Keep it outside the repo and reuse it rather than downloading it again each session.  Chrome updates itself: on 2026-10-29 it went from 155 to 156 during a run, and chromedriver 155 still drove it, with a warning ("has not been tested with Chrome version 156").
 
 ## Known local failures
 
@@ -26,7 +26,7 @@ A test that clicks a download link saves the file in `~/Downloads`: headless Chr
 
 ## The model
 
-`e2e selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems` and `weights` need the model weights (`--weights <path>`), which are never in the repo (ASSET-1).  The PyTorch reference fixtures from `tools/roformer_export.py` are not on this machine, so the reference tests skip, and `STEMYLA_REQUIRE=fixtures` makes them fail (TD-8).
+`e2e selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems` and `weights` need the model weights (`--weights <path>`), which are never in the repo (ASSET-1).  The PyTorch reference fixtures from `tools/roformer_export.py` are not on either Mac, so the reference tests skip, and `STEMYLA_REQUIRE=fixtures` makes them fail (TD-8).
 
 ## Memory on an iPhone
 

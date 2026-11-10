@@ -111,6 +111,32 @@ pub enum Event {
         name: String,
         file: Encoded,
     },
+    /// The encoded ALAC M4A: a `Blob`, as the worker sent it (the memory
+    /// path), or its path in browser storage (the storage path).
+    Alac {
+        name: String,
+        file: Encoded,
+    },
+    /// The encoded AAC M4A: a `Blob`, as the worker sent it (the memory
+    /// path), or its path in browser storage (the storage path).
+    Aac {
+        name: String,
+        file: Encoded,
+    },
+}
+
+impl Event {
+    /// The `type` of the request whose file this event carries: `mp3`,
+    /// `flac`, `alac` or `aac`.  `None` for an event of no encode.
+    pub fn encode_kind(&self) -> Option<&'static str> {
+        match self {
+            Event::Mp3 { .. } => Some(kind::MP3),
+            Event::Flac { .. } => Some(kind::FLAC),
+            Event::Alac { .. } => Some(kind::ALAC),
+            Event::Aac { .. } => Some(kind::AAC),
+            _ => None,
+        }
+    }
 }
 
 pub struct Separator {
@@ -124,7 +150,7 @@ pub struct Separator {
     /// runs them in that order, and ends each with one `done`, `error` or
     /// `unstored`, so each reply belongs to the oldest one.
     separations: Rc<RefCell<VecDeque<Posted>>>,
-    /// Sent with every request but MP3 and FLAC encoding.
+    /// Sent with every request but MP3, FLAC, ALAC and AAC encoding.
     settings: Settings,
     pub model_ready: bool,
     /// Whether browser storage holds a model file, usable or not.
@@ -355,8 +381,8 @@ impl Separator {
                     posted.borrow_mut().pop_front();
                     Some(Event::Unstored(text))
                 }
-                // An MP3, FLAC or self-test error leaves a running
-                // separation be.
+                // An error of a request other than `separate` leaves a
+                // running separation be.
                 Reply::Error { of, text } if of != kind::SEPARATE => {
                     Some(Event::Error { of, text })
                 }
@@ -372,6 +398,8 @@ impl Separator {
                 Reply::Bench(text) => Some(Event::Bench(text)),
                 Reply::Mp3 { name, file } => Some(Event::Mp3 { name, file }),
                 Reply::Flac { name, file } => Some(Event::Flac { name, file }),
+                Reply::Alac { name, file } => Some(Event::Alac { name, file }),
+                Reply::Aac { name, file } => Some(Event::Aac { name, file }),
                 Reply::Download { done, total } => Some(Event::Download { done, total }),
             };
             if let Some(event) = event {
@@ -502,6 +530,28 @@ impl Separator {
     /// stored WAV crosses as its path.
     pub fn encode_flac(&self, name: &str, source: Encode) {
         let request = Request::Flac {
+            name: Some(name.into()),
+            source,
+        };
+        post(&self.worker, &request, &Settings::default());
+    }
+
+    /// Asks the worker to encode a stem or a mix as a 16-bit ALAC M4A; the
+    /// file comes back as [`Event::Alac`].  Arrays are transferred (MEM-2); a
+    /// stored WAV crosses as its path.
+    pub fn encode_alac(&self, name: &str, source: Encode) {
+        let request = Request::Alac {
+            name: Some(name.into()),
+            source,
+        };
+        post(&self.worker, &request, &Settings::default());
+    }
+
+    /// Asks the worker to encode a stem or a mix as an AAC-LC M4A, with the
+    /// browser's `AudioEncoder`; the file comes back as [`Event::Aac`].
+    /// Arrays are transferred (MEM-2); a stored WAV crosses as its path.
+    pub fn encode_aac(&self, name: &str, source: Encode) {
+        let request = Request::Aac {
             name: Some(name.into()),
             source,
         };
@@ -697,6 +747,54 @@ export function spy_on_post(worker) {
     }
 
     #[wasm_bindgen_test]
+    fn encode_alac_asks_the_worker_for_an_m4a_of_the_arrays() {
+        let (request, transfer, left, right) = posted_encode(48_000, |sep, source| {
+            sep.encode_alac("lloyd - bass.m4a", source);
+        });
+        assert_eq!(request.kind(), "alac", "an alac request");
+        match request {
+            Request::Alac {
+                name,
+                source:
+                    Encode::Arrays {
+                        left: l,
+                        right: r,
+                        rate,
+                    },
+            } => {
+                assert_eq!(name.as_deref(), Some("lloyd - bass.m4a"));
+                assert_eq!(rate, Some(48_000));
+                assert_sent_as_they_are(&transfer, (&left, &right), (&l, &r));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_aac_asks_the_worker_for_an_m4a_of_the_arrays() {
+        let (request, transfer, left, right) = posted_encode(44_100, |sep, source| {
+            sep.encode_aac("lloyd - bass.m4a", source);
+        });
+        assert_eq!(request.kind(), "aac", "an aac request");
+        match request {
+            Request::Aac {
+                name,
+                source:
+                    Encode::Arrays {
+                        left: l,
+                        right: r,
+                        rate,
+                    },
+            } => {
+                assert_eq!(name.as_deref(), Some("lloyd - bass.m4a"));
+                assert_eq!(rate, Some(44_100));
+                assert_sent_as_they_are(&transfer, (&left, &right), (&l, &r));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[wasm_bindgen_test]
     fn encode_mp3_asks_the_worker_for_an_mp3_of_the_arrays() {
         let (request, transfer, left, right) = posted_encode(44_100, |sep, source| {
             sep.encode_mp3("lloyd - mix without vocals.mp3", source);
@@ -767,6 +865,7 @@ export function spy_on_post(worker) {
                 file: Encoded::Failed {
                     path: "saves/1-2.mp3".into(),
                     text: "QuotaExceededError: full".into(),
+                    in_encoder: false,
                 },
             },
         ] {
@@ -783,7 +882,7 @@ export function spy_on_post(worker) {
                 } => Some(format!("flac {name} {path}")),
                 Event::Mp3 {
                     name,
-                    file: Encoded::Failed { path, text },
+                    file: Encoded::Failed { path, text, .. },
                 } => Some(format!("mp3 {name} {path} {text}")),
                 _ => None,
             })
@@ -1101,6 +1200,68 @@ export function spy_on_post(worker) {
             Object::is(&file, &sent),
             "MEM-1: the page made a new file from the FLAC that the worker sent.  \
              Fix: keep the Blob in Event::Flac."
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn an_alac_reply_reaches_the_page_as_sent() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let parts = js_sys::Array::of1(&Uint8Array::from(&b"ftyp"[..]));
+        let sent = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
+        let (message, _) = Reply::Alac {
+            name: "bass.m4a".into(),
+            file: Encoded::Blob(sent.clone()),
+        }
+        .to_js();
+        deliver(&sep.worker, &message);
+        let alac = sep.take_events().into_iter().find_map(|e| match e {
+            Event::Alac {
+                name,
+                file: Encoded::Blob(file),
+            } => Some((name, file)),
+            _ => None,
+        });
+        // Before any assert: a failed assert aborts the test.
+        sep.stop();
+        assert!(alac.is_some(), "an Event::Alac of the reply");
+        let (name, file) = alac.expect("an Event::Alac");
+        assert_eq!(name, "bass.m4a");
+        assert!(
+            Object::is(&file, &sent),
+            "MEM-1: the page made a new file from the M4A that the worker sent.  \
+             Fix: keep the Blob in Event::Alac."
+        );
+    }
+
+    /// M4 of `plans/completed/m4a.md`: an AAC reply reaches the page as an
+    /// `Event::Aac` with the worker's `Blob`.
+    #[wasm_bindgen_test]
+    fn an_aac_reply_reaches_the_page_as_sent() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let parts = js_sys::Array::of1(&Uint8Array::from(&b"ftyp"[..]));
+        let sent = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
+        let (message, _) = Reply::Aac {
+            name: "bass.m4a".into(),
+            file: Encoded::Blob(sent.clone()),
+        }
+        .to_js();
+        deliver(&sep.worker, &message);
+        let aac = sep.take_events().into_iter().find_map(|e| match e {
+            Event::Aac {
+                name,
+                file: Encoded::Blob(file),
+            } => Some((name, file)),
+            _ => None,
+        });
+        // Before any assert: a failed assert aborts the test.
+        sep.stop();
+        assert!(aac.is_some(), "an Event::Aac of the reply");
+        let (name, file) = aac.expect("an Event::Aac");
+        assert_eq!(name, "bass.m4a");
+        assert!(
+            Object::is(&file, &sent),
+            "MEM-1: the page made a new file from the M4A that the worker sent.  \
+             Fix: keep the Blob in Event::Aac."
         );
     }
 }

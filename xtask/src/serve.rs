@@ -169,6 +169,9 @@ fn content_type(path: &Path) -> &'static str {
         "wav" => "audio/wav",
         "mp3" => "audio/mpeg",
         "flac" => "audio/flac",
+        "m4a" | "mp4" => "audio/mp4",
+        "aac" => "audio/aac",
+        "aif" | "aiff" | "aifc" => "audio/aiff",
         _ => "application/octet-stream",
     }
 }
@@ -299,6 +302,12 @@ mod tests {
             ("a.wav", "audio/wav"),
             ("a.mp3", "audio/mpeg"),
             ("a.flac", "audio/flac"),
+            ("a.m4a", "audio/mp4"),
+            ("a.mp4", "audio/mp4"),
+            ("a.aac", "audio/aac"),
+            ("a.aif", "audio/aiff"),
+            ("a.aiff", "audio/aiff"),
+            ("a.aifc", "audio/aiff"),
             ("a.ogg", "application/octet-stream"),
         ] {
             assert_eq!(content_type(Path::new(file)), media_type, "{file}");

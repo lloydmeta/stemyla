@@ -88,10 +88,11 @@ const APP_CLIPPY: usize = 4;
 const APP_ALL_CLIPPY: usize = 5;
 const WASM_CLIPPY: usize = 6;
 const WORKSPACE_TESTS: usize = 7;
-const GPU_LIB: usize = 8;
-const GPU_DOC: usize = 9;
-const GPU_TESTS: usize = 10;
-const TRUNK: usize = 11;
+const ENGINE_TESTS: usize = 8;
+const GPU_LIB: usize = 9;
+const GPU_DOC: usize = 10;
+const GPU_TESTS: usize = 11;
+const TRUNK: usize = 12;
 
 /// The packages of the wasm32 clippy line.
 const WASM_PACKAGES: [&str; 5] = [
@@ -105,6 +106,11 @@ const WASM_PACKAGES: [&str; 5] = [
 /// The package that the workspace test line leaves out.
 const ROFORMER_GPU: &str = "roformer-gpu";
 
+/// The package that a line tests alone, since a test build with other
+/// members merges their features into it and its dependencies.  An
+/// example is `app`, whose default feature `audio` turns on `engine/cpal`.
+const ENGINE: &str = "engine";
+
 /// The variable that names what a test must not skip (`test-support`).
 const REQUIRE: &str = "STEMYLA_REQUIRE";
 
@@ -112,7 +118,7 @@ const REQUIRE: &str = "STEMYLA_REQUIRE";
 /// [`with_gpu_require`] can replace it.
 const GPU_FORM: &str = "gpu,f16";
 
-/// The 12 lines of tier `push`, in the order that it runs them.
+/// The 13 lines of tier `push`, in the order that it runs them.
 pub fn lines() -> Vec<Check> {
     let wasm = format!(
         "cargo clippy --target wasm32-unknown-unknown -p {} --all-targets -- -D warnings",
@@ -127,6 +133,7 @@ pub fn lines() -> Vec<Check> {
         "cargo clippy -p app --all-targets -- -D warnings",
         &wasm,
         "cargo test --workspace --exclude roformer-gpu",
+        "cargo test -p engine",
         "cargo test -p roformer-gpu --lib",
         "cargo test -p roformer-gpu --doc",
         "cargo test -p roformer-gpu --release",
@@ -650,6 +657,12 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
             "the crate tests cover the changed members and their dependents; tier push runs it",
         ));
     }
+    choices.push(run_if(
+        line(ENGINE_TESTS),
+        merges_into_engine(graph, &tested),
+        "the crate tests build engine with a member outside its closure and dependents, whose features can reach engine",
+        "the crate tests do not build engine with a member outside its closure and dependents; tier push runs it",
+    ));
     let gpu = dependents.contains(ROFORMER_GPU);
     for index in [GPU_LIB, GPU_DOC] {
         choices.push(run_if(
@@ -662,6 +675,31 @@ fn commit_choices(paths: &[String], graph: &Graph) -> Vec<Choice> {
     choices.push(skip(line(GPU_TESTS), COMMIT_GPU));
     choices.push(skip(line(TRUNK), COMMIT_TRUNK));
     choices
+}
+
+/// True when `tested` holds `engine` and a member outside the closure and
+/// the dependents of `engine`.  Then one test build has both, so the
+/// features of that member can reach the dependencies of `engine`.  It
+/// cannot see a member in the closure of `engine` whose dependents are all
+/// in the family, such as `dsp`.  `m4a` is in the closure too, since
+/// `engine` takes it for its tests.  From M3 of `plans/completed/m4a.md`, its
+/// dependent `stem-worker` is outside the family, so a change of `m4a` runs
+/// `engine` alone.  The test
+/// `the_symphonia_features_of_the_tests_of_m4a_are_engines` and tier
+/// `push` also cover the features of the tests of `m4a`.  A dependent of
+/// `engine` can also turn on features of `engine`: `app` turns on
+/// `engine/cpal` with its default feature `audio`.  `xtask` does so only
+/// with its own `cpal` feature, which is not a default.  Tier `push` and
+/// CI run `cargo test -p engine` alone, so they cover that case.
+fn merges_into_engine(graph: &Graph, tested: &BTreeSet<&String>) -> bool {
+    let engine = BTreeSet::from([ENGINE.to_string()]);
+    let family: BTreeSet<String> = graph
+        .closure(&engine)
+        .union(&graph.dependents(&engine))
+        .cloned()
+        .collect();
+    tested.iter().any(|name| name.as_str() == ENGINE)
+        && tested.iter().any(|name| !family.contains(name.as_str()))
 }
 
 /// The words of [`REQUIRE`] that need a GPU adapter in `test-support`:
@@ -1062,6 +1100,7 @@ mod tests {
     const WASM: &str = "cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings";
     const XTASK_REPO: &str = "cargo test -p xtask --lib --test rules --test docs --test review";
     const TESTS: &str = "cargo test --workspace --exclude roformer-gpu";
+    const ENGINE: &str = "cargo test -p engine";
     const GPU_LIB: &str = "cargo test -p roformer-gpu --lib";
     const GPU_DOC: &str = "cargo test -p roformer-gpu --doc";
     const GPU: &str = "STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release";
@@ -1072,17 +1111,22 @@ mod tests {
     const NIGHTLY_DOC: &str = "cargo +nightly-2026-10-30 test -p roformer-gpu --doc";
     const PUBLISH: &str = "cargo run -p xtask --release -- publish";
 
-    /// The 11 members of this repo and their real edges, of all kinds.
+    /// The 12 members of this repo and their real edges, of all kinds.
     fn fixture() -> Graph {
         Graph::new(&[
-            ("app", "app", &["dsp", "engine", "synth", "stem-protocol"]),
+            (
+                "app",
+                "app",
+                &["dsp", "engine", "m4a", "synth", "stem-protocol"],
+            ),
             (
                 "decoder",
                 "decode-worker",
-                &["dsp", "engine", "stem-protocol"],
+                &["dsp", "engine", "m4a", "stem-protocol"],
             ),
             ("dsp", "dsp", &[]),
-            ("engine", "engine", &["dsp"]),
+            ("engine", "engine", &["dsp", "m4a"]),
+            ("m4a", "m4a", &[]),
             ("protocol", "stem-protocol", &[]),
             ("roformer", "roformer", &["test-support"]),
             (
@@ -1095,9 +1139,13 @@ mod tests {
             (
                 "worker",
                 "stem-worker",
-                &["roformer", "roformer-gpu", "stem-protocol"],
+                &["m4a", "roformer", "roformer-gpu", "stem-protocol"],
             ),
-            ("xtask", "xtask", &["dsp", "engine", "roformer", "synth"]),
+            (
+                "xtask",
+                "xtask",
+                &["dsp", "engine", "m4a", "roformer", "synth"],
+            ),
         ])
     }
 
@@ -1157,6 +1205,7 @@ mod tests {
             run(APP_ALL),
             run(WASM),
             run(TESTS),
+            run(ENGINE),
             run(GPU_LIB),
             run(GPU_DOC),
             gpu,
@@ -1177,6 +1226,7 @@ mod tests {
             skip(WASM),
             run(XTASK_REPO),
             skip(TESTS),
+            skip(ENGINE),
             skip(GPU_LIB),
             skip(GPU_DOC),
         ];
@@ -1184,21 +1234,22 @@ mod tests {
     }
 
     #[test]
-    fn lines_are_the_twelve_of_the_push_tier() {
+    fn lines_are_the_thirteen_of_the_push_tier() {
         let got: Vec<String> = lines().iter().map(Check::line).collect();
         assert_eq!(
             got,
             [
-                FMT, DOCS, CLIPPY, SYNTH, APP, APP_ALL, WASM, TESTS, GPU_LIB, GPU_DOC, GPU, TRUNK
+                FMT, DOCS, CLIPPY, SYNTH, APP, APP_ALL, WASM, TESTS, ENGINE, GPU_LIB, GPU_DOC, GPU,
+                TRUNK
             ]
         );
-        let gpu = &lines()[10];
+        let gpu = &lines()[11];
         assert_eq!(
             gpu.env,
             [("STEMYLA_REQUIRE".to_string(), "gpu,f16".to_string())]
         );
-        assert_eq!(lines()[11].folder, "app");
-        assert_eq!(lines()[11].argv, ["trunk", "build", "--release"]);
+        assert_eq!(lines()[12].folder, "app");
+        assert_eq!(lines()[12].argv, ["trunk", "build", "--release"]);
     }
 
     #[test]
@@ -1226,6 +1277,7 @@ mod tests {
             skip(XTASK_REPO),
             run("cargo test -p app -p decode-worker -p dsp -p engine -p xtask"),
             skip(TESTS),
+            skip(ENGINE),
             skip(GPU_LIB),
             skip(GPU_DOC),
         ];
@@ -1255,6 +1307,7 @@ mod tests {
             skip(XTASK_REPO),
             run("cargo test -p app -p synth -p xtask"),
             skip(TESTS),
+            skip(ENGINE),
             skip(GPU_LIB),
             skip(GPU_DOC),
         ];
@@ -1277,6 +1330,7 @@ mod tests {
             skip(XTASK_REPO),
             run("cargo test -p roformer -p stem-worker -p xtask"),
             skip(TESTS),
+            skip(ENGINE),
             run(GPU_LIB),
             run(GPU_DOC),
         ];
@@ -1303,6 +1357,7 @@ mod tests {
             run(XTASK_REPO),
             run("cargo test -p stem-worker"),
             skip(TESTS),
+            skip(ENGINE),
             run(GPU_LIB),
             run(GPU_DOC),
         ];
@@ -1325,6 +1380,7 @@ mod tests {
             skip(XTASK_REPO),
             run("cargo test -p app -p decode-worker -p engine -p xtask"),
             skip(TESTS),
+            skip(ENGINE),
             skip(GPU_LIB),
             skip(GPU_DOC),
         ];
@@ -1353,6 +1409,7 @@ mod tests {
             run(XTASK_REPO),
             run("cargo test -p app"),
             skip(TESTS),
+            skip(ENGINE),
             skip(GPU_LIB),
             skip(GPU_DOC),
         ];
@@ -1362,8 +1419,8 @@ mod tests {
         );
     }
 
-    /// No one member of this repo has all 11 members as its dependents.
-    /// So the paths of four members give the workspace test line.
+    /// No one member of this repo has all 12 members as its dependents.
+    /// So the paths of five members give the workspace test line.
     #[test]
     fn the_crate_tests_of_every_member_but_roformer_gpu_are_the_workspace_test_line() {
         let graph = fixture();
@@ -1371,8 +1428,9 @@ mod tests {
             let one = BTreeSet::from([name.clone()]);
             assert_ne!(graph.dependents(&one), graph.names(), "{name}");
         }
-        let all =
-            BTreeSet::from(["dsp", "test-support", "stem-protocol", "synth"].map(str::to_string));
+        let all = BTreeSet::from(
+            ["dsp", "test-support", "stem-protocol", "synth", "m4a"].map(str::to_string),
+        );
         assert_eq!(graph.dependents(&all), graph.names());
         let head = vec![
             run(FMT),
@@ -1384,6 +1442,7 @@ mod tests {
             run(WASM),
             skip(XTASK_REPO),
             run(TESTS),
+            run(ENGINE),
             run(GPU_LIB),
             run(GPU_DOC),
         ];
@@ -1392,7 +1451,82 @@ mod tests {
             "test-support/src/lib.rs",
             "protocol/tests/x.rs",
             "synth/src/lib.rs",
+            "m4a/src/lib.rs",
         ]);
+        assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
+    }
+
+    /// The crate tests of `engine` and `synth` build `engine` with `synth`,
+    /// a member outside the closure and the dependents of `engine`, so the
+    /// features of `synth` can reach `engine`.
+    #[test]
+    fn crate_tests_with_a_member_outside_engines_family_run_engine_alone() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            run(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p app -p decode-worker -p engine -p synth -p xtask"),
+            skip(TESTS),
+            run(ENGINE),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        let plan = commit(&["engine/src/lib.rs", "synth/src/lib.rs"]);
+        assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
+    }
+
+    /// `dsp` is in the closure of `engine`, and each of its dependents is
+    /// in the family of `engine`.  So the crate tests of `dsp` do not run
+    /// `engine` alone.
+    #[test]
+    fn crate_tests_of_engines_family_do_not_run_engine_alone() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p app -p decode-worker -p dsp -p engine -p xtask"),
+            skip(TESTS),
+            skip(ENGINE),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        let plan = commit(&["dsp/src/lib.rs"]);
+        assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
+    }
+
+    /// `m4a` is in the closure of `engine`, since `engine` takes it for
+    /// its tests.  From M3 of `plans/completed/m4a.md`, `stem-worker` takes it
+    /// too, and `stem-worker` is outside the family of `engine`.  So the
+    /// crate tests of `m4a` merge features into `engine`, and run `engine`
+    /// alone.
+    #[test]
+    fn crate_tests_of_m4a_run_engine_alone() {
+        let head = vec![
+            run(FMT),
+            run(DOCS),
+            run(CLIPPY),
+            skip(SYNTH),
+            run(APP),
+            run(APP_ALL),
+            run(WASM),
+            skip(XTASK_REPO),
+            run("cargo test -p app -p decode-worker -p engine -p m4a -p stem-worker -p xtask"),
+            skip(TESTS),
+            run(ENGINE),
+            skip(GPU_LIB),
+            skip(GPU_DOC),
+        ];
+        let plan = commit(&["m4a/src/lib.rs"]);
         assert_eq!(decisions(&plan), with_tail(head, commit_tail()));
     }
 
@@ -1409,6 +1543,7 @@ mod tests {
             run(APP_ALL),
             run(WASM),
             run(TESTS),
+            run(ENGINE),
             run(GPU_LIB),
             run(GPU_DOC),
         ];
@@ -1517,11 +1652,11 @@ mod tests {
         let before = commit(&["docs/x.md"]);
         let after = with_gpu_require(before.clone(), Some(" gpu "));
         let mut want = no_member_list();
-        want[11] = skip(GPU_ALONE);
+        want[12] = skip(GPU_ALONE);
         assert_eq!(decisions(&after), want);
         assert_eq!(
-            after.choices[11].reason,
-            format!("{}{FROM_ENV}", before.choices[11].reason)
+            after.choices[12].reason,
+            format!("{}{FROM_ENV}", before.choices[12].reason)
         );
     }
 
@@ -1714,6 +1849,28 @@ mod tests {
         );
     }
 
+    /// A workspace build turns on features of `engine` from other
+    /// members, such as `app`'s `engine/cpal`, so CI also tests `engine`
+    /// alone, as tier `push` does.
+    #[test]
+    fn the_ci_runs_the_engine_tests_alone() {
+        let ci = include_str!("../../.github/workflows/ci.yml");
+        let workspace = "- run: cargo test --locked --workspace --exclude roformer-gpu\n";
+        let engine = format!(
+            "- run: {}\n",
+            ENGINE.replacen("cargo test", "cargo test --locked", 1)
+        );
+        assert_eq!(
+            ci.matches(&engine).count(),
+            1,
+            "ci.yml has no `{}`",
+            engine.trim()
+        );
+        let workspace_at = ci.find(workspace).expect("ci.yml runs the workspace tests");
+        let engine_at = ci.find(&engine).expect("ci.yml runs the engine tests");
+        assert!(workspace_at < engine_at, "the workspace tests come first");
+    }
+
     #[test]
     fn check_never_runs_the_browser_or_publish() {
         let graph = fixture();
@@ -1758,6 +1915,68 @@ mod tests {
         let workspace =
             rules::workspace(&metadata).expect("cargo metadata's JSON gives the workspace");
         assert_eq!(Graph::from_workspace(&workspace), fixture());
+    }
+
+    /// The Symphonia dependency of `package` of `kind` (`None` for a
+    /// normal one), from `cargo metadata`'s JSON.
+    fn symphonia_dependency<'a>(
+        metadata: &'a serde_json::Value,
+        package: &str,
+        kind: Option<&str>,
+    ) -> &'a serde_json::Value {
+        let packages = metadata["packages"].as_array().expect("packages");
+        let found = packages
+            .iter()
+            .find(|p| p["name"] == package)
+            .unwrap_or_else(|| panic!("no package {package}"));
+        found["dependencies"]
+            .as_array()
+            .expect("dependencies")
+            .iter()
+            .find(|d| d["name"] == "symphonia" && d["kind"].as_str() == kind)
+            .unwrap_or_else(|| panic!("no symphonia dependency of {package} of kind {kind:?}"))
+    }
+
+    /// The Symphonia features of the dependency of `package` of `kind`.
+    fn symphonia_features(
+        metadata: &serde_json::Value,
+        package: &str,
+        kind: Option<&str>,
+    ) -> BTreeSet<String> {
+        symphonia_dependency(metadata, package, kind)["features"]
+            .as_array()
+            .expect("features")
+            .iter()
+            .filter_map(|f| f.as_str().map(String::from))
+            .collect()
+    }
+
+    /// Finding 1-13 of review round 1: `m4a` is in the closure of `engine`,
+    /// so `merges_into_engine` cannot see a Symphonia feature of the tests
+    /// of `m4a`.  This test sees it: each such feature is one of `engine`'s
+    /// own.
+    #[test]
+    fn the_symphonia_features_of_the_tests_of_m4a_are_engines() {
+        let metadata =
+            rules::workspace_metadata(&crate::workspace_root()).expect("cargo metadata runs");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&metadata).expect("cargo metadata gives JSON");
+        let engine = symphonia_features(&metadata, "engine", None);
+        let m4a = symphonia_features(&metadata, "m4a", Some("dev"));
+        // Finding 2-4 of review round 2: Symphonia's default features would
+        // reach `engine` too.
+        for (package, kind) in [("engine", None), ("m4a", Some("dev"))] {
+            assert_eq!(
+                symphonia_dependency(&metadata, package, kind)["uses_default_features"],
+                false,
+                "the Symphonia dependency of {package} turns on its default features"
+            );
+        }
+        let missing: Vec<&String> = m4a.difference(&engine).collect();
+        assert!(
+            missing.is_empty(),
+            "features of m4a's tests that engine does not turn on: {missing:?}"
+        );
     }
 
     /// `GPU_FOLDERS` is the closure of `roformer-gpu` in the real graph, so

@@ -13,8 +13,9 @@
 )]
 
 use super::*;
-use encode::{FLAC_BLOCK, MP3_BLOCK};
+use encode::{EncodeOut, FLAC_BLOCK, MP3_BLOCK, OutFile, alac_end};
 use js_sys::{Object, Reflect};
+use m4a::FRAMES_PER_PACKET;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use stem_protocol::{Encode, Encoded};
@@ -965,15 +966,24 @@ async fn forget_model_removes_the_stored_model_and_partial_files() {
 #[wasm_bindgen_test]
 async fn errors_name_the_request_they_answer() {
     fresh().await;
-    // 4 frames, then none: an unsupported rate fails either way.
-    for frames in [4, 0] {
+    // 4 frames at a rate that MP3, M4A and AAC refuse, then none: each
+    // fails.  96 kHz is in the AAC table, so the AAC case uses 22 kHz,
+    // which the worker refuses.
+    for (kind, frames, rate) in [
+        ("mp3", 4, 96_000),
+        ("mp3", 0, 96_000),
+        ("alac", 4, 96_000),
+        ("alac", 0, 96_000),
+        ("aac", 4, 22_000),
+        ("aac", 0, 96_000),
+    ] {
         let samples = Float32Array::new_with_length(frames);
         handle(message(&[
-            ("type", "mp3".into()),
-            ("name", "x.mp3".into()),
+            ("type", kind.into()),
+            ("name", "x".into()),
             ("left", samples.clone().into()),
             ("right", samples.into()),
-            ("rate", 96_000.into()),
+            ("rate", rate.into()),
         ]))
         .await;
     }
@@ -989,9 +999,9 @@ async fn errors_name_the_request_they_answer() {
         .iter()
         .map(|e| field(e, "of").as_string().unwrap_or_default())
         .collect();
-    assert_eq!(of, ["mp3", "mp3", "separate"]);
+    assert_eq!(of, ["mp3", "mp3", "alac", "alac", "aac", "aac", "separate"]);
     assert_eq!(
-        field(&errors[2], "text").as_string().as_deref(),
+        field(&errors[6], "text").as_string().as_deref(),
         Some("load the model first")
     );
 }
@@ -1297,10 +1307,236 @@ async fn a_flac_of_no_samples_is_refused() {
     assert!(sent("flac").is_empty());
 }
 
+/// The bytes of the M4A that the last reply of `kind`, `alac` or `aac`,
+/// carries.
+async fn m4a_reply(kind: &str) -> Vec<u8> {
+    let reply = sent(kind).pop();
+    assert!(reply.is_some(), "an {kind} reply");
+    let file: Blob = field(&reply.expect("a reply"), "file")
+        .dyn_into()
+        .expect("a Blob");
+    assert_eq!(file.type_(), "audio/mp4");
+    let bytes = wasm_bindgen_futures::JsFuture::from(file.array_buffer())
+        .await
+        .expect("read");
+    Uint8Array::new(&bytes).to_vec()
+}
+
+/// An M4A decoded by Symphonia: its rate and its 16-bit channels.
+fn decode_m4a(bytes: Vec<u8>) -> Result<(u32, Vec<Vec<i16>>), String> {
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+
+    let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(bytes)), Default::default());
+    let mut format = symphonia::default::get_probe()
+        .probe(
+            Hint::new().with_extension("m4a"),
+            mss,
+            FormatOptions::default(),
+            MetadataOptions::default(),
+        )
+        .map_err(|e| format!("not an M4A that Symphonia reads: {e}"))?;
+    let track = format
+        .default_track(TrackType::Audio)
+        .ok_or("no audio track")?;
+    let params = track
+        .codec_params
+        .as_ref()
+        .and_then(|p| p.audio())
+        .ok_or("no audio parameters")?
+        .clone();
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(&params, &AudioDecoderOptions::default())
+        .map_err(|e| format!("no decoder: {e}"))?;
+    let mut channels: Vec<Vec<i16>> = Vec::new();
+    let mut planes: Vec<Vec<i16>> = Vec::new();
+    while let Some(packet) = format.next_packet().map_err(|e| format!("a packet: {e}"))? {
+        let buf = decoder
+            .decode(&packet)
+            .map_err(|e| format!("a packet that does not decode: {e}"))?;
+        buf.copy_to_vecs_planar::<i16>(&mut planes);
+        channels.resize(planes.len(), Vec::new());
+        for (c, p) in channels.iter_mut().zip(&planes) {
+            c.extend_from_slice(p);
+        }
+    }
+    let rate = params.sample_rate.ok_or("no rate")?;
+    Ok((rate, channels))
+}
+
+/// `channel` as the 16-bit samples of `pcm16`.
+fn pcm16_of(channel: &Float32Array) -> Vec<i16> {
+    channel.to_vec().iter().map(|x| pcm16(*x) as i16).collect()
+}
+
+/// The reference M4A of the 16-bit samples of `left` and `right`, up to
+/// the shorter: `m4a::alac_file`, which holds the whole file in memory.
+fn reference_m4a(left: &Float32Array, right: &Float32Array, rate: u32) -> Vec<u8> {
+    let interleaved: Vec<i16> = pcm16_of(left)
+        .into_iter()
+        .zip(pcm16_of(right))
+        .flat_map(|(l, r)| [l, r])
+        .collect();
+    m4a::alac_file(&interleaved, rate, None, m4a::Order::FastStart).expect("a reference M4A")
+}
+
+/// The encode of `left` and `right` as an M4A on the memory path.
+async fn encode_alac(left: &Float32Array, right: &Float32Array, rate: u32) -> Vec<u8> {
+    encode(
+        Codec::Alac,
+        Some("tone.m4a".into()),
+        arrays(left, right, Some(rate)),
+    )
+    .await
+    .expect("encoded");
+    m4a_reply("alac").await
+}
+
+/// Asserts that `bytes` is the reference M4A of `left` and `right`, and
+/// that Symphonia decodes it to their 16-bit samples at `rate`.
+fn assert_m4a_of(bytes: Vec<u8>, left: &Float32Array, right: &Float32Array, rate: u32, what: &str) {
+    assert!(
+        bytes == reference_m4a(left, right, rate),
+        "{what}: the M4A is the one of `alac_file` of the same 16-bit samples"
+    );
+    let decoded = decode_m4a(bytes);
+    assert!(decoded.is_ok(), "{what}: {decoded:?}");
+    let (got_rate, channels) = decoded.expect("decoded");
+    assert_eq!(got_rate, rate, "{what}");
+    let frames = left.length().min(right.length());
+    let shorter = |c: &Float32Array| pcm16_of(&c.subarray(0, frames));
+    assert!(
+        channels == [shorter(left), shorter(right)],
+        "{what}: the M4A decodes to the 16 bits of `pcm16`"
+    );
+}
+
+#[wasm_bindgen_test]
+async fn an_alac_decodes_to_the_stem() {
+    let frames = TONE_FRAMES / 3;
+    for rate in [48_000, TONE_RATE] {
+        fresh().await;
+        let (left, right) = (tone(220.0, frames), tone(330.0, frames));
+        let bytes = encode_alac(&left, &right, rate).await;
+        assert_m4a_of(bytes, &left, &right, rate, &format!("{rate} Hz"));
+        let reply = sent("alac").pop();
+        assert!(reply.is_some(), "an alac reply");
+        assert_eq!(
+            field(&reply.expect("a reply"), "name")
+                .as_string()
+                .as_deref(),
+            Some("tone.m4a")
+        );
+    }
+}
+
+/// The lengths at each side of a packet of 4096 frames, on both paths.
+#[wasm_bindgen_test]
+async fn an_alac_of_each_length_is_the_reference_on_both_paths() {
+    for frames in [1, 4095, 4096, 4097, 3 * 4096 + 7] {
+        fresh().await;
+        let (left, right) = (tone(220.0, frames), tone(330.0, frames));
+        let bytes = encode_alac(&left, &right, TONE_RATE).await;
+        assert_m4a_of(
+            bytes,
+            &left,
+            &right,
+            TONE_RATE,
+            &format!("{frames} frames, arrays"),
+        );
+
+        let (wav, left, right) = save_wav(frames);
+        plant_at(SAVE_WAV, &wav).await;
+        let encoded = encode_stored(Codec::Alac, SAVE_WAV, frames, SAVE_M4A).await;
+        assert!(encoded.is_ok(), "{frames} frames: {encoded:?}");
+        let stored = read_at(SAVE_M4A).await.unwrap_or_default();
+        assert_m4a_of(
+            stored,
+            &left,
+            &right,
+            TONE_RATE,
+            &format!("{frames} frames, stored"),
+        );
+    }
+}
+
+#[wasm_bindgen_test]
+async fn an_alac_clips_at_full_scale_and_rounds() {
+    fresh().await;
+    let step = 1.0 / 32_768.0;
+    let left = Float32Array::from(&[1.5_f32, -1.5, 1.0, -1.0, 0.5, 0.75 * step, 0.25 * step][..]);
+    let right = Float32Array::from(&[0.0_f32; 7][..]);
+    let bytes = encode_alac(&left, &right, TONE_RATE).await;
+    assert!(
+        bytes == reference_m4a(&left, &right, TONE_RATE),
+        "the M4A of the same 16-bit samples"
+    );
+    let decoded = decode_m4a(bytes);
+    assert!(decoded.is_ok(), "{decoded:?}");
+    let (_, channels) = decoded.expect("decoded");
+    // Clipped at full scale, and rounded to the nearest step, as
+    // `engine::wav::encode_pcm16` does.
+    assert_eq!(
+        channels[0],
+        [32_767, -32_768, 32_767, -32_768, 16_384, 1, 0]
+    );
+}
+
+#[wasm_bindgen_test]
+async fn an_alac_of_unequal_channels_stops_at_the_shorter() {
+    fresh().await;
+    // The shorter channel ends inside the second packet, on either side.
+    let (long, short) = (3 * FRAMES_PER_PACKET, FRAMES_PER_PACKET + 7);
+    for (left_frames, right_frames) in [(long, short), (short, long)] {
+        let (left, right) = (tone(220.0, left_frames), tone(330.0, right_frames));
+        let bytes = encode_alac(&left, &right, TONE_RATE).await;
+        assert_m4a_of(
+            bytes,
+            &left,
+            &right,
+            TONE_RATE,
+            &format!("left {left_frames} frames, right {right_frames}"),
+        );
+    }
+}
+
+/// The app sends neither input ("The inputs that the app gives an
+/// encode", `plans/completed/m4a-m3.md`).
+#[wasm_bindgen_test]
+async fn an_alac_of_no_samples_is_refused() {
+    fresh().await;
+    let empty = Float32Array::new_with_length(0);
+    let result = encode(Codec::Alac, None, arrays(&empty, &empty, None)).await;
+    assert!(result.is_err(), "no samples: {result:?}");
+    let error = result.unwrap_err();
+    assert_eq!(error, "ALAC encoder: the stem has no samples");
+    let seven = Float32Array::new_with_length(7);
+    let result = encode(Codec::Alac, None, arrays(&seven, &seven, Some(65_536))).await;
+    assert!(result.is_err(), "65,536 Hz: {result:?}");
+    assert_eq!(
+        result.unwrap_err(),
+        format!("ALAC encoder: {}", m4a::Error::SampleRate(65_536))
+    );
+    assert!(sent("alac").is_empty());
+}
+
 /// A save's WAV file and its outputs, as the page names them (D1 of M8).
 const SAVE_WAV: &str = "saves/1792640000000-1.wav";
 const SAVE_FLAC: &str = "saves/1792640000000-1.flac";
 const SAVE_MP3: &str = "saves/1792640000000-1.mp3";
+const SAVE_M4A: &str = "saves/1792640000000-1.m4a";
+
+/// The output of a stored encode of `codec`, as the page names it.
+fn save_out(codec: Codec) -> &'static str {
+    match codec {
+        Codec::Mp3 => SAVE_MP3,
+        Codec::Flac => SAVE_FLAC,
+        Codec::Alac | Codec::Aac => SAVE_M4A,
+    }
+}
 
 /// A save's 16-bit WAV of `frames` frames of two tones: its bytes, and its
 /// channels as the floats `s / 32768` of its 16-bit samples.
@@ -1322,7 +1558,7 @@ fn save_wav(frames: usize) -> (Vec<u8>, Float32Array, Float32Array) {
 async fn encode_stored(codec: Codec, wav: &str, frames: usize, out: &str) -> Result<(), String> {
     encode(
         codec,
-        Some(format!("lloyd - mix.{}", codec.kind())),
+        Some(format!("lloyd - mix.{}", codec.extension())),
         Encode::Stored {
             wav: wav.into(),
             frames,
@@ -1337,7 +1573,10 @@ async fn encode_stored(codec: Codec, wav: &str, frames: usize, out: &str) -> Res
 fn last_file(kind: &str) -> Encoded {
     let reply = sent(kind).pop().expect("a reply");
     match Reply::from_js(&reply).expect("a reply the page reads") {
-        Reply::Mp3 { file, .. } | Reply::Flac { file, .. } => file,
+        Reply::Mp3 { file, .. }
+        | Reply::Flac { file, .. }
+        | Reply::Alac { file, .. }
+        | Reply::Aac { file, .. } => file,
         other => panic!("{other:?}"),
     }
 }
@@ -1349,6 +1588,9 @@ async fn arrays_file(codec: Codec, left: &Float32Array, right: &Float32Array) ->
         .expect("encoded");
     match last_file(codec.kind()) {
         Encoded::Bytes(bytes) => bytes.to_vec(),
+        Encoded::Blob(_) if matches!(codec, Codec::Alac | Codec::Aac) => {
+            m4a_reply(codec.kind()).await
+        }
         Encoded::Blob(_) => flac_reply().await,
         other => panic!("{other:?}"),
     }
@@ -1421,10 +1663,57 @@ async fn a_stored_mp3_is_the_mp3_of_its_16_bit_samples() {
     );
 }
 
+/// A stored ALAC is the M4A of the WAV's 16-bit samples, bit for bit, and
+/// the worker removes the WAV at the end.
+#[wasm_bindgen_test]
+async fn a_stored_alac_is_the_alac_of_its_16_bit_samples() {
+    for frames in [3 * FRAMES_PER_PACKET + 7, TONE_FRAMES] {
+        fresh().await;
+        let (wav, left, right) = save_wav(frames);
+        plant_at(SAVE_WAV, &wav).await;
+        encode_stored(Codec::Alac, SAVE_WAV, frames, SAVE_M4A)
+            .await
+            .expect("no error reply");
+        assert!(
+            matches!(last_file("alac"), Encoded::Stored { path } if path == SAVE_M4A),
+            "the reply names the output file"
+        );
+        let stored = read_at(SAVE_M4A).await.unwrap_or_default();
+        assert_eq!(
+            names_in("saves").await.as_deref(),
+            Some("1792640000000-1.m4a"),
+            "the worker removed the WAV"
+        );
+        assert!(
+            stored == arrays_file(Codec::Alac, &left, &right).await,
+            "{frames} frames: the stored M4A is the arrays M4A of the same 16-bit samples"
+        );
+        let size = stored.len();
+        assert_m4a_of(
+            stored,
+            &left,
+            &right,
+            TONE_RATE,
+            &format!("{frames} frames"),
+        );
+        let memory = sent("log")
+            .iter()
+            .filter_map(|l| field(l, "text").as_string())
+            .find(|t| t.starts_with(&format!("memory: encode alac {SAVE_M4A}: wasm ")));
+        assert!(
+            memory
+                .as_ref()
+                .is_some_and(|m| m.contains(&format!("bytes, file {size} bytes"))),
+            "D9: a memory line names the file's size: {memory:?}"
+        );
+    }
+}
+
 /// MEM-5 and the order of D4 of M8: every write of a stored encode is a
 /// whole array, and each read of the WAV is one block.  A FLAC writes each
 /// frame before it reads the next block, so it keeps no parts, and its
-/// stream header has the same length at the start and at the end.
+/// stream header has the same length at the start and at the end.  An
+/// ALAC does the same with its packets and its head.
 #[wasm_bindgen_test]
 async fn stored_encodes_write_whole_arrays_as_they_read() {
     fresh().await;
@@ -1495,6 +1784,169 @@ async fn stored_encodes_write_whole_arrays_as_they_read() {
         "{writes} writes, fewer than the {} frames of the MP3",
         TONE_FRAMES / 1152
     );
+
+    // An ALAC reserves its head at 0, in blocks of at most 64 KiB, then
+    // writes each packet after its read, then the head at 0.
+    fresh().await;
+    let frames = 3 * FRAMES_PER_PACKET + 7;
+    let (wav, _, _) = save_wav(frames);
+    plant_at(SAVE_WAV, &wav).await;
+    start_order_spy();
+    let encoded = encode_stored(Codec::Alac, SAVE_WAV, frames, SAVE_M4A).await;
+    let record = stop_order_spy();
+    encoded.expect("no error reply");
+    assert!(matches!(last_file("alac"), Encoded::Stored { .. }));
+    assert!(!record.contains("view"), "MEM-5: {record}");
+    let head = m4a::Layout::new(
+        m4a::Codec::Alac,
+        frames as u64,
+        TONE_RATE,
+        None,
+        m4a::Order::FastStart,
+    )
+    .expect("a layout")
+    .head_len();
+    assert!(
+        head <= 64 * 1024,
+        "the reserve is one write of {head} bytes"
+    );
+    let steps: Vec<&str> = record.split(' ').collect();
+    let block = format!("r{}", 4 * FRAMES_PER_PACKET);
+    let reads: Vec<&str> = steps
+        .iter()
+        .copied()
+        .filter(|s| s.starts_with('r'))
+        .collect();
+    assert_eq!(reads, [block.as_str(), &block, &block, "r28"], "{record}");
+    let at_0 = format!("w{head}@0");
+    assert_eq!(steps.len(), 2 + 2 * reads.len(), "{record}");
+    assert_eq!(steps[0], at_0, "the reserve first: {record}");
+    assert_eq!(steps[steps.len() - 1], at_0, "the head last: {record}");
+    let mut at = head;
+    for pair in steps[1..steps.len() - 1].chunks(2) {
+        assert!(pair[0].starts_with('r'), "a read: {record}");
+        let packet = pair[1]
+            .strip_prefix('w')
+            .and_then(|w| w.split_once('@'))
+            .and_then(|(bytes, from)| {
+                Some((bytes.parse::<usize>().ok()?, from.parse::<usize>().ok()?))
+            });
+        assert!(
+            packet.is_some_and(|(bytes, from)| from == at && bytes <= m4a::MAX_PACKET_BYTES),
+            "each read is followed by its packet's write, after the last: {record}"
+        );
+        at += packet.map_or(0, |(bytes, _)| bytes);
+    }
+}
+
+/// The output of a sink test, in `saves/`.
+const SAVE_SINK: &str = "saves/1792640000000-1.out";
+/// What a sink test puts after its reserve.
+const MARKER: [u8; 3] = [7, 8, 9];
+
+/// A head of `len` bytes, with no zero, so a reserve left in place shows.
+fn head_of(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8 + 1).collect()
+}
+
+/// A sink on the file at [`SAVE_SINK`], made empty.
+async fn file_sink() -> EncodeOut {
+    plant_folder("saves").await;
+    EncodeOut::File(OutFile::open(SAVE_SINK).await.expect("the file opens"))
+}
+
+/// The parts of a sink of the memory path, as bytes.
+fn parts_of(parts: &js_sys::Array) -> Vec<Vec<u8>> {
+    parts
+        .iter()
+        .map(|part| Uint8Array::new(&part).to_vec())
+        .collect()
+}
+
+/// Step 1 of `plans/completed/m4a-m3.md`: a reserve is one unit that the head
+/// replaces.  On the storage path, the zeros go in writes of at most 64
+/// KiB, each a whole array (MEM-5).  The head then goes in one write at 0.
+#[wasm_bindgen_test]
+async fn a_reserve_is_one_unit_that_the_head_replaces() {
+    let block = 64 * 1024;
+    for (len, reserve_writes) in [
+        (block + 1, format!("w{block}@0 w1@{block}")),
+        (block, format!("w{block}@0")),
+    ] {
+        fresh().await;
+        let head = head_of(len);
+        let mut out = file_sink().await;
+        start_order_spy();
+        let written = async {
+            out.reserve(len).await?;
+            out.put(&MARKER).await?;
+            out.replace_head(&head).await
+        }
+        .await;
+        let record = stop_order_spy();
+        written.expect("written");
+        let EncodeOut::File(file) = out else {
+            unreachable!("a file stays a file")
+        };
+        file.close().await.expect("closed");
+        assert_eq!(
+            record,
+            format!("{reserve_writes} w3@{len} w{len}@0"),
+            "{len} bytes: the reserve in blocks, the marker after it, then the head at 0"
+        );
+        let bytes = read_at(SAVE_SINK).await.expect("the file");
+        assert!(
+            bytes == [head.as_slice(), &MARKER].concat(),
+            "{len} bytes: the file is the head, then the marker"
+        );
+
+        let mut out = EncodeOut::Parts(js_sys::Array::new());
+        out.reserve(len).await.expect("reserved");
+        out.put(&MARKER).await.expect("put");
+        let EncodeOut::Parts(parts) = &out else {
+            unreachable!("parts stay parts")
+        };
+        assert!(
+            parts_of(parts) == [vec![0; len], MARKER.to_vec()],
+            "{len} bytes: the reserve is one part of zeros, then the marker"
+        );
+        out.replace_head(&head).await.expect("replaced");
+        let EncodeOut::Parts(parts) = out else {
+            unreachable!("parts stay parts")
+        };
+        assert!(
+            parts_of(&parts) == [head.clone(), MARKER.to_vec()],
+            "{len} bytes: the head replaces the reserve, and the marker stays"
+        );
+    }
+}
+
+/// MEM-1 and MEM-4: the zeros of a reserve are made in JS, not in
+/// WebAssembly memory, on each sink.
+#[wasm_bindgen_test]
+async fn a_reserve_holds_its_zeros_outside_wasm_memory() {
+    fresh().await;
+    let len = 1 << 20;
+    for mut out in [file_sink().await, EncodeOut::Parts(js_sys::Array::new())] {
+        let before = LIVE.with(Cell::get);
+        PEAK.with(|peak| peak.set(before));
+        out.reserve(len).await.expect("reserved");
+        let held = PEAK.with(Cell::get) - before;
+        let what = match &out {
+            EncodeOut::File(_) => "file",
+            EncodeOut::Parts(_) => "parts",
+        };
+        assert!(
+            held < 1024,
+            "MEM-1: a reserve of {len} bytes on the {what} sink held {held} bytes of \
+             WebAssembly memory.  Fix: make the zeros as JS arrays."
+        );
+        if let EncodeOut::File(file) = out {
+            file.close().await.expect("closed");
+            let size = read_at(SAVE_SINK).await.map(|b| b.len());
+            assert_eq!(size, Some(len), "the file holds the reserve");
+        }
+    }
 }
 
 /// The peak of the counting allocator during a stored encode of `seconds`
@@ -1505,11 +1957,7 @@ async fn stored_peak(codec: Codec, seconds: usize) -> (usize, usize) {
     let (wav, _, _) = save_wav(frames);
     plant_at(SAVE_WAV, &wav).await;
     drop(wav);
-    let out = if codec == Codec::Flac {
-        SAVE_FLAC
-    } else {
-        SAVE_MP3
-    };
+    let out = save_out(codec);
     let before = LIVE.with(Cell::get);
     PEAK.with(|peak| peak.set(before));
     encode_stored(codec, SAVE_WAV, frames, out)
@@ -1540,6 +1988,150 @@ async fn a_stored_flac_keeps_the_worker_memory_flat() {
     );
 }
 
+/// The packets of an ALAC of `seconds` at [`TONE_RATE`], from `Layout`.
+fn alac_packets_of(seconds: usize) -> usize {
+    m4a::Layout::new(
+        m4a::Codec::Alac,
+        (seconds * TONE_RATE as usize) as u64,
+        TONE_RATE,
+        None,
+        m4a::Order::FastStart,
+    )
+    .expect("a layout")
+    .packets()
+}
+
+/// The peak of the counting allocator during an encode of `seconds` of
+/// two tones on the memory path.  JS holds the input and the parts.
+async fn arrays_peak(codec: Codec, seconds: usize) -> usize {
+    fresh().await;
+    let frames = seconds * TONE_RATE as usize;
+    let (left, right) = (tone(220.0, frames), tone(330.0, frames));
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    encode(codec, None, arrays(&left, &right, Some(TONE_RATE)))
+        .await
+        .expect("encoded");
+    let held = PEAK.with(Cell::get) - before;
+    assert_eq!(sent(codec.kind()).len(), 1, "one {} reply", codec.kind());
+    held
+}
+
+/// The growth of an ALAC encode's peak from 10 s to 60 s, on `path`, is the
+/// packet table only ("Memory of the encode", `plans/completed/m4a-m3.md`).
+/// The parent allows 12 bytes for each packet more: 4 for its size, and
+/// about 8 in `moov`.  That is the parent's bound for the end of the encode,
+/// which `the_end_of_an_alac_holds_only_its_head` measures.  At 10 s and
+/// 60 s the peak is in the loop, where only the sizes grow, so the growth is
+/// also at most 4 bytes for each packet.  The 4-byte bound implies the
+/// 12-byte one.  Each bound has a fixed slack of 1 KiB.
+fn assert_packet_table_growth(path: &str, ten: usize, sixty: usize) {
+    let more = alac_packets_of(60) - alac_packets_of(10);
+    let slack = 1024;
+    let growth = sixty.saturating_sub(ten);
+    web_sys::console::log_1(
+        &format!(
+            "an ALAC of 10 s and 60 s on the {path} path: peaks of {ten} and {sixty} bytes, \
+             {growth} bytes more for {more} more packets"
+        )
+        .into(),
+    );
+    assert!(
+        growth <= 12 * more + slack,
+        "MEM-1: on the {path} path, an ALAC of 60 s held {growth} bytes more than one of 10 s, \
+         more than 12 bytes for each of {more} more packets and {slack}, the parent's \
+         bound for the end.  The 4-byte bound below implies it.  Fix: keep only the packet \
+         sizes, and put each packet at once."
+    );
+    assert!(
+        growth <= 4 * more + slack,
+        "MEM-1: on the {path} path, an ALAC of 60 s held {growth} bytes more than one of 10 s, \
+         more than 4 bytes for each of {more} more packets and {slack}.  Fix: make the sizes \
+         with `Vec::with_capacity(layout.packets())`."
+    );
+}
+
+/// MEM-1 and MEM-4: a stored ALAC encode holds its packet table, and no
+/// more, as the song grows.
+#[wasm_bindgen_test]
+async fn a_stored_alac_holds_only_its_packet_table() {
+    let (ten, _) = stored_peak(Codec::Alac, 10).await;
+    let (sixty, _) = stored_peak(Codec::Alac, 60).await;
+    assert_packet_table_growth("storage", ten, sixty);
+    let (thirty, _) = stored_peak(Codec::Alac, 30).await;
+    let one_channel = 4 * TONE_FRAMES;
+    assert!(
+        thirty < one_channel / 10,
+        "MEM-1: a stored ALAC of 30 s held {thirty} bytes at its peak, more than a tenth \
+         of one channel's {one_channel}"
+    );
+}
+
+/// MEM-1 and MEM-4: an ALAC encode on the memory path holds its packet
+/// table, and no more, as the song grows.  A request with no name gets the
+/// reply name `stem.m4a`.
+#[wasm_bindgen_test]
+async fn an_alac_is_encoded_in_blocks() {
+    let ten = arrays_peak(Codec::Alac, 10).await;
+    let sixty = arrays_peak(Codec::Alac, 60).await;
+    // Nit 1-9 of review round 1 of M3: a request with no name gets the
+    // name of an M4A, not of the kind `alac`.
+    let reply = sent("alac").pop();
+    assert!(reply.is_some(), "an alac reply");
+    assert_eq!(
+        field(&reply.expect("a reply"), "name")
+            .as_string()
+            .as_deref(),
+        Some("stem.m4a")
+    );
+    assert_packet_table_growth("memory", ten, sixty);
+}
+
+/// Finding 2-1 of review round 2 of M3: the end of an ALAC encode holds
+/// only the head beside the packet table, on each sink.  The layout has 20
+/// minutes, 12,920 packets: above about 10,000 packets the end is the peak
+/// of the encode.  The test makes the sizes, so it encodes nothing.
+#[wasm_bindgen_test]
+async fn the_end_of_an_alac_holds_only_its_head() {
+    fresh().await;
+    let frames = 20 * 60 * TONE_RATE as usize;
+    let layout = m4a::Layout::new(
+        m4a::Codec::Alac,
+        frames as u64,
+        TONE_RATE,
+        None,
+        m4a::Order::FastStart,
+    )
+    .expect("a layout");
+    assert!(layout.packets() > 10_000, "{} packets", layout.packets());
+    let sizes = vec![4_000_u32; layout.packets()];
+    let cookie = m4a::AlacEncoder::new(TONE_RATE).cookie();
+    let slack = 1024;
+    for mut out in [file_sink().await, EncodeOut::Parts(js_sys::Array::new())] {
+        out.reserve(layout.head_len()).await.expect("reserved");
+        let before = LIVE.with(Cell::get);
+        PEAK.with(|peak| peak.set(before));
+        let ended = alac_end(&layout, &sizes, cookie, &mut out).await;
+        let held = PEAK.with(Cell::get) - before;
+        assert!(ended.is_ok(), "{ended:?}");
+        let what = match &out {
+            EncodeOut::File(_) => "file",
+            EncodeOut::Parts(_) => "parts",
+        };
+        assert!(
+            held <= layout.head_len() + slack,
+            "MEM-1: the end of an ALAC of {} packets on the {what} sink held {held} bytes, \
+             more than its head of {} bytes and {slack}.  Fix: make the head in one buffer \
+             of `head_len()`, and hold nothing more.",
+            layout.packets(),
+            layout.head_len()
+        );
+        if let EncodeOut::File(file) = out {
+            file.close().await.expect("closed");
+        }
+    }
+}
+
 /// The MP3 exception of D4 of M8 (TD-59): a stored MP3 encode holds the
 /// MP3's frames until `finish()`, and no more than 4 times the MP3's size
 /// plus 1 MiB.
@@ -1565,8 +2157,8 @@ async fn a_stored_mp3_holds_at_most_four_times_its_file() {
 #[wasm_bindgen_test]
 async fn a_failed_stored_encode_says_why_and_leaves_no_file() {
     let frames = 3 * FLAC_BLOCK + 7;
-    for (codec, out) in [(Codec::Flac, SAVE_FLAC), (Codec::Mp3, SAVE_MP3)] {
-        let kind = codec.kind();
+    for codec in [Codec::Flac, Codec::Alac, Codec::Mp3] {
+        let (kind, out) = (codec.kind(), save_out(codec));
         for case in [
             "wrong size",
             "too long",
@@ -1596,7 +2188,7 @@ async fn a_failed_stored_encode_says_why_and_leaves_no_file() {
             }
             encoded.unwrap_or_else(|e| panic!("{kind}, {case}: an error reply: {e}"));
             match last_file(kind) {
-                Encoded::Failed { path, text } => {
+                Encoded::Failed { path, text, .. } => {
                     assert_eq!(path, out, "{kind}, {case}");
                     assert!(!text.is_empty(), "{kind}, {case}");
                 }
@@ -1616,46 +2208,55 @@ async fn a_failed_stored_encode_says_why_and_leaves_no_file() {
 /// leaves the other's WAV and output whole.
 #[wasm_bindgen_test]
 async fn a_failed_stored_encode_leaves_another_encode_whole() {
-    fresh().await;
-    let (wav, left, right) = save_wav(TONE_FRAMES);
-    plant_at(SAVE_WAV, &wav).await;
-    plant_at("saves/1792640000000-2.wav", &wav[..wav.len() - 4]).await;
-    for (wav, out) in [
-        (SAVE_WAV, SAVE_FLAC),
-        ("saves/1792640000000-2.wav", "saves/1792640000000-2.flac"),
-    ] {
-        wasm_bindgen_futures::spawn_local(async move {
-            encode_stored(Codec::Flac, wav, TONE_FRAMES, out)
-                .await
-                .expect("no error reply");
-        });
-    }
-    until(|| sent("flac").len() == 2).await;
-    let files: Vec<Encoded> = sent("flac")
-        .iter()
-        .map(|r| match Reply::from_js(r).expect("a reply") {
-            Reply::Flac { file, .. } => file,
-            other => panic!("{other:?}"),
-        })
-        .collect();
-    assert!(
-        files.iter().any(
-            |f| matches!(f, Encoded::Failed { path, .. } if path == "saves/1792640000000-2.flac")
-        ),
-        "the short WAV fails: {files:?}"
-    );
-    assert!(
-        files
+    for codec in [Codec::Flac, Codec::Alac] {
+        let (kind, ext) = (codec.kind(), codec.extension());
+        fresh().await;
+        let (wav, left, right) = save_wav(TONE_FRAMES);
+        plant_at(SAVE_WAV, &wav).await;
+        plant_at("saves/1792640000000-2.wav", &wav[..wav.len() - 4]).await;
+        let (good, bad) = (save_out(codec), format!("saves/1792640000000-2.{ext}"));
+        for (wav, out) in [
+            (SAVE_WAV.to_string(), good.to_string()),
+            ("saves/1792640000000-2.wav".to_string(), bad.clone()),
+        ] {
+            wasm_bindgen_futures::spawn_local(async move {
+                encode_stored(codec, &wav, TONE_FRAMES, &out)
+                    .await
+                    .expect("no error reply");
+            });
+        }
+        until(|| sent(kind).len() == 2).await;
+        let files: Vec<Encoded> = sent(kind)
             .iter()
-            .any(|f| matches!(f, Encoded::Stored { path } if path == SAVE_FLAC)),
-        "the other is stored: {files:?}"
-    );
-    assert_eq!(
-        names_in("saves").await.as_deref(),
-        Some("1792640000000-1.flac")
-    );
-    let stored = read_at(SAVE_FLAC).await.expect("the FLAC");
-    assert!(stored == arrays_file(Codec::Flac, &left, &right).await);
+            .map(|r| match Reply::from_js(r).expect("a reply") {
+                Reply::Flac { file, .. } | Reply::Alac { file, .. } => file,
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert!(
+            files
+                .iter()
+                .any(|f| matches!(f, Encoded::Failed { path, .. } if *path == bad)),
+            "{kind}: the short WAV fails: {files:?}"
+        );
+        assert!(
+            files
+                .iter()
+                .any(|f| matches!(f, Encoded::Stored { path } if path == good)),
+            "{kind}: the other is stored: {files:?}"
+        );
+        assert_eq!(
+            names_in("saves").await,
+            Some(format!("1792640000000-1.{ext}")),
+            "{kind}"
+        );
+        let stored = read_at(good).await.unwrap_or_default();
+        assert!(!stored.is_empty(), "{kind}: the stored file has its bytes");
+        assert!(
+            stored == arrays_file(codec, &left, &right).await,
+            "{kind}: the stored file is whole"
+        );
+    }
 }
 
 /// D5 of M8: a stored request that names a file outside `saves/`, or a
@@ -1664,9 +2265,9 @@ async fn a_failed_stored_encode_leaves_another_encode_whole() {
 async fn a_stored_encode_outside_saves_or_malformed_is_refused() {
     let session_wav = "sessions/1792640000000/stems/bass.wav";
     let (wav, _, _) = save_wav(7);
-    let request = |wav: &str, out: Option<&str>| {
+    let request = |kind: &str, wav: &str, out: Option<&str>| {
         let mut fields = vec![
-            ("type", "flac".into()),
+            ("type", kind.into()),
             ("wav", wav.into()),
             ("frames", 7.into()),
             ("rate", 44_100.into()),
@@ -1707,24 +2308,26 @@ async fn a_stored_encode_outside_saves_or_malformed_is_refused() {
             "a stored encode names its out file".to_string(),
         ),
     ] {
-        fresh().await;
-        plant_at(wav_path, &wav).await;
-        handle(request(wav_path, out)).await;
-        let errors = sent("error");
-        assert_eq!(errors.len(), 1, "{wav_path} to {out:?}");
-        assert_eq!(field(&errors[0], "of").as_string().as_deref(), Some("flac"));
-        // Nit 2-9 of review round 2 of M8: each case for its own reason.
-        assert_eq!(
-            field(&errors[0], "text").as_string().as_deref(),
-            Some(why.as_str()),
-            "{wav_path} to {out:?}"
-        );
-        assert!(sent("flac").is_empty(), "{wav_path} to {out:?}");
-        assert_eq!(
-            read_at(wav_path).await,
-            Some(wav.clone()),
-            "{wav_path} to {out:?}: the worker removed nothing"
-        );
+        for kind in ["flac", "alac", "aac"] {
+            fresh().await;
+            plant_at(wav_path, &wav).await;
+            handle(request(kind, wav_path, out)).await;
+            let errors = sent("error");
+            assert_eq!(errors.len(), 1, "{kind}: {wav_path} to {out:?}");
+            assert_eq!(field(&errors[0], "of").as_string().as_deref(), Some(kind));
+            // Nit 2-9 of review round 2 of M8: each case for its own reason.
+            assert_eq!(
+                field(&errors[0], "text").as_string().as_deref(),
+                Some(why.as_str()),
+                "{wav_path} to {out:?}"
+            );
+            assert!(sent(kind).is_empty(), "{kind}: {wav_path} to {out:?}");
+            assert_eq!(
+                read_at(wav_path).await,
+                Some(wav.clone()),
+                "{wav_path} to {out:?}: the worker removed nothing"
+            );
+        }
     }
 }
 
@@ -2934,10 +3537,14 @@ async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
     let problems = gpu.check_kernels().await.expect("the f32 kernels pass");
     gpu.done().await;
     assert_eq!(problems.len(), roformer_gpu::TILES.len(), "{problems:#?}");
+    // The text of the compiler: Chrome's Tint names a parse error, and
+    // WebKit's says "Expected a Identifier" (finding 2-2 of review round 2
+    // of M4).
+    let names_the_error = |p: &str| p.contains("pars") || p.contains("Expected a Identifier");
     for p in &problems {
         assert!(
             p.contains("does not compile on this GPU")
-                && p.contains("pars")
+                && names_the_error(p)
                 && !p.contains('\n')
                 && p.ends_with("; weights stay f32"),
             "{p}"
@@ -2967,3 +3574,5 @@ async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
     let errors = gpu.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+mod aac;

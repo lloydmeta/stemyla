@@ -389,6 +389,81 @@ async fn a_wav_a_flac_and_an_mp3_decode_into_session_files() {
     }
 }
 
+/// M2 of the M4A plan: an ALAC M4A with `moov` last (so the source
+/// seeks), with an `elst` delay of 2112 frames, decodes in blocks to the
+/// native decode, with the frames of its source, not of its track.
+#[wasm_bindgen_test]
+async fn an_m4a_with_an_edit_decodes_into_session_files() {
+    const DELAY: usize = 2112;
+    const FRAMES: usize = 30_007;
+    let (left, right) = (tone(DELAY + FRAMES + 500, 0), tone(DELAY + FRAMES + 500, 1));
+    let samples: Vec<i16> = left
+        .iter()
+        .zip(&right)
+        .flat_map(|(l, r)| [l, r].map(|x| (x * 32768.0).round().clamp(-32768.0, 32767.0) as i16))
+        .collect();
+    let edit = m4a::Edit {
+        skip: DELAY as u32,
+        frames: FRAMES as u64,
+    };
+    let bytes = m4a::alac_file(&samples, 44_100, Some(edit), m4a::Order::MoovLast)
+        .expect("the writer takes it");
+    fresh().await;
+    plant_at(&format!("{SESSION}/src/0.m4a"), &bytes).await;
+    let reply = decode(&one_source("m4a")).await;
+    assert_eq!(
+        reply,
+        DecodeReply::Decoded {
+            frames: FRAMES as u64,
+            new_mix: true,
+            channels: vec![2],
+        }
+    );
+    let whole = decode_bytes(bytes, Some("m4a")).unwrap();
+    let song = Song::from_audio(vec![("source".into(), whole)]).unwrap();
+    let stem = &song.stems[0];
+    let mix = file("mix.f32.decode.part").await.expect("the mix part");
+    assert!(mix == interleaved(&stem.left, &stem.right), "the mix");
+}
+
+/// A box of `kind` with the parts of `body`.
+fn mp4_box(kind: &[u8; 4], body: &[&[u8]]) -> Vec<u8> {
+    let body = body.concat();
+    let mut out = Vec::from(((8 + body.len()) as u32).to_be_bytes());
+    out.extend_from_slice(kind);
+    out.extend_from_slice(&body);
+    out
+}
+
+/// Finding 1-1 of review round 1 of M2: where `usize` has 32 bits, an
+/// `elst` count of 357,913,941 gives entries of 2^32 + 4 bytes.  The head
+/// check must end with no trap; the `elst` counts as none.
+#[wasm_bindgen_test]
+fn an_elst_count_past_32_bits_ends_the_head_check() {
+    let full = [0_u8; 4];
+    let count = 357_913_941_u32.to_be_bytes();
+    let elst = mp4_box(b"elst", &[&full, &count, &[0; 24]]);
+    let mdhd = mp4_box(
+        b"mdhd",
+        &[
+            &full,
+            &[0; 8],
+            &44_100_u32.to_be_bytes(),
+            &4096_u32.to_be_bytes(),
+            &[0; 4],
+        ],
+    );
+    let hdlr = mp4_box(b"hdlr", &[&full, &[0; 4], b"soun"]);
+    let edts = mp4_box(b"edts", &[&elst]);
+    let mdia = mp4_box(b"mdia", &[&mdhd, &hdlr]);
+    let moov = mp4_box(b"moov", &[&mp4_box(b"trak", &[&edts, &mdia])]);
+    let file = [mp4_box(b"ftyp", &[b"M4A ", &[0; 4]]), moov].concat();
+    assert_eq!(
+        engine::decode::head_length(&file, file.len() as u64),
+        engine::decode::HeadLength::Frames(4096)
+    );
+}
+
 #[wasm_bindgen_test]
 async fn decode_writes_pass_whole_arrays() {
     fresh().await;

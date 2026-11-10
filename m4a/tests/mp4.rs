@@ -1,0 +1,1355 @@
+//! The boxes of the M4A writer, read back with a small box reader.
+
+mod common;
+
+use m4a::{
+    AAC_RATES, AacConfig, AlacEncoder, Codec, Edit, Error, FRAMES_PER_PACKET, Gapless, Layout,
+    MAX_PACKET_BYTES, Order, SampleEntry, alac_file, audio_specific_config,
+};
+
+const RATE: u32 = 44_100;
+const COOKIE: [u8; 24] = [
+    0, 0, 16, 0, 0, 16, 40, 10, 14, 2, 0, 255, 0, 0, 3, 232, 0, 0, 0, 0, 0, 0, 172, 68,
+];
+const ENTRY: SampleEntry = SampleEntry::Alac { cookie: COOKIE };
+const FOUR_GIB: u64 = 1 << 32;
+
+/// One box of a file: its type, its body and the offset of its header.
+#[derive(Clone, Copy)]
+struct Mp4Box<'a> {
+    kind: [u8; 4],
+    body: &'a [u8],
+}
+
+impl<'a> Mp4Box<'a> {
+    fn kind(&self) -> &str {
+        std::str::from_utf8(&self.kind).expect("a box type is ASCII")
+    }
+
+    /// The children of a container, after `skip` bytes of the body.
+    fn children(&self, skip: usize) -> Vec<Mp4Box<'a>> {
+        boxes(&self.body[skip..])
+    }
+
+    fn child(&self, skip: usize, kind: &str) -> Mp4Box<'a> {
+        let children = self.children(skip);
+        let found: Vec<_> = children.iter().filter(|b| b.kind() == kind).collect();
+        assert_eq!(found.len(), 1, "one {kind} in {}", self.kind());
+        *found[0]
+    }
+
+    fn has_child(&self, kind: &str) -> bool {
+        self.children(0).iter().any(|b| b.kind() == kind)
+    }
+
+    fn u16_at(&self, at: usize) -> u16 {
+        u16::from_be_bytes(self.body[at..at + 2].try_into().unwrap())
+    }
+
+    fn u32_at(&self, at: usize) -> u32 {
+        u32::from_be_bytes(self.body[at..at + 4].try_into().unwrap())
+    }
+
+    /// The `u32` values of a full box after its version and flags.
+    fn u32s(&self) -> Vec<u32> {
+        self.body[4..]
+            .chunks_exact(4)
+            .map(|c| u32::from_be_bytes(c.try_into().unwrap()))
+            .collect()
+    }
+}
+
+/// The boxes, one after the other, that fill `bytes`.
+fn boxes(bytes: &[u8]) -> Vec<Mp4Box<'_>> {
+    let mut found = Vec::new();
+    let mut at = 0;
+    while at < bytes.len() {
+        assert!(bytes.len() - at >= 8, "a box header needs 8 bytes at {at}");
+        let size = u32::from_be_bytes(bytes[at..at + 4].try_into().unwrap()) as usize;
+        assert!(
+            size >= 8 && at + size <= bytes.len(),
+            "box size {size} at {at}"
+        );
+        found.push(Mp4Box {
+            kind: bytes[at + 4..at + 8].try_into().unwrap(),
+            body: &bytes[at + 8..at + size],
+        });
+        at += size;
+    }
+    found
+}
+
+fn kinds(boxes: &[Mp4Box]) -> Vec<String> {
+    boxes.iter().map(|b| b.kind().to_string()).collect()
+}
+
+/// Packets of the given sizes, each filled with its own byte.
+fn packets(sizes: &[u32]) -> Vec<Vec<u8>> {
+    sizes
+        .iter()
+        .enumerate()
+        .map(|(i, &size)| vec![i as u8 + 1; size as usize])
+        .collect()
+}
+
+/// Writes a file as the caller does: zeros for the head, each packet, the
+/// final head at position 0, then the tail.
+fn file(layout: &Layout, packets: &[Vec<u8>]) -> Vec<u8> {
+    file_with(layout, &ENTRY, packets)
+}
+
+fn file_with(layout: &Layout, entry: &SampleEntry, packets: &[Vec<u8>]) -> Vec<u8> {
+    let sizes: Vec<u32> = packets.iter().map(|p| p.len() as u32).collect();
+    let mut out = vec![0; layout.head_len()];
+    packets.iter().for_each(|p| out.extend_from_slice(p));
+    let head = layout.head(entry, &sizes).expect("the head is made");
+    assert_eq!(head.len(), layout.head_len());
+    out[..head.len()].copy_from_slice(&head);
+    let tail = layout.tail(entry, &sizes).expect("the tail is made");
+    assert_eq!(tail.len(), layout.tail_len());
+    out.extend_from_slice(&tail);
+    out
+}
+
+/// The `stbl` of a file's one track.
+fn stbl<'a>(moov: &Mp4Box<'a>) -> Mp4Box<'a> {
+    moov.child(0, "trak")
+        .child(0, "mdia")
+        .child(0, "minf")
+        .child(0, "stbl")
+}
+
+const IDENTITY_MATRIX: [u32; 9] = [0x1_0000, 0, 0, 0, 0x1_0000, 0, 0, 0, 0x4000_0000];
+
+/// The rate and the cookie that a file must hold.
+struct Track {
+    rate: u32,
+    cookie: [u8; 24],
+}
+
+const TRACK: Track = Track {
+    rate: RATE,
+    cookie: COOKIE,
+};
+
+/// Checks the tables and each field that Apple's decoder can read.
+fn check_moov(moov: &Mp4Box, file: &[u8], packets: &[Vec<u8>], frames: u32, presented: u32) {
+    check_track(moov, file, packets, frames, presented, &TRACK);
+}
+
+fn check_track(
+    moov: &Mp4Box,
+    file: &[u8],
+    packets: &[Vec<u8>],
+    frames: u32,
+    presented: u32,
+    track: &Track,
+) {
+    let rate = track.rate;
+    let mvhd = moov.child(0, "mvhd").u32s();
+    assert_eq!(mvhd[..4], [0, 0, rate, presented], "mvhd times");
+    assert_eq!(mvhd[4], 0x1_0000, "mvhd rate 1.0");
+    assert_eq!(mvhd[5] >> 16, 0x0100, "mvhd volume 1.0");
+    assert_eq!(mvhd[8..17], IDENTITY_MATRIX, "mvhd matrix");
+    assert_eq!(mvhd[23], 2, "mvhd next_track_ID");
+    assert_eq!(mvhd.len(), 24);
+
+    let trak = moov.child(0, "trak");
+    let tkhd = trak.child(0, "tkhd");
+    assert_eq!(tkhd.u32_at(0), 7, "tkhd version 0 and flags 7");
+    let tkhd = tkhd.u32s();
+    assert_eq!(
+        tkhd[..5],
+        [0, 0, 1, 0, presented],
+        "tkhd times and track_ID"
+    );
+    assert_eq!(tkhd[8] >> 16, 0x0100, "tkhd volume 1.0");
+    assert_eq!(tkhd[9..18], IDENTITY_MATRIX, "tkhd matrix");
+    assert_eq!(tkhd[18..], [0, 0], "tkhd width and height");
+
+    let mdia = trak.child(0, "mdia");
+    assert_eq!(kinds(&mdia.children(0)), ["mdhd", "hdlr", "minf"]);
+    let mdhd = mdia.child(0, "mdhd");
+    assert_eq!(mdhd.u32s()[..4], [0, 0, rate, frames], "mdhd times");
+    assert_eq!(
+        mdhd.u16_at(20),
+        (21 << 10) | (14 << 5) | 4,
+        "mdhd language und"
+    );
+    assert_eq!(&mdia.child(0, "hdlr").body[8..12], b"soun");
+    let minf = mdia.child(0, "minf");
+    assert_eq!(kinds(&minf.children(0)), ["smhd", "dinf", "stbl"]);
+    let dref = minf.child(0, "dinf").child(0, "dref");
+    assert_eq!(dref.u32_at(4), 1, "dref entry count");
+    let url = dref.child(8, "url ");
+    assert_eq!(url.body, [0, 0, 0, 1], "url flags 1");
+
+    let stbl = stbl(moov);
+    assert_eq!(
+        kinds(&stbl.children(0)),
+        ["stsd", "stts", "stsc", "stsz", "stco"]
+    );
+    let stsd = stbl.child(0, "stsd");
+    assert_eq!(stsd.u32_at(4), 1, "stsd entry count");
+    let alac = stsd.child(8, "alac");
+    assert_eq!(alac.u16_at(6), 1, "data_reference_index");
+    assert_eq!(alac.u16_at(16), 2, "channels");
+    assert_eq!(alac.u16_at(18), 16, "sample size");
+    assert_eq!(alac.u32_at(24), rate << 16, "rate as 16.16");
+    let config = alac.child(28, "alac");
+    assert_eq!(config.body.len(), 36 - 8);
+    assert_eq!(config.body[..4], [0, 0, 0, 0], "version and flags 0");
+    assert_eq!(config.body[4..], track.cookie);
+
+    let full = frames / FRAMES_PER_PACKET as u32;
+    let rest = frames % FRAMES_PER_PACKET as u32;
+    let mut stts = vec![(full > 0) as u32 + (rest > 0) as u32];
+    if full > 0 {
+        stts.extend([full, FRAMES_PER_PACKET as u32]);
+    }
+    if rest > 0 {
+        stts.extend([1, rest]);
+    }
+    assert_eq!(stbl.child(0, "stts").u32s(), stts);
+    assert_eq!(stbl.child(0, "stsc").u32s(), [1, 1, 1, 1]);
+    let stsz = stbl.child(0, "stsz").u32s();
+    assert_eq!(stsz[..2], [0, packets.len() as u32]);
+    let sizes: Vec<u32> = packets.iter().map(|p| p.len() as u32).collect();
+    assert_eq!(stsz[2..], sizes);
+    let stco = stbl.child(0, "stco").u32s();
+    assert_eq!(stco[0], packets.len() as u32);
+    assert_eq!(stco.len(), 1 + packets.len());
+    for (i, (&offset, packet)) in stco[1..].iter().zip(packets).enumerate() {
+        let at = offset as usize;
+        assert_eq!(&file[at..at + packet.len()], packet, "stco entry {i}");
+    }
+}
+
+fn check_mdat(mdat: &Mp4Box, packets: &[Vec<u8>]) {
+    assert_eq!(mdat.body, packets.concat());
+}
+
+#[test]
+fn a_fast_start_file_has_moov_before_mdat_and_offsets_at_its_packets() {
+    let frames = 2 * 4096 + 100;
+    let layout = Layout::new(Codec::Alac, frames, RATE, None, Order::FastStart).unwrap();
+    assert_eq!(layout.packets(), 3);
+    let packets = packets(&[1000, 2000, 300]);
+    let file = file(&layout, &packets);
+    let top = boxes(&file);
+    assert_eq!(kinds(&top), ["ftyp", "moov", "mdat"]);
+    assert_eq!(top[0].body, *b"M4A \0\0\0\0M4A mp42isom");
+    check_moov(&top[1], &file, &packets, frames as u32, frames as u32);
+    check_mdat(&top[2], &packets);
+    assert!(!top[1].child(0, "trak").has_child("edts"));
+    assert_eq!(layout.tail_len(), 0);
+}
+
+/// A cookie at `rate`, with `max_frame_bytes`, as the encoder gives it.
+fn cookie(max_frame_bytes: u32, rate: u32) -> [u8; 24] {
+    let mut cookie = COOKIE;
+    cookie[12..16].copy_from_slice(&max_frame_bytes.to_be_bytes());
+    cookie[20..].copy_from_slice(&rate.to_be_bytes());
+    cookie
+}
+
+#[test]
+fn a_file_at_48_khz_holds_its_rate_in_each_place() {
+    let frames = 2 * 4096 + 100;
+    let layout = Layout::new(Codec::Alac, frames, 48_000, None, Order::FastStart).unwrap();
+    let track = Track {
+        rate: 48_000,
+        cookie: cookie(2000, 48_000),
+    };
+    let entry = SampleEntry::Alac {
+        cookie: track.cookie,
+    };
+    let packets = packets(&[1000, 2000, 300]);
+    let file = file_with(&layout, &entry, &packets);
+    let top = boxes(&file);
+    assert_eq!(kinds(&top), ["ftyp", "moov", "mdat"]);
+    check_track(
+        &top[1],
+        &file,
+        &packets,
+        frames as u32,
+        frames as u32,
+        &track,
+    );
+}
+
+/// The packets of `interleaved` from a new encoder, and its final cookie.
+fn encoded(interleaved: &[i16], rate: u32) -> (Vec<Vec<u8>>, [u8; 24]) {
+    let mut encoder = AlacEncoder::new(rate);
+    let packets = interleaved
+        .chunks(FRAMES_PER_PACKET * 2)
+        .map(|packet| {
+            let mut out = Vec::new();
+            encoder.encode(packet, &mut out);
+            out
+        })
+        .collect();
+    (packets, encoder.cookie())
+}
+
+/// `alac_file` writes the cookie of the last packet: its maxFrameBytes is
+/// the largest `stsz` entry.  The last packet is the largest here.
+#[test]
+fn alac_file_writes_the_final_cookie_and_its_rate() {
+    let rate = 48_000;
+    let quiet = common::silence(2 * FRAMES_PER_PACKET);
+    let input: Vec<i16> = quiet.into_iter().chain(common::random(100)).collect();
+    let frames = input.len() as u32 / 2;
+    let file = alac_file(&input, rate, None, Order::FastStart).unwrap();
+    let (packets, final_cookie) = encoded(&input, rate);
+    let top = boxes(&file);
+    let track = Track {
+        rate,
+        cookie: final_cookie,
+    };
+    check_track(&top[1], &file, &packets, frames, frames, &track);
+    let stsz = stbl(&top[1]).child(0, "stsz").u32s();
+    let largest = *stsz[2..].iter().max().unwrap();
+    assert_eq!(
+        stsz[2..].last(),
+        Some(&largest),
+        "the last packet is the largest"
+    );
+    assert_eq!(final_cookie[12..16], largest.to_be_bytes(), "maxFrameBytes");
+    assert_eq!(
+        final_cookie[20..],
+        rate.to_be_bytes(),
+        "the rate of the cookie"
+    );
+}
+
+#[test]
+fn a_moov_last_file_has_mdat_before_moov_and_offsets_at_its_packets() {
+    let frames = 4097;
+    let layout = Layout::new(Codec::Alac, frames, RATE, None, Order::MoovLast).unwrap();
+    let packets = packets(&[16_388, 5]);
+    let file = file(&layout, &packets);
+    let top = boxes(&file);
+    assert_eq!(kinds(&top), ["ftyp", "mdat", "moov"]);
+    check_mdat(&top[1], &packets);
+    check_moov(&top[2], &file, &packets, frames as u32, frames as u32);
+}
+
+#[test]
+fn an_edit_gives_one_elst_entry_and_the_presented_duration() {
+    let frames = 3 * 4096;
+    let edit = Edit {
+        skip: 2_112,
+        frames: 10_000,
+    };
+    for order in [Order::FastStart, Order::MoovLast] {
+        let layout = Layout::new(Codec::Alac, frames, RATE, Some(edit), order).unwrap();
+        let packets = packets(&[10, 20, 30]);
+        let file = file(&layout, &packets);
+        let top = boxes(&file);
+        let moov = top.iter().find(|b| b.kind() == "moov").unwrap();
+        check_moov(moov, &file, &packets, frames as u32, 10_000);
+        let trak = moov.child(0, "trak");
+        assert_eq!(kinds(&trak.children(0)), ["tkhd", "edts", "mdia"]);
+        let elst = trak.child(0, "edts").child(0, "elst");
+        assert_eq!(elst.u32_at(0), 0, "version 0, flags 0");
+        assert_eq!(elst.u32s(), [1, 10_000, 2_112, 0x1_0000]);
+    }
+}
+
+#[test]
+fn the_head_has_its_reserved_length_at_each_length() {
+    for frames in [0, 1, 4095, 4096, 4097, 10 * 4096 + 1000] {
+        for edit in [
+            None,
+            Some(Edit {
+                skip: 0,
+                frames: frames / 2,
+            }),
+        ] {
+            for order in [Order::FastStart, Order::MoovLast] {
+                let layout = Layout::new(Codec::Alac, frames, RATE, edit, order).unwrap();
+                let sizes = vec![MAX_PACKET_BYTES as u32; layout.packets()];
+                let head = layout.head(&ENTRY, &sizes).unwrap();
+                assert_eq!(
+                    head.len(),
+                    layout.head_len(),
+                    "{frames}, {edit:?}, {order:?}"
+                );
+                let tail = layout.tail(&ENTRY, &sizes).unwrap();
+                assert_eq!(
+                    tail.len(),
+                    layout.tail_len(),
+                    "{frames}, {edit:?}, {order:?}"
+                );
+                assert_eq!(
+                    layout.packets(),
+                    (frames as usize).div_ceil(FRAMES_PER_PACKET)
+                );
+            }
+        }
+    }
+}
+
+/// Finding 2-1 of review round 2 of M3: `head` and `tail` give a buffer
+/// whose capacity is its final length, so the buffer that they give did
+/// not grow by doubling.  Ten minutes at 44.1 kHz is 6,460
+/// packets, and 20 minutes is past the 10,000 packets where the end is the
+/// peak of the worker's encode.
+#[test]
+fn the_head_and_the_tail_are_made_at_their_final_capacity() {
+    for minutes in [10, 20] {
+        let frames = minutes * 60 * u64::from(RATE);
+        for order in [Order::FastStart, Order::MoovLast] {
+            let layout = Layout::new(Codec::Alac, frames, RATE, None, order).unwrap();
+            let sizes = vec![MAX_PACKET_BYTES as u32; layout.packets()];
+            let head = layout.head(&ENTRY, &sizes).unwrap();
+            assert_eq!(
+                head.capacity(),
+                layout.head_len(),
+                "{minutes} minutes, {order:?}: the head"
+            );
+            let tail = layout.tail(&ENTRY, &sizes).unwrap();
+            assert_eq!(
+                tail.capacity(),
+                layout.tail_len(),
+                "{minutes} minutes, {order:?}: the tail"
+            );
+        }
+    }
+}
+
+/// The worst case of a layout: its head and tail, and the largest packet
+/// for each packet.
+fn worst_case(layout: &Layout) -> u64 {
+    (layout.head_len() + layout.tail_len()) as u64
+        + layout.packets() as u64 * MAX_PACKET_BYTES as u64
+}
+
+#[test]
+fn a_file_that_can_reach_4_gib_is_refused() {
+    for order in [Order::FastStart, Order::MoovLast] {
+        // With full packets, each packet adds its largest size and 8 bytes
+        // of tables (`stsz`, `stco`).
+        let one = Layout::new(Codec::Alac, 4096, RATE, None, order).unwrap();
+        assert_eq!(one.packets(), 1);
+        let base = worst_case(&one) - (MAX_PACKET_BYTES as u64 + 8);
+        let most = (FOUR_GIB - 1 - base) / (MAX_PACKET_BYTES as u64 + 8);
+        let largest = Layout::new(Codec::Alac, most * 4096, RATE, None, order).unwrap();
+        assert_eq!(largest.packets() as u64, most);
+        assert!(worst_case(&largest) < FOUR_GIB);
+        // One frame more makes one packet more and an `stts` entry more.
+        let next_worst = worst_case(&largest) + MAX_PACKET_BYTES as u64 + 8 + 8;
+        assert!(next_worst >= FOUR_GIB, "{order:?}: {next_worst}");
+        assert_eq!(
+            Layout::new(Codec::Alac, most * 4096 + 1, RATE, None, order),
+            Err(Error::TooLarge {
+                frames: most * 4096 + 1,
+                worst_case_bytes: u128::from(next_worst),
+            }),
+            "{order:?}"
+        );
+        // The base holds one `stts` entry; u64::MAX frames need two.
+        let packets = u128::from(u64::MAX.div_ceil(4096));
+        assert_eq!(
+            Layout::new(Codec::Alac, u64::MAX, RATE, None, order),
+            Err(Error::TooLarge {
+                frames: u64::MAX,
+                worst_case_bytes: u128::from(base) + 8 + packets * (MAX_PACKET_BYTES as u128 + 8),
+            }),
+            "{order:?}"
+        );
+    }
+}
+
+#[test]
+fn a_rate_outside_1_to_65535_is_refused() {
+    for rate in [0, 65_536, u32::MAX] {
+        assert_eq!(
+            Layout::new(Codec::Alac, 1, rate, None, Order::FastStart),
+            Err(Error::SampleRate(rate))
+        );
+    }
+    for rate in [1, 65_535] {
+        assert!(Layout::new(Codec::Alac, 1, rate, None, Order::FastStart).is_ok());
+    }
+}
+
+#[test]
+fn an_edit_past_the_end_is_refused() {
+    let past = Edit {
+        skip: 2_112,
+        frames: 10_000 - 2_112 + 1,
+    };
+    assert_eq!(
+        Layout::new(Codec::Alac, 10_000, RATE, Some(past), Order::FastStart),
+        Err(Error::EditPastEnd {
+            edit: past,
+            frames: 10_000
+        })
+    );
+    let to_the_end = Edit {
+        frames: past.frames - 1,
+        ..past
+    };
+    assert!(
+        Layout::new(
+            Codec::Alac,
+            10_000,
+            RATE,
+            Some(to_the_end),
+            Order::FastStart
+        )
+        .is_ok()
+    );
+    // `skip + frames` overflows a u64 here.
+    for overflow in [
+        Edit {
+            skip: 1,
+            frames: u64::MAX,
+        },
+        Edit {
+            skip: u32::MAX,
+            frames: u64::MAX,
+        },
+    ] {
+        assert_eq!(
+            Layout::new(Codec::Alac, 10_000, RATE, Some(overflow), Order::FastStart),
+            Err(Error::EditPastEnd {
+                edit: overflow,
+                frames: 10_000
+            })
+        );
+    }
+}
+
+#[test]
+fn a_wrong_count_or_size_of_packets_is_refused() {
+    for order in [Order::FastStart, Order::MoovLast] {
+        let layout = Layout::new(Codec::Alac, 4097, RATE, None, order).unwrap();
+        let max = MAX_PACKET_BYTES as u32;
+        for sizes in [vec![1], vec![1, 2, 3]] {
+            let want = Err(Error::PacketCount {
+                expected: 2,
+                got: sizes.len(),
+            });
+            assert_eq!(layout.head(&ENTRY, &sizes), want);
+            assert_eq!(layout.tail(&ENTRY, &sizes), want);
+        }
+        let want = Err(Error::PacketSize {
+            index: 1,
+            size: max + 1,
+            most: MAX_PACKET_BYTES,
+        });
+        assert_eq!(layout.head(&ENTRY, &[max, max + 1]), want);
+        assert_eq!(layout.tail(&ENTRY, &[max, max + 1]), want);
+        assert!(layout.head(&ENTRY, &[max, max]).is_ok());
+    }
+}
+
+#[test]
+fn each_refusal_says_what_is_wrong() {
+    let edit = Edit { skip: 1, frames: 2 };
+    let cases = [
+        (Error::SampleRate(0), "1 to 65,535 Hz, not 0 Hz"),
+        (
+            Error::EditPastEnd { edit, frames: 2 },
+            "2 frames from frame 1, past the end of 2 frames",
+        ),
+        (
+            Error::TooLarge {
+                frames: 5,
+                worst_case_bytes: 6,
+            },
+            "5 frames can reach 6 bytes",
+        ),
+        (
+            Error::PacketCount {
+                expected: 2,
+                got: 3,
+            },
+            "2 packets, not 3",
+        ),
+        (
+            Error::PacketSize {
+                index: 1,
+                size: 9,
+                most: 16_388,
+            },
+            "packet 1 has 9 bytes, more than 16388",
+        ),
+    ];
+    for (error, text) in cases {
+        assert!(error.to_string().contains(text), "{error}");
+    }
+}
+
+/// The AudioSpecificConfig of AAC-LC at 48 kHz in stereo: object type 2,
+/// rate index 3, channel configuration 2.
+const ASC_48K_STEREO: [u8; 2] = [0x11, 0x90];
+
+fn aac(channels: u16, config_len: u8) -> Codec {
+    Codec::Aac {
+        channels,
+        config_len,
+    }
+}
+
+fn aac_entry(config: &[u8]) -> SampleEntry {
+    SampleEntry::Aac {
+        config: config.into(),
+    }
+}
+
+/// The `esds` body after its version and flags, for the AudioSpecificConfig
+/// `config` (ISO/IEC 14496-1, 7.2.6).
+fn esds_descriptors(config: &[u8]) -> Vec<u8> {
+    let n = config.len() as u8;
+    let mut want = vec![3, 23 + n, 0, 0, 0];
+    want.extend([4, 15 + n, 0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    want.extend([5, n]);
+    want.extend_from_slice(config);
+    want.extend([6, 1, 2]);
+    want
+}
+
+#[test]
+fn an_aac_file_has_an_mp4a_entry_with_its_esds() {
+    let frames = 3 * 1024;
+    let layout = Layout::new(aac(2, 2), frames, 48_000, None, Order::FastStart).unwrap();
+    assert_eq!(layout.packets(), 3);
+    let packets = packets(&[100, 200, 300]);
+    let entry = aac_entry(&ASC_48K_STEREO);
+    let file = file_with(&layout, &entry, &packets);
+    let top = boxes(&file);
+    assert_eq!(kinds(&top), ["ftyp", "moov", "mdat"]);
+    check_mdat(&top[2], &packets);
+    let stbl = stbl(&top[1]);
+    let stsd = stbl.child(0, "stsd");
+    assert_eq!(stsd.u32_at(4), 1, "stsd entry count");
+    let mp4a = stsd.child(8, "mp4a");
+    assert_eq!(mp4a.u16_at(6), 1, "data_reference_index");
+    assert_eq!(mp4a.u16_at(16), 2, "channels");
+    assert_eq!(mp4a.u16_at(18), 16, "sample size");
+    assert_eq!(mp4a.u32_at(24), 48_000 << 16, "rate as 16.16");
+    let esds = mp4a.child(28, "esds");
+    assert_eq!(esds.body[..4], [0, 0, 0, 0], "version and flags 0");
+    assert_eq!(esds.body[4..], esds_descriptors(&ASC_48K_STEREO));
+    assert_eq!(stbl.child(0, "stts").u32s(), [1, 3, 1024]);
+    let stsz = stbl.child(0, "stsz").u32s();
+    assert_eq!(stsz, [0, 3, 100, 200, 300]);
+    let stco = stbl.child(0, "stco").u32s();
+    for (i, (&offset, packet)) in stco[1..].iter().zip(&packets).enumerate() {
+        let at = offset as usize;
+        assert_eq!(&file[at..at + packet.len()], packet, "stco entry {i}");
+    }
+}
+
+#[test]
+fn an_aac_layout_has_1024_frames_in_each_packet() {
+    let layout = Layout::new(aac(2, 2), 2 * 1024 + 1, 44_100, None, Order::FastStart).unwrap();
+    assert_eq!(layout.packets(), 3);
+    let packets = packets(&[10, 20, 30]);
+    let file = file_with(&layout, &aac_entry(&ASC_48K_STEREO), &packets);
+    let stts = stbl(&boxes(&file)[1]).child(0, "stts").u32s();
+    assert_eq!(stts, [2, 2, 1024, 1, 1]);
+}
+
+#[test]
+fn a_6_channel_aac_layout_has_6_channels_and_a_bound_of_4608() {
+    let codec = aac(6, 2);
+    assert_eq!(codec.channels(), 6);
+    assert_eq!(codec.max_packet_bytes(), 4608);
+    assert_eq!(codec.frames_per_packet(), 1024);
+    assert_eq!(aac(1, 2).max_packet_bytes(), 768);
+    assert_eq!(Codec::Alac.max_packet_bytes(), MAX_PACKET_BYTES);
+    assert_eq!(Codec::Alac.frames_per_packet(), 4096);
+    assert_eq!(Codec::Alac.channels(), 2);
+    let layout = Layout::new(codec, 1024, 44_100, None, Order::FastStart).unwrap();
+    let entry = aac_entry(&[0x12, 0x30]);
+    let file = file_with(&layout, &entry, &packets(&[4608]));
+    let mp4a = stbl(&boxes(&file)[1]).child(0, "stsd").child(8, "mp4a");
+    assert_eq!(mp4a.u16_at(16), 6, "channels");
+    assert_eq!(
+        layout.head(&entry, &[4609]),
+        Err(Error::PacketSize {
+            index: 0,
+            size: 4609,
+            most: 4608
+        })
+    );
+}
+
+#[test]
+fn an_aac_layout_refuses_0_channels_and_a_config_length_outside_1_to_64() {
+    let new = |codec| Layout::new(codec, 1024, 44_100, None, Order::FastStart);
+    assert_eq!(new(aac(0, 2)), Err(Error::NoChannels));
+    assert_eq!(new(aac(2, 0)), Err(Error::ConfigLen(0)));
+    assert_eq!(new(aac(2, 65)), Err(Error::ConfigLen(65)));
+    assert!(new(aac(2, 1)).is_ok());
+    assert!(new(aac(2, 64)).is_ok());
+}
+
+#[test]
+fn a_sample_entry_of_another_codec_or_config_length_is_refused() {
+    for order in [Order::FastStart, Order::MoovLast] {
+        let alac = Layout::new(Codec::Alac, 4096, RATE, None, order).unwrap();
+        let aac_layout = Layout::new(aac(2, 2), 1024, RATE, None, order).unwrap();
+        let cases = [
+            (&alac, aac_entry(&ASC_48K_STEREO)),
+            (&aac_layout, ENTRY),
+            (&aac_layout, aac_entry(&[0x11, 0x90, 0, 0, 0])),
+        ];
+        for (layout, entry) in cases {
+            assert_eq!(
+                layout.head(&entry, &[1]),
+                Err(Error::EntryCodec),
+                "{order:?}"
+            );
+            assert_eq!(
+                layout.tail(&entry, &[1]),
+                Err(Error::EntryCodec),
+                "{order:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_mono_aac_packet_of_769_bytes_is_refused() {
+    let layout = Layout::new(aac(1, 2), 1024, RATE, None, Order::FastStart).unwrap();
+    let entry = aac_entry(&[0x12, 0x08]);
+    assert!(layout.head(&entry, &[768]).is_ok());
+    let want = Err(Error::PacketSize {
+        index: 0,
+        size: 769,
+        most: 768,
+    });
+    assert_eq!(layout.head(&entry, &[769]), want);
+    assert_eq!(layout.tail(&entry, &[769]), want);
+}
+
+#[test]
+fn an_aac_head_has_its_reserved_length() {
+    for config in [&ASC_48K_STEREO[..], &[0x11, 0x90, 0x56, 0xE5, 0x00]] {
+        for frames in [0, 1, 1024, 1025] {
+            for edit in [
+                None,
+                Some(Edit {
+                    skip: 0,
+                    frames: frames / 2,
+                }),
+            ] {
+                for order in [Order::FastStart, Order::MoovLast] {
+                    let codec = aac(2, config.len() as u8);
+                    let layout = Layout::new(codec, frames, RATE, edit, order).unwrap();
+                    let entry = aac_entry(config);
+                    let sizes = vec![768; layout.packets()];
+                    let case = format!("{config:?}, {frames}, {edit:?}, {order:?}");
+                    assert_eq!(layout.packets(), (frames as usize).div_ceil(1024), "{case}");
+                    let head = layout.head(&entry, &sizes);
+                    assert!(head.is_ok(), "{case}: {head:?}");
+                    assert_eq!(head.unwrap().len(), layout.head_len(), "{case}");
+                    let tail = layout.tail(&entry, &sizes);
+                    assert!(tail.is_ok(), "{case}: {tail:?}");
+                    assert_eq!(tail.unwrap().len(), layout.tail_len(), "{case}");
+                }
+            }
+        }
+    }
+}
+
+/// The descriptor sizes are one byte each, so the largest
+/// AudioSpecificConfig keeps the `ES_Descriptor` below 128 bytes.
+#[test]
+fn a_64_byte_config_gives_an_es_descriptor_below_128_bytes() {
+    let config = [0xA5; 64];
+    let layout = Layout::new(aac(2, 64), 1024, RATE, None, Order::FastStart).unwrap();
+    let file = file_with(&layout, &aac_entry(&config), &packets(&[10]));
+    let esds = stbl(&boxes(&file)[1])
+        .child(0, "stsd")
+        .child(8, "mp4a")
+        .child(28, "esds");
+    assert_eq!(esds.body[4..], esds_descriptors(&config));
+    let es_descriptor_size = esds.body[5];
+    assert_eq!(es_descriptor_size, 23 + 64);
+    assert!(es_descriptor_size < 128);
+}
+
+#[test]
+fn each_aac_refusal_says_what_is_wrong() {
+    let cases = [
+        (Error::NoChannels, "1 channel or more, not 0"),
+        (Error::ConfigLen(65), "1 to 64 bytes, not 65"),
+        (Error::EntryCodec, "not of the codec of the layout"),
+    ];
+    for (error, text) in cases {
+        assert!(error.to_string().contains(text), "{error}");
+    }
+}
+
+/// The example of the plan: Apple's delay of 2112 frames (0x840), a
+/// padding of 458 (0x1CA) and 4,141,558 frames (0x3F31F6), in 4047 packets
+/// of 1024.
+const APPLE: Gapless = Gapless {
+    delay: 2112,
+    padding: 458,
+    frames: 4_141_558,
+};
+
+/// The size of the `udta` of an `iTunSMPB` tag.
+const UDTA_LEN: usize = 249;
+
+#[test]
+fn a_gapless_tag_is_an_itunsmpb_item_in_moov_udta() {
+    let frames = 4047 * 1024;
+    let layout = Layout::new(aac(2, 2), frames, RATE, None, Order::FastStart)
+        .unwrap()
+        .with_gapless(APPLE);
+    assert!(layout.is_ok(), "{layout:?}");
+    let layout = layout.unwrap();
+    let sizes = vec![1; 4047];
+    let entry = aac_entry(&[0x12, 0x10]);
+    let head = layout.head(&entry, &sizes).unwrap();
+    let top = boxes(&head[..head.len() - 8]);
+    assert_eq!(kinds(&top), ["ftyp", "moov"]);
+    let moov = top[1];
+    assert_eq!(kinds(&moov.children(0)), ["mvhd", "trak", "udta"]);
+    let udta = moov.child(0, "udta");
+    assert_eq!(udta.body.len() + 8, UDTA_LEN);
+    let meta = udta.child(0, "meta");
+    assert_eq!(meta.body[..4], [0, 0, 0, 0], "meta version and flags 0");
+    assert_eq!(kinds(&meta.children(4)), ["hdlr", "ilst"]);
+    let hdlr = meta.child(4, "hdlr");
+    assert_eq!(hdlr.body, *b"\0\0\0\0\0\0\0\0mdirappl\0\0\0\0\0\0\0\0\0");
+    let ilst = meta.child(4, "ilst");
+    assert_eq!(kinds(&ilst.children(0)), ["----"]);
+    let item = ilst.child(0, "----");
+    assert_eq!(kinds(&item.children(0)), ["mean", "name", "data"]);
+    assert_eq!(item.child(0, "mean").body, *b"\0\0\0\0com.apple.iTunes");
+    assert_eq!(item.child(0, "name").body, *b"\0\0\0\0iTunSMPB");
+    let data = item.child(0, "data");
+    assert_eq!(data.body[..8], [0, 0, 0, 1, 0, 0, 0, 0], "UTF-8, locale 0");
+    let text = std::str::from_utf8(&data.body[8..]).unwrap();
+    let fields: Vec<&str> = text.split(' ').collect();
+    assert_eq!(fields[0], "", "each field has one space before it");
+    assert_eq!(
+        fields[1..],
+        [
+            "00000000",
+            "00000840",
+            "000001CA",
+            "00000000003F31F6",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000",
+            "00000000"
+        ]
+    );
+}
+
+#[test]
+fn the_head_with_a_gapless_tag_has_its_reserved_length() {
+    let frames = 4047 * 1024;
+    for codec in [aac(2, 2), Codec::Alac] {
+        for edit in [
+            None,
+            Some(Edit {
+                skip: 2112,
+                frames: 4_141_558,
+            }),
+        ] {
+            for order in [Order::FastStart, Order::MoovLast] {
+                let plain = Layout::new(codec, frames, RATE, edit, order).unwrap();
+                let tagged = plain.clone().with_gapless(APPLE).unwrap();
+                let case = format!("{codec:?}, {edit:?}, {order:?}");
+                assert_eq!(
+                    tagged.head_len() + tagged.tail_len(),
+                    plain.head_len() + plain.tail_len() + UDTA_LEN,
+                    "{case}"
+                );
+                let entry = match codec {
+                    Codec::Alac => ENTRY,
+                    Codec::Aac { .. } => aac_entry(&[0x12, 0x10]),
+                };
+                let sizes = vec![1; tagged.packets()];
+                assert_eq!(
+                    tagged.head(&entry, &sizes).unwrap().len(),
+                    tagged.head_len(),
+                    "{case}"
+                );
+                assert_eq!(
+                    tagged.tail(&entry, &sizes).unwrap().len(),
+                    tagged.tail_len(),
+                    "{case}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn a_gapless_tag_that_is_not_the_frames_of_the_track_is_refused() {
+    let layout = Layout::new(aac(2, 2), 4047 * 1024, RATE, None, Order::FastStart).unwrap();
+    for gapless in [
+        Gapless {
+            frames: APPLE.frames + 1,
+            ..APPLE
+        },
+        Gapless {
+            padding: 457,
+            ..APPLE
+        },
+        Gapless {
+            delay: u32::MAX,
+            padding: u32::MAX,
+            frames: u64::MAX,
+        },
+    ] {
+        assert_eq!(
+            layout.clone().with_gapless(gapless),
+            Err(Error::GaplessFrames {
+                gapless,
+                frames: 4047 * 1024
+            })
+        );
+    }
+    let error = Error::GaplessFrames {
+        gapless: APPLE,
+        frames: 5,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("2112 + 4141558 + 458 frames, not the 5 frames"),
+        "{error}"
+    );
+}
+
+/// The 4 GiB refusal counts the tag: near the limit, `with_gapless`
+/// refuses exactly the layouts that the 249 bytes of the tag take past it.
+#[test]
+fn a_gapless_tag_that_takes_the_file_to_4_gib_is_refused() {
+    let (mut refused, mut taken) = (0, 0);
+    for channels in 1..=8 {
+        for config_len in 1..=64 {
+            let codec = aac(channels, config_len);
+            let new =
+                |packets: u64| Layout::new(codec, packets * 1024, RATE, None, Order::FastStart);
+            // The most packets of 1024 frames below 4 GiB.
+            let (mut low, mut high) = (1_u64, 1 << 23);
+            while high - low > 1 {
+                let mid = (low + high) / 2;
+                if new(mid).is_ok() {
+                    low = mid
+                } else {
+                    high = mid
+                }
+            }
+            let layout = new(low).unwrap();
+            let head_len = layout.head_len();
+            let worst = head_len as u64 + low * codec.max_packet_bytes() as u64;
+            assert!(worst < FOUR_GIB);
+            let frames = low * 1024;
+            let gapless = Gapless {
+                delay: 0,
+                padding: 0,
+                frames,
+            };
+            let case = format!("{channels} channels, {config_len} bytes");
+            match layout.with_gapless(gapless) {
+                Ok(tagged) => {
+                    assert!(worst + (UDTA_LEN as u64) < FOUR_GIB, "{case}");
+                    assert_eq!(tagged.head_len(), head_len + UDTA_LEN, "{case}");
+                    taken += 1;
+                }
+                Err(error) => {
+                    assert_eq!(
+                        error,
+                        Error::TooLarge {
+                            frames,
+                            worst_case_bytes: u128::from(worst) + UDTA_LEN as u128
+                        },
+                        "{case}"
+                    );
+                    refused += 1;
+                }
+            }
+        }
+    }
+    assert!(refused > 0 && taken > 0, "{refused} refused, {taken} taken");
+}
+
+/// The description of Safari 27.2's `AudioEncoder` for AAC-LC at 44.1 kHz
+/// in stereo: a whole `ES_Descriptor` with 4-byte sizes, around `12 10`.
+const SAFARI_DESCRIPTION: [u8; 39] = [
+    0x03, 0x80, 0x80, 0x80, 0x22, 0x00, 0x00, 0x00, 0x04, 0x80, 0x80, 0x80, 0x14, 0x40, 0x14, 0x00,
+    0x18, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x05, 0x80, 0x80, 0x80, 0x02, 0x12,
+    0x10, 0x06, 0x80, 0x80, 0x80, 0x01, 0x02,
+];
+
+/// The AudioSpecificConfig of AAC-LC at 44.1 kHz in stereo, which Chrome
+/// gives as its whole description.
+const ASC_44K_STEREO: [u8; 2] = [0x12, 0x10];
+
+#[test]
+fn a_bare_description_is_its_config() {
+    let config = audio_specific_config(&ASC_44K_STEREO);
+    assert_eq!(config, Ok(&ASC_44K_STEREO[..]));
+}
+
+#[test]
+fn safaris_description_gives_the_config_in_its_tag_5() {
+    let config = audio_specific_config(&SAFARI_DESCRIPTION);
+    assert_eq!(config, Ok(&ASC_44K_STEREO[..]));
+}
+
+/// The `esds` of the writer, with its 1-byte sizes, is a description too.
+/// With `MoovLast`, `moov` is in the tail.
+#[test]
+fn the_esds_of_the_writer_gives_its_config() {
+    for len in [2_u8, 5, 64] {
+        let config: Vec<u8> = (0..len).map(|i| 0x12 ^ i).collect();
+        let layout = Layout::new(aac(2, len), 1024, RATE, None, Order::MoovLast).unwrap();
+        let entry = aac_entry(&config);
+        let tail = layout.tail(&entry, &[10]).unwrap();
+        let moov = boxes(&tail)[0];
+        assert_eq!(moov.kind(), "moov");
+        let esds = stbl(&moov)
+            .child(0, "stsd")
+            .child(8, "mp4a")
+            .child(28, "esds");
+        let found = audio_specific_config(&esds.body[4..]);
+        assert_eq!(found, Ok(&config[..]), "{len} bytes");
+    }
+}
+
+/// An `ES_Descriptor` of `flags`, with the fields that they add, and each
+/// size in `size_bytes` bytes.
+fn es_descriptor(flags: u8, size_bytes: usize, config: &[u8]) -> Vec<u8> {
+    es_descriptor_with(flags, size_bytes, config, b"abc", [0, 0])
+}
+
+/// An `ES_Descriptor` as [`es_descriptor`], with the URL `url` and the
+/// `maxBitrate` and `avgBitrate` of `bitrates`.
+fn es_descriptor_with(
+    flags: u8,
+    size_bytes: usize,
+    config: &[u8],
+    url: &[u8],
+    bitrates: [u32; 2],
+) -> Vec<u8> {
+    fn descriptor(tag: u8, size_bytes: usize, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        for i in (0..size_bytes).rev() {
+            let seven = ((body.len() >> (7 * i)) & 0x7f) as u8;
+            out.push(if i > 0 { seven | 0x80 } else { seven });
+        }
+        out.extend_from_slice(body);
+        out
+    }
+    let mut es = vec![0x00, 0x01, flags];
+    if flags & 0x80 != 0 {
+        es.extend([0x00, 0x02]);
+    }
+    if flags & 0x40 != 0 {
+        es.push(url.len() as u8);
+        es.extend(url);
+    }
+    if flags & 0x20 != 0 {
+        es.extend([0x00, 0x03]);
+    }
+    let mut decoder = vec![0x40, 0x15, 0, 0, 0];
+    decoder.extend(bitrates[0].to_be_bytes());
+    decoder.extend(bitrates[1].to_be_bytes());
+    decoder.extend(descriptor(5, size_bytes, config));
+    es.extend(descriptor(4, size_bytes, &decoder));
+    es.extend(descriptor(6, size_bytes, &[2]));
+    descriptor(3, size_bytes, &es)
+}
+
+#[test]
+fn a_descriptor_with_each_flag_gives_its_config() {
+    for flags in [0x00, 0x80, 0x40, 0x20, 0xE0, 0xE0 | 0x1F] {
+        for size_bytes in 1..=4 {
+            let description = es_descriptor(flags, size_bytes, &ASC_44K_STEREO);
+            let config = audio_specific_config(&description);
+            assert_eq!(
+                config,
+                Ok(&ASC_44K_STEREO[..]),
+                "flags {flags:#x}, {size_bytes} size bytes"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_description_whose_config_has_0_or_65_bytes_is_refused() {
+    for (config, len) in [(&[][..], 0), (&[0x12; 65][..], 65)] {
+        let description = es_descriptor(0, 1, config);
+        assert_eq!(
+            audio_specific_config(&description),
+            Err(Error::ConfigBytes(len))
+        );
+        assert_eq!(audio_specific_config(config), Err(Error::ConfigBytes(len)));
+    }
+    assert!(audio_specific_config(&[0x12; 64]).is_ok());
+}
+
+#[test]
+fn a_descriptor_size_of_5_bytes_is_refused() {
+    let description = [0x03, 0x80, 0x80, 0x80, 0x80, 0x05, 0, 0, 0, 0, 0];
+    assert_eq!(
+        audio_specific_config(&description),
+        Err(Error::DescriptorSizeBytes { tag: 3 })
+    );
+}
+
+#[test]
+fn a_cut_at_each_byte_of_safaris_description_is_refused() {
+    for len in 0..SAFARI_DESCRIPTION.len() {
+        let config = audio_specific_config(&SAFARI_DESCRIPTION[..len]);
+        assert!(config.is_err(), "{len} bytes: {config:?}");
+    }
+    assert_eq!(
+        audio_specific_config(&SAFARI_DESCRIPTION[..1]),
+        Err(Error::DescriptorPastEnd { tag: 3 })
+    );
+    assert_eq!(
+        audio_specific_config(&SAFARI_DESCRIPTION[..38]),
+        Err(Error::DescriptorPastEnd { tag: 3 })
+    );
+}
+
+#[test]
+fn a_descriptor_without_tag_4_or_tag_5_is_refused() {
+    let no_4 = [0x03, 0x06, 0x00, 0x01, 0x00, 0x06, 0x01, 0x02];
+    assert_eq!(
+        audio_specific_config(&no_4),
+        Err(Error::NoDescriptor { tag: 4, within: 3 })
+    );
+    let no_5 = [
+        0x03, 0x12, 0x00, 0x01, 0x00, 0x04, 0x0D, 0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    assert_eq!(
+        audio_specific_config(&no_5),
+        Err(Error::NoDescriptor { tag: 5, within: 4 })
+    );
+    let short_4 = [0x03, 0x07, 0x00, 0x01, 0x00, 0x04, 0x02, 0x40, 0x15];
+    assert_eq!(
+        audio_specific_config(&short_4),
+        Err(Error::DescriptorPastEnd { tag: 4 })
+    );
+    let url_past_end = [0x03, 0x04, 0x00, 0x01, 0x40, 0x09];
+    assert_eq!(
+        audio_specific_config(&url_past_end),
+        Err(Error::DescriptorPastEnd { tag: 3 })
+    );
+}
+
+/// A fixed-seed walk over short descriptions and AudioSpecificConfigs.
+/// Each read gives a result, and none panics.
+#[test]
+fn no_description_or_config_makes_a_panic() {
+    let mut noise = common::Noise::new(7);
+    for _ in 0..20_000 {
+        let len = (noise.next_i16() as u16 % 48) as usize;
+        let mut bytes: Vec<u8> = (0..len).map(|_| noise.next_i16() as u8).collect();
+        if let Some(first) = bytes.first_mut() {
+            *first = if noise.next_i16() > 0 { 3 } else { *first };
+        }
+        let _ = audio_specific_config(&bytes);
+        let _ = AacConfig::read(&bytes);
+    }
+    for a in 0..=255 {
+        for b in 0..=255 {
+            let _ = audio_specific_config(&[a, b]);
+            let _ = AacConfig::read(&[a, b]);
+        }
+    }
+}
+
+#[test]
+fn each_description_refusal_says_what_is_wrong() {
+    let cases = [
+        (Error::ConfigBytes(65), "has 65 bytes, not 1 to 64"),
+        (
+            Error::DescriptorPastEnd { tag: 4 },
+            "descriptor tag 4 of the description runs past the end",
+        ),
+        (
+            Error::DescriptorSizeBytes { tag: 3 },
+            "tag 3 of the description has more than 4 bytes",
+        ),
+        (
+            Error::NoDescriptor { tag: 5, within: 4 },
+            "tag 4 of the description has no descriptor tag 5",
+        ),
+        (
+            Error::ConfigEnds {
+                field: "frameLengthFlag",
+            },
+            "ends before its frameLengthFlag",
+        ),
+        (Error::ConfigRateIndex(13), "the reserved rate index 13"),
+    ];
+    for (error, text) in cases {
+        assert!(error.to_string().contains(text), "{error}");
+    }
+}
+
+/// The bits of `fields`, each `(value, bits)`, from the top bit, padded
+/// with zeros to a whole byte.
+fn bit_bytes(fields: &[(u32, usize)]) -> (Vec<u8>, usize) {
+    let bits: Vec<u8> = fields
+        .iter()
+        .flat_map(|&(value, count)| (0..count).rev().map(move |i| ((value >> i) & 1) as u8))
+        .collect();
+    (pack(&bits), bits.len())
+}
+
+fn pack(bits: &[u8]) -> Vec<u8> {
+    bits.chunks(8)
+        .map(|byte| {
+            byte.iter()
+                .enumerate()
+                .fold(0, |out, (i, &bit)| out | (bit << (7 - i)))
+        })
+        .collect()
+}
+
+fn config(object_type: u32, rate: u32, channel_config: u8, frames_960: bool) -> AacConfig {
+    AacConfig {
+        object_type,
+        rate,
+        channel_config,
+        frames_960,
+    }
+}
+
+#[test]
+fn aac_config_reads_the_fields_of_each_form() {
+    let explicit = bit_bytes(&[(2, 5), (15, 4), (44_100, 24), (2, 4), (0, 1), (0, 2)]).0;
+    let escape = bit_bytes(&[(31, 5), (10, 6), (4, 4), (2, 4), (0, 1)]).0;
+    let cases: [(&[u8], AacConfig); 6] = [
+        (&ASC_44K_STEREO, config(2, 44_100, 2, false)),
+        (&[0x2b, 0x92, 0x08, 0x00], config(5, 22_050, 2, false)),
+        (&[0x12, 0x08], config(2, 44_100, 1, false)),
+        (&[0x12, 0x14], config(2, 44_100, 2, true)),
+        (&escape, config(42, 44_100, 2, false)),
+        (&explicit, config(2, 44_100, 2, false)),
+    ];
+    for (bytes, want) in cases {
+        assert_eq!(AacConfig::read(bytes), Ok(want), "{bytes:02x?}");
+    }
+    assert_eq!(AAC_RATES[4], 44_100);
+}
+
+#[test]
+fn aac_config_refuses_a_reserved_rate_index() {
+    for index in [13, 14] {
+        let bytes = bit_bytes(&[(2, 5), (index, 4), (2, 4), (0, 3)]).0;
+        assert_eq!(
+            AacConfig::read(&bytes),
+            Err(Error::ConfigRateIndex(index as u8))
+        );
+    }
+}
+
+/// Each config cut at each bit, padded with zeros to a byte, parses when
+/// its bytes hold every field, and else gives `ConfigEnds`.
+#[test]
+fn aac_config_refuses_a_cut_at_each_bit() {
+    let forms: [&[(u32, usize)]; 5] = [
+        &[(2, 5), (4, 4), (2, 4), (0, 1)],
+        &[(5, 5), (7, 4), (2, 4), (4, 4), (2, 5), (0, 1)],
+        &[(2, 5), (4, 4), (2, 4), (1, 1)],
+        &[(31, 5), (10, 6), (4, 4), (2, 4)],
+        &[(2, 5), (15, 4), (44_100, 24), (2, 4), (0, 1)],
+    ];
+    for fields in forms {
+        let (whole, needed) = bit_bytes(fields);
+        let bits: Vec<u8> = (0..needed)
+            .map(|i| (whole[i / 8] >> (7 - i % 8)) & 1)
+            .collect();
+        for cut in 0..=needed {
+            let bytes = pack(&bits[..cut]);
+            let read = AacConfig::read(&bytes);
+            let case = format!("{fields:?} cut at bit {cut}: {read:?}");
+            if bytes.len() * 8 >= needed {
+                assert!(read.is_ok(), "{case}");
+            } else {
+                assert!(matches!(read, Err(Error::ConfigEnds { .. })), "{case}");
+            }
+        }
+    }
+}
+
+/// The worker reserves the head of an AAC save before it knows the packet
+/// count.  So the head of `MoovLast` is 36 bytes at each length.
+#[test]
+fn an_aac_moov_last_head_is_36_bytes_at_each_length() {
+    for frames in [0, 1, 1024, 100_000_000] {
+        for edit in [None, Some(Edit { skip: 0, frames })] {
+            for gapless in [
+                None,
+                Some(Gapless {
+                    delay: 0,
+                    padding: 0,
+                    frames,
+                }),
+            ] {
+                let layout = Layout::new(aac(2, 2), frames, RATE, edit, Order::MoovLast).unwrap();
+                let layout = match gapless {
+                    Some(gapless) => layout.with_gapless(gapless).unwrap(),
+                    None => layout,
+                };
+                let case = format!("{frames}, {edit:?}, {gapless:?}");
+                assert_eq!(layout.head_len(), 36, "{case}");
+                let sizes = vec![1; layout.packets()];
+                let head = layout.head(&aac_entry(&ASC_44K_STEREO), &sizes);
+                assert!(head.is_ok(), "{case}: {head:?}");
+                assert_eq!(head.unwrap().len(), 36, "{case}");
+            }
+        }
+    }
+}
+
+/// Review round 1 of M4: the 13 fixed bytes of tag 4 are skipped whole,
+/// also when its bit rates are not 0.
+#[test]
+fn a_descriptor_with_bit_rates_gives_its_config() {
+    for size_bytes in [1, 4] {
+        let description =
+            es_descriptor_with(0, size_bytes, &ASC_44K_STEREO, b"", [256_000, 100_000]);
+        assert_eq!(
+            audio_specific_config(&description),
+            Ok(&ASC_44K_STEREO[..]),
+            "{size_bytes} size bytes"
+        );
+    }
+}
+
+/// Review round 1 of M4: an `ES_Descriptor` whose fields end at the end of
+/// its body has no tag 4.  Its fields do not run past the end.
+#[test]
+fn an_es_descriptor_of_its_fields_only_has_no_tag_4() {
+    assert_eq!(
+        audio_specific_config(&[0x03, 0x03, 0x00, 0x01, 0x00]),
+        Err(Error::NoDescriptor { tag: 4, within: 3 })
+    );
+}
+
+/// Review round 1 of M4: a size of 128 bytes or more takes two size
+/// bytes, here for a URL of 200 bytes.
+#[test]
+fn a_descriptor_of_200_bytes_gives_its_config() {
+    let url = [b'u'; 200];
+    let description = es_descriptor_with(0x40, 2, &ASC_44K_STEREO, &url, [0, 0]);
+    assert!(description[1] & 0x80 != 0, "a size of two bytes");
+    assert_eq!(audio_specific_config(&description), Ok(&ASC_44K_STEREO[..]));
+}

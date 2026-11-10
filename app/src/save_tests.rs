@@ -356,16 +356,18 @@ async fn a_refused_open_or_write_removes_the_file_and_says_why() {
 }
 
 /// D7 of M8: the clean-up at the page's start removes a save file older
-/// than its age limit and keeps a newer one.
+/// than its age limit and keeps a newer one.  Safari gives `lastModified`
+/// in whole seconds (`docs/references/browser-quirks.md`).  So the waits
+/// either side of `between` are longer than a second.
 #[wasm_bindgen_test]
 async fn old_save_files_are_removed_and_new_ones_kept() {
     store::test_remove(store::SAVES).await;
     store::test_write("saves/1-1.wav", b"old")
         .await
         .expect("planted");
-    sv_sleep(30).await;
+    sv_sleep(1_100).await;
     let between = js_sys::Date::now();
-    sv_sleep(30).await;
+    sv_sleep(1_100).await;
     store::test_write("saves/2-1.flac", b"new")
         .await
         .expect("planted");
@@ -584,11 +586,12 @@ async fn a_wav_save_of_a_stored_song_offers_its_save_file() {
     );
 }
 
-/// D1, D4 and D5 of M8: a FLAC or MP3 save of a stored song posts a stored
-/// request, with nothing transferred, only after its WAV is complete.
-/// The worker's reply offers the worker's file, of the format's type.
+/// D1, D4 and D5 of M8: a FLAC, M4A or MP3 save of a stored song posts a
+/// stored request of its kind, with nothing transferred, only after its
+/// WAV is complete.  The worker's reply offers the worker's file, of the
+/// format's type.
 #[wasm_bindgen_test]
-async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
+async fn worker_saves_post_paths_then_offer_the_workers_file() {
     let id = "m8-offer-encoded";
     let frames = 10 * SECOND;
     let (shown, _) = stored_song(id, frames, 2).await;
@@ -596,14 +599,22 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
     let (mut app, worker) = page(id, shown, true);
     let worker = worker.expect("a worker");
     let mut outcomes = Vec::new();
-    for format in [export::Format::Flac, export::Format::Mp3] {
+    for format in [
+        export::Format::Flac,
+        export::Format::M4a,
+        export::Format::Mp3,
+        export::Format::Aac,
+    ] {
         app.start_save(Some(1), format);
         run_save(&mut app).await;
         let posted = requests(&worker);
         let encoding = app.status.clone();
         let (request, transfer) = posted.into_iter().next().expect("a request");
+        let kind = request.kind();
         let (name, wav, out, sent_frames) = match request {
             stem_protocol::Request::Flac { name, source, .. }
+            | stem_protocol::Request::Alac { name, source, .. }
+            | stem_protocol::Request::Aac { name, source, .. }
             | stem_protocol::Request::Mp3 { name, source, .. } => match source {
                 stem_protocol::Encode::Stored {
                     wav, frames, out, ..
@@ -624,6 +635,14 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
                     name: name.clone(),
                     file,
                 },
+                export::Format::M4a => stem_protocol::Reply::Alac {
+                    name: name.clone(),
+                    file,
+                },
+                export::Format::Aac => stem_protocol::Reply::Aac {
+                    name: name.clone(),
+                    file,
+                },
                 _ => stem_protocol::Reply::Mp3 {
                     name: name.clone(),
                     file,
@@ -634,6 +653,7 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
         let got = downloads(&sv_links().await);
         outcomes.push((
             format,
+            kind,
             name,
             transfer.length(),
             sent_frames,
@@ -647,8 +667,17 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
     app.load_demo();
     store::test_remove(store::SAVES).await;
     store::test_remove(&format!("sessions/{id}")).await;
-    for (format, name, transfer, sent_frames, wav_size, out, encoding, status, got) in outcomes {
+    for (format, kind, name, transfer, sent_frames, wav_size, out, encoding, status, got) in
+        outcomes
+    {
         let ext = format.extension();
+        let (want_kind, want_type) = match format {
+            export::Format::Flac => ("flac", "audio/flac"),
+            export::Format::M4a => ("alac", "audio/mp4"),
+            export::Format::Aac => ("aac", "audio/mp4"),
+            _ => ("mp3", "audio/mpeg"),
+        };
+        assert_eq!(kind, want_kind, "{format:?}: the request of the format");
         assert_eq!(name, format!("lloyd - drums.{ext}"));
         assert_eq!(transfer, 0, "{ext}: no samples cross");
         assert_eq!(sent_frames, frames);
@@ -663,11 +692,6 @@ async fn flac_and_mp3_saves_post_paths_then_offer_the_workers_file() {
         assert_eq!(got.len(), 1, "{ext}: one download");
         let (offered, blob) = &got[0];
         assert_eq!(offered, &name);
-        let want_type = if format == export::Format::Flac {
-            "audio/flac"
-        } else {
-            "audio/mpeg"
-        };
         assert_eq!(
             (blob.type_(), blob.size()),
             (want_type.to_string(), 7.0),
@@ -837,6 +861,7 @@ fn failed(name: &str, out: &str) -> stem_protocol::Reply {
         file: stem_protocol::Encoded::Failed {
             path: out.into(),
             text: "QuotaExceededError: the disk is full".into(),
+            in_encoder: false,
         },
     }
 }
@@ -1003,8 +1028,8 @@ async fn a_failed_encode_waits_for_the_save_in_progress_and_not_for_a_new_song()
 
 /// D7 and D8 of M8: when the worker stops, the page removes the WAV and
 /// the output of each stored encode with no reply.  A stopped worker
-/// counts as no worker: the menu offers no FLAC or MP3, and a save in
-/// progress removes its WAV and posts nothing.
+/// counts as no worker: the menu offers no FLAC, M4A or MP3, and a save
+/// in progress removes its WAV and posts nothing.
 #[wasm_bindgen_test]
 async fn a_stopped_worker_leaves_no_save_files_and_takes_no_encode() {
     let id = "m8-stopped";
@@ -1360,4 +1385,317 @@ async fn two_save_failures_each_show_once() {
         let text = format!("Could not encode {name} in browser storage");
         assert_eq!(status.matches(&text).count(), 1, "{name}: {status}");
     }
+}
+
+/// M3 of `plans/completed/m4a.md`: an `error` reply of an M4A encode names
+/// M4A encoding on the status line, as one of FLAC or MP3 names its own.
+#[wasm_bindgen_test]
+async fn an_m4a_encode_error_names_m4a_encoding() {
+    let id = "m3-alac-error";
+    let (shown, _) = stored_song(id, SECOND, 1).await;
+    let (mut app, _worker) = page(id, shown, true);
+    reply(
+        &mut app,
+        stem_protocol::Reply::Error {
+            of: stem_protocol::kind::ALAC.into(),
+            text: "ALAC encoder: the stem has no samples".into(),
+        },
+    );
+    let status = app.status.clone();
+    app.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(
+        status,
+        "M4A encoding failed: ALAC encoder: the stem has no samples"
+    );
+}
+
+/// Finding 1-1 of review round 1 of M3: when browser storage refuses the
+/// save file, a save of each worker format posts the request of its kind
+/// on the memory path, with the two arrays transferred (MEM-2).
+#[wasm_bindgen_test]
+async fn a_memory_save_posts_the_arrays_of_its_format() {
+    let id = "m3-memory-formats";
+    let frames = 2 * SECOND;
+    let (shown, _) = stored_song(id, frames, 2).await;
+    let mut outcomes = Vec::new();
+    for format in [
+        export::Format::Flac,
+        export::Format::M4a,
+        export::Format::Mp3,
+        export::Format::Aac,
+    ] {
+        store::test_remove(store::SAVES).await;
+        let (mut app, worker) = page(id, shown.clone(), true);
+        let worker = worker.expect("a worker");
+        store::tests::refuse_next_writable();
+        app.start_save(None, format);
+        run_save(&mut app).await;
+        outcomes.push((format, requests(&worker), app.status.clone()));
+        app.load_demo();
+    }
+    store::test_remove(store::SAVES).await;
+    store::test_remove(&format!("sessions/{id}")).await;
+    for (format, posted, status) in outcomes {
+        let ext = format.extension();
+        assert_eq!(posted.len(), 1, "{ext}: one request ({status})");
+        let (request, transfer) = &posted[0];
+        let want = match format {
+            export::Format::Flac => "flac",
+            export::Format::M4a => "alac",
+            export::Format::Aac => "aac",
+            _ => "mp3",
+        };
+        assert_eq!(
+            request.kind(),
+            want,
+            "{format:?}: the request of the format"
+        );
+        let (name, left, right) = match request {
+            stem_protocol::Request::Flac { name, source }
+            | stem_protocol::Request::Alac { name, source }
+            | stem_protocol::Request::Aac { name, source }
+            | stem_protocol::Request::Mp3 { name, source } => match source {
+                stem_protocol::Encode::Arrays { left, right, .. } => {
+                    (name.clone(), left.clone(), right.clone())
+                }
+                other => panic!("{ext}: {other:?}"),
+            },
+            other => panic!("{ext}: {other:?}"),
+        };
+        assert_eq!(name, Some(format!("lloyd - mix.{ext}")));
+        assert_eq!(left.length() as usize, frames, "{ext}: the left array");
+        assert_eq!(right.length() as usize, frames, "{ext}: the right array");
+        assert!(
+            !js_sys::Object::is(&left.buffer(), &right.buffer()),
+            "{ext}: the two channels are two arrays"
+        );
+        assert_eq!(transfer.length(), 2, "MEM-2: {ext}: both arrays cross");
+        assert!(
+            js_sys::Object::is(&transfer.get(0), &left.buffer())
+                && js_sys::Object::is(&transfer.get(1), &right.buffer()),
+            "MEM-2: {ext}: the transfer list holds the arrays of the request"
+        );
+        assert!(status.contains("held in memory"), "{ext}: {status}");
+    }
+}
+
+/// M4 of `plans/completed/m4a.md`: an `error` reply of an AAC encode names
+/// AAC encoding on the status line, not M4A encoding.
+#[wasm_bindgen_test]
+async fn an_aac_encode_error_names_aac_encoding() {
+    let id = "m4-aac-error";
+    let (shown, _) = stored_song(id, SECOND, 1).await;
+    let (mut app, _worker) = page(id, shown, true);
+    reply(
+        &mut app,
+        stem_protocol::Reply::Error {
+            of: stem_protocol::kind::AAC.into(),
+            text: "AAC encoder: this browser has no AAC encoder".into(),
+        },
+    );
+    let status = app.status.clone();
+    app.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(
+        status,
+        "AAC encoding failed: AAC encoder: this browser has no AAC encoder"
+    );
+}
+
+/// A stored save of `format` of the mix of `app`'s song, posted to
+/// `worker`: the output file that the request names, and its name.
+async fn posted_save(
+    app: &mut StemApp,
+    worker: &FakeWorker,
+    format: export::Format,
+) -> (String, String) {
+    app.start_save(None, format);
+    run_save(app).await;
+    match requests(worker).pop() {
+        Some((
+            stem_protocol::Request::Flac { name, source }
+            | stem_protocol::Request::Alac { name, source }
+            | stem_protocol::Request::Aac { name, source }
+            | stem_protocol::Request::Mp3 { name, source },
+            _,
+        )) => match source {
+            stem_protocol::Encode::Stored { out, .. } => (out, name.expect("a name")),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+/// M4 of `plans/completed/m4a.md`: a stored AAC encode whose encoder failed
+/// says so, and does not encode again in memory.  A second encode would
+/// fail the same way, and browser storage did not fail.  This holds for a
+/// short song and for one too long for the memory path.
+#[wasm_bindgen_test]
+async fn a_failed_aac_encoder_says_so_and_does_not_encode_again() {
+    let text = "AAC encoder: the probe gave a delay of 9000 frames, not 0 to 8191";
+    let mut outcomes = Vec::new();
+    for (id, frames) in [
+        ("m4-aac-encoder-short", 30 * SECOND),
+        ("m4-aac-encoder-long", MEMORY_PATH_MAX_FRAMES + SECOND),
+    ] {
+        let (shown, _) = stored_song(id, frames, 1).await;
+        store::test_remove(store::SAVES).await;
+        let (mut app, worker) = page(id, shown, true);
+        let worker = worker.expect("a worker");
+        let (out, name) = posted_save(&mut app, &worker, export::Format::Aac).await;
+        reply(
+            &mut app,
+            stem_protocol::Reply::Aac {
+                name,
+                file: stem_protocol::Encoded::Failed {
+                    path: out,
+                    text: text.into(),
+                    in_encoder: true,
+                },
+            },
+        );
+        let saving = app.saving.is_some();
+        run_save(&mut app).await;
+        outcomes.push((id, saving, requests(&worker).len(), app.status.clone()));
+        app.load_demo();
+        store::test_remove(store::SAVES).await;
+        store::test_remove(&format!("sessions/{id}")).await;
+    }
+    for (id, saving, posts, status) in outcomes {
+        assert!(!saving, "{id}: no save in memory starts");
+        assert_eq!(posts, 0, "{id}: no second encode");
+        assert_eq!(status, format!("AAC encoding failed: {text}"), "{id}");
+    }
+}
+
+#[wasm_bindgen(inline_js = r#"
+let saved = null;
+// Puts a stub `AudioEncoder` and `AudioData` on the page, in the form
+// `form`: "absent", "unsupported", "configure throws", "no packet" (its
+// flush never ends), "empty flush" (its flush ends with no packet),
+// "error flush" (its flush calls the error callback, then gives a packet)
+// or "packet".  It counts each AudioData and encoder
+// made and closed.
+export function stub_audio_encoder(form) {
+  if (saved) throw new Error("a stub is already on");
+  saved = { AudioEncoder: globalThis.AudioEncoder, AudioData: globalThis.AudioData };
+  const counts = { data_made: 0, data_closed: 0, enc_made: 0, enc_closed: 0 };
+  globalThis.__aac_stub_counts = counts;
+  class StubAudioData {
+    constructor() { this.closed = false; counts.data_made++; }
+    close() { if (!this.closed) { this.closed = true; counts.data_closed++; } }
+  }
+  class StubAudioEncoder {
+    static async isConfigSupported(config) { return { supported: form !== "unsupported", config }; }
+    constructor(init) {
+      this.output = init.output;
+      this.error = init.error;
+      this.state = "unconfigured";
+      counts.enc_made++;
+    }
+    configure() {
+      if (form === "configure throws") throw new TypeError("the stub refuses the config");
+      this.state = "configured";
+    }
+    encode() {}
+    flush() {
+      if (form === "no packet") return new Promise(() => {});
+      if (form === "empty flush") return Promise.resolve();
+      if (form === "error flush") {
+        // A codec is closed after its error callback.
+        this.state = "closed";
+        counts.enc_closed++;
+        this.error(new DOMException("the stub failed", "EncodingError"));
+      }
+      this.output({ byteLength: 6 }, {});
+      return Promise.resolve();
+    }
+    close() {
+      if (this.state === "closed") throw new DOMException("closed", "InvalidStateError");
+      this.state = "closed";
+      counts.enc_closed++;
+    }
+  }
+  if (form === "absent") delete globalThis.AudioEncoder; else globalThis.AudioEncoder = StubAudioEncoder;
+  globalThis.AudioData = StubAudioData;
+}
+// Puts the browser's own back, and gives the counts.
+export function unstub_audio_encoder() {
+  for (const [k, v] of Object.entries(saved)) {
+    if (v === undefined) delete globalThis[k]; else globalThis[k] = v;
+  }
+  saved = null;
+  const c = globalThis.__aac_stub_counts;
+  return [c.data_made, c.data_closed, c.enc_made, c.enc_closed];
+}
+"#)]
+extern "C" {
+    fn stub_audio_encoder(form: &str);
+    fn unstub_audio_encoder() -> Vec<f64>;
+}
+
+/// M4 of `plans/completed/m4a.md`: the page's probe passes only for an
+/// encoder that gives a packet within its time.  Each failure gives false,
+/// and the probe closes each `AudioData` and encoder that it made.  It runs
+/// in CI, with a stubbed `AudioEncoder`.
+#[wasm_bindgen_test]
+async fn the_aac_probe_passes_only_with_a_packet_in_time() {
+    let mut outcomes = Vec::new();
+    for form in [
+        "absent",
+        "unsupported",
+        "configure throws",
+        "no packet",
+        "empty flush",
+        "error flush",
+        "packet",
+    ] {
+        stub_audio_encoder(form);
+        let result = aac_probe::aac_encoder(50).await;
+        let counts = unstub_audio_encoder();
+        outcomes.push((form, result, counts));
+    }
+    for (form, result, counts) in outcomes {
+        assert_eq!(result.is_ok(), form == "packet", "{form}: {result:?}");
+        assert!(
+            counts[0] == counts[1] && counts[2] == counts[3],
+            "{form}: AudioData made and closed, encoders made and closed: {counts:?}"
+        );
+    }
+}
+
+/// The labels of the Save menu of `app`.
+fn menu_labels(app: &StemApp) -> Vec<&'static str> {
+    app.save_formats().iter().map(|f| f.label()).collect()
+}
+
+/// M4 of `plans/completed/m4a.md`: the Save menu takes its formats from the
+/// page's kept probe.  Before the probe ends it has four items.  After a
+/// probe that passes it has five, with "M4A (AAC 256 kbps)" last.  After a
+/// probe that fails it has four.  It runs in CI, with a stubbed encoder.
+#[wasm_bindgen_test]
+async fn the_save_menu_offers_aac_after_a_probe_that_passes() {
+    let app = StemApp::default();
+    let before = menu_labels(&app);
+    stub_audio_encoder("packet");
+    app.probe_aac(50).await;
+    unstub_audio_encoder();
+    let passed = menu_labels(&app);
+    let failing = StemApp::default();
+    stub_audio_encoder("unsupported");
+    failing.probe_aac(50).await;
+    unstub_audio_encoder();
+    let failed = menu_labels(&failing);
+    let four = [
+        "WAV (16-bit, lossless)",
+        "FLAC (16-bit, lossless)",
+        "M4A (16-bit Apple Lossless)",
+        "MP3 (192 kbps)",
+    ];
+    assert_eq!(before, four, "before the probe ends");
+    assert_eq!(passed.len(), 5, "{passed:?}");
+    assert_eq!(passed[..4], four);
+    assert_eq!(passed[4], "M4A (AAC 256 kbps)");
+    assert_eq!(failed, four, "after a probe that fails");
 }
