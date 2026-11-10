@@ -227,11 +227,17 @@ pub(crate) fn has_sbr_fill(packet: &[u8]) -> bool {
 /// an HE-AAC stream has one, since a decoder needs it.  A fill that only
 /// looks like SBR data by chance has one in 1 of 8 packets.
 pub(crate) fn has_sbr_header(packet: &[u8]) -> bool {
-    let Some((extension, at)) = sbr_fill(packet) else {
+    let Some((extension, at, count)) = sbr_fill(packet) else {
         return false;
     };
-    // The extension type, then a CRC of 10 bits for EXT_SBR_DATA_CRC.
-    let flag = at + 4 + if extension == 0xE { 10 } else { 0 };
+    // The extension type, then a CRC of 10 bits for EXT_SBR_DATA_CRC, then
+    // the header: bs_header_flag and 16 bits (table 4.63), all in the fill
+    // (finding 20-3 of review round 20).
+    let crc = if extension == 0xE { 10 } else { 0 };
+    if count * 8 < 4 + crc + 17 {
+        return false;
+    }
+    let flag = at + 4 + crc;
     // bs_amp_res (1), bs_start_freq (4), bs_stop_freq (4) and
     // bs_xover_band (3), then bs_reserved (2).
     read_bits(packet, flag, 1) == Some(1) && read_bits(packet, flag + 13, 2) == Some(0)
@@ -245,15 +251,15 @@ fn read_bits(packet: &[u8], at: usize, count: usize) -> Option<u32> {
     })
 }
 
-/// The extension type of the SBR fill that [`has_sbr_fill`] finds, and the
-/// bit where that type starts.
-fn sbr_fill(packet: &[u8]) -> Option<(u32, usize)> {
-    let read = |at: usize, count: usize| read_bits(packet, at, count).unwrap_or(u32::MAX);
+/// The extension type of the SBR fill that [`has_sbr_fill`] finds, the bit
+/// where that type starts, and the bytes of the fill.
+fn sbr_fill(packet: &[u8]) -> Option<(u32, usize, usize)> {
+    let read = |at: usize, count: usize| read_bits(packet, at, count);
     let end = (0..packet.len() * 8)
         .rev()
-        .find(|at| read(*at, 1) == 1)
+        .find(|at| read(*at, 1) == Some(1))
         .and_then(|last| last.checked_sub(2))?;
-    if read(end, 3) != 7 {
+    if read(end, 3)? != 7 {
         return None;
     }
     sbr_in_fills(&read, end, MOST_TRAILING_FILLS)
@@ -263,29 +269,32 @@ fn sbr_fill(packet: &[u8]) -> Option<(u32, usize)> {
 /// the bit `end`.  Each fill element is ID_FIL (3 bits), a count of 4 bits
 /// (15 and an escape of 8 bits: 15 + escape - 1), then the count in bytes,
 /// of which the first 4 bits are the extension type.  A read past the end
-/// of the packet matches no field.
+/// of the packet matches no field, and gives no value to a sum (finding
+/// 20-2 of review round 20).
 fn sbr_in_fills(
-    read: &dyn Fn(usize, usize) -> u32,
+    read: &dyn Fn(usize, usize) -> Option<u32>,
     end: usize,
     depth: usize,
-) -> Option<(u32, usize)> {
+) -> Option<(u32, usize, usize)> {
     if depth == 0 {
         return None;
     }
     (0..=269_usize).find_map(|count| {
         let head = if count < 15 { 3 + 4 } else { 3 + 4 + 8 };
         let start = end.checked_sub(head + count * 8)?;
-        let field = read(start + 3, 4) as usize;
-        let stated = match field {
-            15 => (15 + read(start + 7, 8) as usize).checked_sub(1)?,
-            field => field,
+        let stated = match read(start + 3, 4)? {
+            15 => 15 + read(start + 7, 8)? as usize - 1,
+            field => field as usize,
         };
-        if read(start, 3) != 6 || stated != count {
+        if read(start, 3)? != 6 || stated != count {
             return None;
         }
-        let extension = (count > 0).then(|| read(start + head, 4));
+        let extension = match count {
+            0 => None,
+            _ => Some(read(start + head, 4)?),
+        };
         match extension {
-            Some(kind @ (0xD | 0xE)) => Some((kind, start + head)),
+            Some(kind @ (0xD | 0xE)) => Some((kind, start + head, count)),
             Some(other) if !OTHER_FILLS.contains(&other) => None,
             _ => sbr_in_fills(read, start, depth - 1),
         }
@@ -373,8 +382,7 @@ mod tests {
 
     /// Item 1 of the intent review of M2: an SBR fill starts with a header
     /// when its `bs_header_flag` is 1 and its `bs_reserved` bits are 0,
-    /// after the CRC of 10 bits of `EXT_SBR_DATA_CRC`.  A read past the end
-    /// of the packet finds no header.
+    /// after the CRC of 10 bits of `EXT_SBR_DATA_CRC`.
     #[test]
     fn the_header_of_an_sbr_fill_is_read() {
         use crate::test_m4a::BitWriter;
@@ -404,6 +412,28 @@ mod tests {
             "the other reserved bit"
         );
         assert!(!has_sbr_header(&packet(0x1, with)), "no SBR");
+        // Finding 20-3 of review round 20: an SBR fill of 1 byte holds no
+        // header, though the bits after it read as one.
+        let mut bits = BitWriter::default();
+        bits.put(9, 0x15A);
+        for (count, value) in [
+            (3, 6),
+            (4, 1),
+            (4, 0xD),
+            (4, 0b1000),
+            (3, 6),
+            (4, 1),
+            (4, 0x0),
+            (4, 0),
+        ] {
+            bits.put(count, value);
+        }
+        bits.put(3, 7);
+        assert!(has_sbr_fill(&bits.bytes), "a fill of 1 byte");
+        assert!(!has_sbr_header(&bits.bytes), "a fill of 1 byte");
+        // Finding 20-2: an escaped count past the end of the packet reads no
+        // field, with no sum past 32 bits.
+        assert!(!has_sbr_fill(&[0x00, 0xFE]), "a count past the end");
     }
 
     /// Findings 8-4 and 8-9 of review round 8: SBR data in a fill element

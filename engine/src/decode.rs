@@ -1252,9 +1252,11 @@ const MOST_CHECK_PACKETS: usize = 64;
 /// `track_id`, and gives each packet that it read, to decode first.  It
 /// refuses an HE-AAC stream whose config shows no SBR (TD-81, closed by
 /// review round 7): each packet of the track that it read holds SBR data in
-/// a fill element before its end (`aac_config::has_sbr_fill`), and the
-/// first of them starts with an SBR header (`aac_config::has_sbr_header`;
-/// item 1 of the intent review of M2).  A packet of AAC-LC can end in bits
+/// a fill element before its end (`aac_config::has_sbr_fill`), and one of
+/// them starts with an SBR header (`aac_config::has_sbr_header`; item 1 of
+/// the intent review of M2).  With no header in the first packets, it reads
+/// on while each has SBR data, to the first header (finding 20-1 of review
+/// round 20).  A packet of AAC-LC can end in bits
 /// that look like SBR data by chance: 21 of the 13,100 packets of the
 /// maintainer's file from Apple do.  Each packet of a silent intro can be
 /// the same, so the header lowers the chance about 8 times.  Symphonia 0.6.1 finds that data too
@@ -1267,9 +1269,10 @@ fn first_packets_of_lc(
     let track_id = end.track_id;
     let mut queued = VecDeque::new();
     let mut audio = 0;
-    let mut with_sbr = 0;
-    let mut first_header = false;
-    while audio < SBR_CHECK_PACKETS && queued.len() < MOST_CHECK_PACKETS {
+    let (mut each_has_sbr, mut header) = (true, false);
+    while queued.len() < MOST_CHECK_PACKETS
+        && (audio < SBR_CHECK_PACKETS || (each_has_sbr && !header))
+    {
         let packet = match end.next(format) {
             Ok(Some(packet)) => packet,
             Ok(None) => break,
@@ -1277,17 +1280,13 @@ fn first_packets_of_lc(
             Err(e) => return Err(anyhow!("reading packet: {e}")),
         };
         if packet.track_id == track_id {
-            if audio == 0 {
-                first_header = crate::aac_config::has_sbr_header(&packet.data);
-            }
             audio += 1;
-            if crate::aac_config::has_sbr_fill(&packet.data) {
-                with_sbr += 1;
-            }
+            each_has_sbr &= crate::aac_config::has_sbr_fill(&packet.data);
+            header |= crate::aac_config::has_sbr_header(&packet.data);
         }
         queued.push_back(packet);
     }
-    if audio > 0 && with_sbr == audio && first_header {
+    if audio > 0 && each_has_sbr && header {
         return Err(anyhow!(HE_AAC_TEXT));
     }
     Ok(queued)
@@ -4734,11 +4733,39 @@ mod tests {
         assert_refused_early(junk, "m4a", text, "an M4A after 2 MiB of junk");
     }
 
+    /// Finding 20-1 of review round 20: an HE-AAC stream whose config does
+    /// not show SBR, cut after a packet that holds an SBR header, gives the
+    /// HE-AAC text.  The encoder sends the header in each eighth packet, so
+    /// the check reads on past 8 packets to the next header.  Each cut from
+    /// packet 0 to 9 is refused, as ADTS and as M4A, and so is a stream of
+    /// its first 8 packets, with the header in the first only (20-8).
+    #[test]
+    fn an_he_aac_stream_cut_after_its_header_gives_the_he_aac_text() {
+        use crate::test_m4a::{aac_m4a_of, adts_of, adts_packets, config, he_aac};
+        let (stream, _, _) = he_aac(&chirps(), 44_100);
+        let packets = adts_packets(&stream);
+        let lc = config(2, 22_050, 2);
+        for cut in 0..10 {
+            let rest = &packets[cut..];
+            let case = format!("cut at packet {cut}");
+            let adts = adts_of(rest, 22_050, 2, 0);
+            assert_eq!(refusal(adts, "aac"), HE_AAC_TEXT, "{case}, ADTS");
+            let m4a = aac_m4a_of(rest, 2, &lc, 22_050, None, None, m4a::Order::FastStart);
+            assert_eq!(refusal(m4a, "m4a"), HE_AAC_TEXT, "{case}, M4A");
+        }
+        // Only 8 packets, with the header in the first of them only.
+        let eight = &packets[..8];
+        let adts = adts_of(eight, 22_050, 2, 0);
+        assert_eq!(refusal(adts, "aac"), HE_AAC_TEXT, "8 packets, ADTS");
+    }
+
     /// TD-81, closed by review round 7: an HE-AAC stream whose config does
     /// not show SBR carries SBR data in a fill element before the end of each
     /// packet.  The decode checks the first 8 packets, and gives the HE-AAC
-    /// text when each holds it: an M4A with the core rate in its entry, one
-    /// with an entry rate of 0, and an ADTS stream.  AAC-LC still opens,
+    /// text when each holds it and one starts it with an SBR header
+    /// (`aac_config::has_sbr_header`), or reads on to the first header: an
+    /// M4A with the core rate in its entry, one with an entry rate of 0, and
+    /// an ADTS stream.  AAC-LC still opens,
     /// also with one such packet in the first 8.
     #[test]
     fn an_aac_whose_packets_carry_sbr_gives_the_he_aac_text() {
