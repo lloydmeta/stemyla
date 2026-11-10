@@ -256,6 +256,9 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08: the README of Symphonia on GitHub lists `opus`, `he-aac` and `he-aac-v2` features.  The published 0.6.1 has none of them.  Read the features of the pinned version, not the README.
 * 2026-11-10, orchestrator: Chrome updated itself to 157 during round 17 of M2, and WebDriver refused a session with chromedriver 155.  The orchestrator installed Chrome for Testing chromedriver 157.0.8103.38 (mac-x64) outside the repo, as the README says.  Then `web-test` (30 tests) and `e2e decode` passed on `937d20e`.
 * 2026-11-10, orchestrator: M3 runs on another Mac, an Apple M2 Pro (arm64) on macOS 27.2.1.  The session runs Opus 5.5 (the system prompt) at effort `high` (`modelSettings` for `claude-opus-5-5` in `~/.claude/settings.json`, over its `effortLevel` of `xhigh`).  The preflight passed at `b8b2c95`: `cargo test -p engine` (362 passed), `e2e decode --browser chrome` and `e2e save --browser chrome`.  Chrome is 157.0.8103.51.  A Chrome for Testing chromedriver 157.0.8103.39 for mac-arm64 was already on this Mac, outside the repo, so the run installed no tool.
+* 2026-11-10, M3: the wasm bundle after M3, from `trunk build --release`: `app_bg.wasm` 6,415,004 B (+8,765), `decode-worker_bg.wasm` 1,381,067 B (no change), `stem-worker_bg.wasm` 1,295,428 B (+45,336).  The `m4a` crate adds 3.6% to the stem worker.  The sizes before M3 are 6,406,239 B, 1,381,067 B and 1,250,092 B, at `2193806`.
+* 2026-11-10, M3: the 10-minute M4A of `e2e save` is 23.7 MB, 22% of its WAV but 1.7 times its FLAC, on the planted slow sines.  An M4A save took 4.5 s, a FLAC save 13.4 s.
+* 2026-11-10, M3: the published page ships no licence text for any crate (`gh-pages` has no `LICENSE*` or `THIRD-PARTY.md`).  Apache-2.0 section 4(a) asks for one.  M3 records it as TD-91.
 
 ## Decision log
 
@@ -290,6 +293,8 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-10, maintainer: M3 starts on another computer, from `08b7b5b`.  No M3 work exists before that.  Start it with the kick-off prompt.
 * 2026-11-10, agent: the orchestrator sends no start message for M3.  Reason: the maintainer asked for orchestrated mode by the skill's name, D1 to D7 are answered, and no new choice is open.  The review base of M3 is `b8b2c95`, the HEAD after `git pull`.  It holds only plan text after `08b7b5b`.
 * 2026-11-10, maintainer (the M3 kick-off): the review criteria of each M3 and M4 round hold the rules of 2026-11-09 and 2026-11-10.  Never leave user-facing text or behaviour wrong to avoid a snapshot or fixture update; update it by the README process, and list it in the PR.  In late rounds, do not push the team to close gaps on paths that the app cannot reach.
+* 2026-11-10, agent (M3 team leader): the gap of the licence text is TD-91, for its own PR, and M3 does not fix it.  Reason: it holds for `rusty_mp3` and `flacenc` before M3, and the M3 section asks only for the licence list.  The PR lists it under "Needs your attention".
+* 2026-11-10, agent (M3 team leader): the Save menu is WAV, FLAC, M4A, MP3.  The `e2e save` step of CI has 50 minutes, and the `browser-tests` job 75, since the two M4A saves add their waits.  Detail: `plans/active/m4a-m3.md`, Decision log.
 
 ## Outcomes and retrospective
 
