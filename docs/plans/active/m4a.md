@@ -255,6 +255,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-08, orchestrator: two CI runs failed when the runners downloaded Trunk, wasm-bindgen and wasm-opt from GitHub Releases (HTTP 504), and a rerun failed the same way.  The test, clippy and rustfmt jobs passed, and `check --tier push` passed here, with its Trunk line.  This is an outage outside the repo.
 * 2026-11-08: the README of Symphonia on GitHub lists `opus`, `he-aac` and `he-aac-v2` features.  The published 0.6.1 has none of them.  Read the features of the pinned version, not the README.
 * 2026-11-10, orchestrator: Chrome updated itself to 157 during round 17 of M2, and WebDriver refused a session with chromedriver 155.  The orchestrator installed Chrome for Testing chromedriver 157.0.8103.38 (mac-x64) outside the repo, as the README says.  Then `web-test` (30 tests) and `e2e decode` passed on `937d20e`.
+* 2026-11-10, orchestrator: M3 runs on another Mac, an Apple M2 Pro (arm64) on macOS 27.2.1.  The session runs Opus 5.5 (the system prompt) at effort `high` (`modelSettings` for `claude-opus-5-5` in `~/.claude/settings.json`, over its `effortLevel` of `xhigh`).  The preflight passed at `b8b2c95`: `cargo test -p engine` (362 passed), `e2e decode --browser chrome` and `e2e save --browser chrome`.  Chrome is 157.0.8103.51.  A Chrome for Testing chromedriver 157.0.8103.39 for mac-arm64 was already on this Mac, outside the repo, so the run installed no tool.
 
 ## Decision log
 
@@ -287,6 +288,8 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-10, maintainer: the hold of a `moov`-last stream (`547bf74`) is fine, since the browser cannot reach it.  It holds up to 1 GiB, only on a native FIFO.
 * 2026-11-10, orchestrator: the rules of 2026-11-09 (measure a gap against the plan) and of round 17 of M2 (a late round adds no new behaviour) apply to M3 and M4.  The first applies from round 1, the second from round 4.  A gap that no user of the app can reach goes to a TD with a clear text, unless it puts memory at risk or makes a panic.
 * 2026-11-10, maintainer: M3 starts on another computer, from `08b7b5b`.  No M3 work exists before that.  Start it with the kick-off prompt.
+* 2026-11-10, agent: the orchestrator sends no start message for M3.  Reason: the maintainer asked for orchestrated mode by the skill's name, D1 to D7 are answered, and no new choice is open.  The review base of M3 is `b8b2c95`, the HEAD after `git pull`.  It holds only plan text after `08b7b5b`.
+* 2026-11-10, maintainer (the M3 kick-off): the review criteria of each M3 and M4 round hold the rules of 2026-11-09 and 2026-11-10.  Never leave user-facing text or behaviour wrong to avoid a snapshot or fixture update; update it by the README process, and list it in the PR.  In late rounds, do not push the team to close gaps on paths that the app cannot reach.
 
 ## Outcomes and retrospective
 
