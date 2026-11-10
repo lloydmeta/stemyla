@@ -15,7 +15,7 @@ flowchart LR
     DW["decode loop<br/>decode, resample, overviews,<br/>stem overviews, classic drums"]
   end
   subgraph worker["Web Worker (worker crate)"]
-    W["message loop<br/>pacing, self-test, bench, MP3, FLAC, ALAC"]
+    W["message loop<br/>pacing, self-test, bench, MP3, FLAC, ALAC, AAC"]
     RF["roformer<br/>STFT, chunking, weights"]
     GPU["roformer-gpu<br/>WGSL kernels on WebGPU"]
   end
@@ -41,7 +41,7 @@ flowchart LR
 * `app`: the egui interface.  Natively it plays through cpal; on the web through Web Audio.  `separator.rs` drives the worker; `store.rs` keeps songs and stems in the browser.
 * `roformer`: everything about the model except the GPU: STFT and inverse STFT, cutting a song into overlapping chunks and joining the results (as the reference Python does), reading the weights (f32, f16 or bf16 safetensors), and a CPU implementation of the network on Burn's ndarray backend.  The CPU version is the reference the GPU is tested against.
 * `roformer-gpu`: the network on WebGPU with hand-written WGSL kernels, driven by wgpu.
-* `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark, and MP3, FLAC and ALAC encoding.
+* `stem-worker` (`worker/`): the Web Worker: loads or downloads the model, opens the GPU, runs separations, the self-test, the benchmark, and MP3, FLAC, ALAC and AAC encoding.  It encodes AAC with the browser's WebCodecs `AudioEncoder`.
 * `decode-worker` (`decoder/`): the page-side Web Worker (decision 0019).  It decodes a song that the page keeps in browser storage, in blocks, with `engine`.  It writes the session files and the overviews as `.decode.part` files, in blocks of 1 MiB (`decode_worker::pass`).  It answers each `decode` request of `stem_protocol::decode` with `decoded`, `undecodable` or `decode-unstored`.  It takes two more requests (`decode_worker::lanes`, D7 and D8 of `plans/completed/stream-from-storage-m7.md`):
   * `overviews`: the overviews of lane files, such as stems, and of their mix.  It ends with `overviews-made` or `decode-unstored`.
   * `classic`: classic drums of lane files as a 16-bit WAV, with a block HPSS, and its overview.  It ends with `classic-made` or `decode-unstored`.
@@ -150,7 +150,7 @@ Its JS heap holds these parts:
 * the browser's copy of the write in flight, about 2 MiB;
 * at the end stage, the last write's own array, up to 2 MiB.
 
-The end stage comes after the last read ends, so the last write's array never lies beside the reads in flight.  So a save of 7 lanes adds about 27 MiB to the tab at its peak.  The stem worker encodes FLAC, ALAC and MP3 from that file in blocks.  An ALAC encode keeps its packet table, 4 bytes for each packet of 4096 frames.  At the end, `moov` adds about 8 bytes for each packet, so about 77 KB in all for 10 minutes.  The memory of the end is fixed by construction: `Layout::head` makes one buffer of `head_len()`.  `the_head_and_the_tail_are_made_at_their_final_capacity` and `the_end_of_an_alac_holds_only_its_head` check the end.  An MP3 encode still holds about 3.5 times its file in the stem worker (TD-59).
+The end stage comes after the last read ends, so the last write's array never lies beside the reads in flight.  So a save of 7 lanes adds about 27 MiB to the tab at its peak.  The stem worker encodes FLAC, ALAC, AAC and MP3 from that file in blocks.  An ALAC encode keeps its packet table, 4 bytes for each packet of 4096 frames.  At the end, `moov` adds about 8 bytes for each packet, so about 77 KB in all for 10 minutes.  The memory of the end is fixed by construction: `Layout::head` makes one buffer of `head_len()`.  `the_head_and_the_tail_are_made_at_their_final_capacity` and `the_end_of_an_alac_holds_only_its_head` check the end.  An AAC encode also keeps only its packet table, 4 bytes for each packet of 1024 frames.  Its `moov` is last, so at the end the sizes and the `moov` live together, about 12 bytes for each packet.  The encoder's packets go from its JS callback to the file as JS arrays, so WebAssembly memory holds none of them.  Two waits keep the JS side fixed.  The encode waits while the encoder's queue holds more than 4 blocks (`aac::QUEUE_MOST`), since WebCodecs keeps a copy of each block.  It also waits while more than 32,768 frames are sent and not yet back as packets (`aac::OUT_MOST`).  Each `AudioData` is closed after its encode, and each encoder and decoder at the end.  Before each encode, the probe encodes and decodes an impulse of 16,384 frames to measure the encoder's delay.  An MP3 encode still holds about 3.5 times its file in the stem worker (TD-59).
 
 ## Running it on the GPU
 

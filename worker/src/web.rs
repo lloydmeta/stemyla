@@ -17,6 +17,7 @@ use stem_protocol::{
 use wasm_bindgen::prelude::*;
 use web_sys::{Blob, DedicatedWorkerGlobalScope, MessageEvent};
 
+mod aac;
 mod encode;
 mod mix;
 mod stems;
@@ -542,6 +543,7 @@ async fn serve(request: Request, s: &Settings) -> Result<(), String> {
         Request::Mp3 { name, source } => encode(Codec::Mp3, name, source).await,
         Request::Flac { name, source } => encode(Codec::Flac, name, source).await,
         Request::Alac { name, source } => encode(Codec::Alac, name, source).await,
+        Request::Aac { name, source } => encode(Codec::Aac, name, source).await,
     }
 }
 

@@ -567,6 +567,27 @@ fn offer_save_file(name: String, path: String, format: export::Format) {
     });
 }
 
+/// Why a stored encode failed (D4 of M8): the worker's text, and the label
+/// of the encode when its encoder failed, not browser storage.
+#[cfg(target_arch = "wasm32")]
+struct EncodeFailure {
+    why: String,
+    encoder: Option<&'static str>,
+}
+
+/// The label of an encode of the request `kind` on the status line, as in
+/// "AAC encoding failed: ...".
+#[cfg(target_arch = "wasm32")]
+fn encoding_label(kind: &str) -> &'static str {
+    match kind {
+        stem_protocol::kind::MP3 => "MP3 encoding",
+        stem_protocol::kind::FLAC => "FLAC encoding",
+        stem_protocol::kind::ALAC => "M4A encoding",
+        stem_protocol::kind::AAC => "AAC encoding",
+        _ => "Encoding",
+    }
+}
+
 /// The status line of a save that browser storage could not hold, of a song
 /// too long for the memory path (D8 of M8).
 #[cfg(target_arch = "wasm32")]
@@ -4259,6 +4280,7 @@ impl StemApp {
         let mut encoded = Vec::new();
         let mut worker_stopped = false;
         for ev in sep.take_events() {
+            let encode_kind = ev.encode_kind().unwrap_or_default();
             match ev {
                 Event::ModelLoading => {
                     sep.model_loading = true;
@@ -4294,7 +4316,8 @@ impl StemApp {
                 Event::Log(text) => log::info!("separator: {text}"),
                 Event::Mp3 { name, file }
                 | Event::Flac { name, file }
-                | Event::Alac { name, file } => match file {
+                | Event::Alac { name, file }
+                | Event::Aac { name, file } => match file {
                     stem_protocol::Encoded::Bytes(bytes) => {
                         store::download(&name, &bytes, "audio/mpeg");
                         let note = self.save_notes.take(&name);
@@ -4306,9 +4329,17 @@ impl StemApp {
                         self.status = format!("Saved {name}.{note}");
                     }
                     stem_protocol::Encoded::Stored { path } => encoded.push((path, None)),
-                    stem_protocol::Encoded::Failed { path, text } => {
-                        encoded.push((path, Some(text)))
-                    }
+                    stem_protocol::Encoded::Failed {
+                        path,
+                        text,
+                        in_encoder,
+                    } => encoded.push((
+                        path,
+                        Some(EncodeFailure {
+                            why: text,
+                            encoder: in_encoder.then(|| encoding_label(encode_kind)),
+                        }),
+                    )),
                 },
                 Event::Bench(text) => {
                     log::info!("separator: {text}");
@@ -4353,14 +4384,11 @@ impl StemApp {
                         }
                         stem_protocol::kind::MP3
                         | stem_protocol::kind::FLAC
-                        | stem_protocol::kind::ALAC => {
+                        | stem_protocol::kind::ALAC
+                        | stem_protocol::kind::AAC => {
                             // The failed file's note never gets its reply.
                             self.save_notes.clear();
-                            match of.as_str() {
-                                stem_protocol::kind::MP3 => "MP3 encoding",
-                                stem_protocol::kind::FLAC => "FLAC encoding",
-                                _ => "M4A encoding",
-                            }
+                            encoding_label(&of)
                         }
                         stem_protocol::kind::SELFTEST => "Self-test",
                         stem_protocol::kind::BENCH => "Benchmark",
@@ -4876,7 +4904,7 @@ impl StemApp {
     /// The reply of a stored encode (D4, D7 and D8 of M8).
     #[cfg(target_arch = "wasm32")]
     #[cfg_attr(mutants, mutants::skip)]
-    fn stored_encode_ended(&mut self, path: String, failed: Option<String>) {
+    fn stored_encode_ended(&mut self, path: String, failed: Option<EncodeFailure>) {
         let Some(posted) = self.posted_saves.remove(&path) else {
             log::warn!("save: a reply for {path}, which no save asked for");
             if failed.is_none() {
@@ -4893,11 +4921,18 @@ impl StemApp {
             order,
             ..
         } = posted;
-        let Some(why) = failed else {
+        let Some(EncodeFailure { why, encoder }) = failed else {
             offer_save_file(name.clone(), path, format);
             self.status = format!("Saved {name}.{}", note.unwrap_or_default());
             return;
         };
+        // M4 of `plans/active/m4a.md`: the encoder failed, not browser
+        // storage, so a second encode in memory fails the same way.
+        if let Some(label) = encoder {
+            log::warn!("save: {name}: the encoder failed: {why}");
+            self.report_save(format!("{label} failed: {why}"));
+            return;
+        }
         log::warn!("save: {name}: the worker could not encode it: {why}");
         // Only for the shown song with the same lanes (D8).
         let order =

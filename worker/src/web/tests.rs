@@ -966,15 +966,23 @@ async fn forget_model_removes_the_stored_model_and_partial_files() {
 #[wasm_bindgen_test]
 async fn errors_name_the_request_they_answer() {
     fresh().await;
-    // 4 frames at a rate that MP3 and M4A refuse, then none: each fails.
-    for (kind, frames) in [("mp3", 4), ("mp3", 0), ("alac", 4), ("alac", 0)] {
+    // 4 frames at a rate that MP3, M4A and AAC refuse, then none: each
+    // fails.  AAC has a rate of 96 kHz, so its 4 frames are at 22 kHz.
+    for (kind, frames, rate) in [
+        ("mp3", 4, 96_000),
+        ("mp3", 0, 96_000),
+        ("alac", 4, 96_000),
+        ("alac", 0, 96_000),
+        ("aac", 4, 22_000),
+        ("aac", 0, 96_000),
+    ] {
         let samples = Float32Array::new_with_length(frames);
         handle(message(&[
             ("type", kind.into()),
             ("name", "x".into()),
             ("left", samples.clone().into()),
             ("right", samples.into()),
-            ("rate", 96_000.into()),
+            ("rate", rate.into()),
         ]))
         .await;
     }
@@ -990,9 +998,9 @@ async fn errors_name_the_request_they_answer() {
         .iter()
         .map(|e| field(e, "of").as_string().unwrap_or_default())
         .collect();
-    assert_eq!(of, ["mp3", "mp3", "alac", "alac", "separate"]);
+    assert_eq!(of, ["mp3", "mp3", "alac", "alac", "aac", "aac", "separate"]);
     assert_eq!(
-        field(&errors[4], "text").as_string().as_deref(),
+        field(&errors[6], "text").as_string().as_deref(),
         Some("load the model first")
     );
 }
@@ -1298,10 +1306,11 @@ async fn a_flac_of_no_samples_is_refused() {
     assert!(sent("flac").is_empty());
 }
 
-/// The bytes of the M4A that the last `alac` reply carries.
-async fn m4a_reply() -> Vec<u8> {
-    let reply = sent("alac").pop();
-    assert!(reply.is_some(), "an alac reply");
+/// The bytes of the M4A that the last reply of `kind`, `alac` or `aac`,
+/// carries.
+async fn m4a_reply(kind: &str) -> Vec<u8> {
+    let reply = sent(kind).pop();
+    assert!(reply.is_some(), "an {kind} reply");
     let file: Blob = field(&reply.expect("a reply"), "file")
         .dyn_into()
         .expect("a Blob");
@@ -1382,7 +1391,7 @@ async fn encode_alac(left: &Float32Array, right: &Float32Array, rate: u32) -> Ve
     )
     .await
     .expect("encoded");
-    m4a_reply().await
+    m4a_reply("alac").await
 }
 
 /// Asserts that `bytes` is the reference M4A of `left` and `right`, and
@@ -1524,7 +1533,7 @@ fn save_out(codec: Codec) -> &'static str {
     match codec {
         Codec::Mp3 => SAVE_MP3,
         Codec::Flac => SAVE_FLAC,
-        Codec::Alac => SAVE_M4A,
+        Codec::Alac | Codec::Aac => SAVE_M4A,
     }
 }
 
@@ -1563,7 +1572,10 @@ async fn encode_stored(codec: Codec, wav: &str, frames: usize, out: &str) -> Res
 fn last_file(kind: &str) -> Encoded {
     let reply = sent(kind).pop().expect("a reply");
     match Reply::from_js(&reply).expect("a reply the page reads") {
-        Reply::Mp3 { file, .. } | Reply::Flac { file, .. } | Reply::Alac { file, .. } => file,
+        Reply::Mp3 { file, .. }
+        | Reply::Flac { file, .. }
+        | Reply::Alac { file, .. }
+        | Reply::Aac { file, .. } => file,
         other => panic!("{other:?}"),
     }
 }
@@ -1575,7 +1587,9 @@ async fn arrays_file(codec: Codec, left: &Float32Array, right: &Float32Array) ->
         .expect("encoded");
     match last_file(codec.kind()) {
         Encoded::Bytes(bytes) => bytes.to_vec(),
-        Encoded::Blob(_) if codec == Codec::Alac => m4a_reply().await,
+        Encoded::Blob(_) if matches!(codec, Codec::Alac | Codec::Aac) => {
+            m4a_reply(codec.kind()).await
+        }
         Encoded::Blob(_) => flac_reply().await,
         other => panic!("{other:?}"),
     }
@@ -2173,7 +2187,7 @@ async fn a_failed_stored_encode_says_why_and_leaves_no_file() {
             }
             encoded.unwrap_or_else(|e| panic!("{kind}, {case}: an error reply: {e}"));
             match last_file(kind) {
-                Encoded::Failed { path, text } => {
+                Encoded::Failed { path, text, .. } => {
                     assert_eq!(path, out, "{kind}, {case}");
                     assert!(!text.is_empty(), "{kind}, {case}");
                 }
@@ -2293,7 +2307,7 @@ async fn a_stored_encode_outside_saves_or_malformed_is_refused() {
             "a stored encode names its out file".to_string(),
         ),
     ] {
-        for kind in ["flac", "alac"] {
+        for kind in ["flac", "alac", "aac"] {
             fresh().await;
             plant_at(wav_path, &wav).await;
             handle(request(kind, wav_path, out)).await;
@@ -3555,3 +3569,5 @@ async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
     let errors = gpu.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+mod aac;

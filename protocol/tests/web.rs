@@ -354,25 +354,28 @@ fn an_mp3_request_keeps_its_name_and_rate() {
     }
 }
 
-/// The two lossless kinds, whose requests and replies have the same form.
-const LOSSLESS: [&str; 2] = ["flac", "alac"];
+/// The kinds whose reply carries a `Blob`, and whose requests and replies
+/// have the same form.
+const BLOB_KINDS: [&str; 3] = ["flac", "alac", "aac"];
 
-/// The request of the lossless `kind`.
-fn lossless_request(kind: &str, name: Option<String>, source: Encode) -> Request {
+/// The request of the `kind` of [`BLOB_KINDS`].
+fn blob_request(kind: &str, name: Option<String>, source: Encode) -> Request {
     match kind {
         "flac" => Request::Flac { name, source },
         "alac" => Request::Alac { name, source },
-        other => panic!("{other} is not a lossless kind"),
+        "aac" => Request::Aac { name, source },
+        other => panic!("{other} is not a kind of BLOB_KINDS"),
     }
 }
 
-/// The reply of the lossless `kind`.
-fn lossless_reply(kind: &str, name: &str, file: Encoded) -> Reply {
+/// The reply of the `kind` of [`BLOB_KINDS`].
+fn blob_reply(kind: &str, name: &str, file: Encoded) -> Reply {
     let name = name.to_string();
     match kind {
         "flac" => Reply::Flac { name, file },
         "alac" => Reply::Alac { name, file },
-        other => panic!("{other} is not a lossless kind"),
+        "aac" => Reply::Aac { name, file },
+        other => panic!("{other} is not a kind of BLOB_KINDS"),
     }
 }
 
@@ -381,7 +384,8 @@ fn encode_request(r: Request) -> Option<(Option<String>, Encode)> {
     match r {
         Request::Mp3 { name, source }
         | Request::Flac { name, source }
-        | Request::Alac { name, source } => Some((name, source)),
+        | Request::Alac { name, source }
+        | Request::Aac { name, source } => Some((name, source)),
         _ => None,
     }
 }
@@ -389,26 +393,27 @@ fn encode_request(r: Request) -> Option<(Option<String>, Encode)> {
 /// The name and file of an encode reply.
 fn encode_reply(r: Reply) -> Option<(String, Encoded)> {
     match r {
-        Reply::Mp3 { name, file } | Reply::Flac { name, file } | Reply::Alac { name, file } => {
-            Some((name, file))
-        }
+        Reply::Mp3 { name, file }
+        | Reply::Flac { name, file }
+        | Reply::Alac { name, file }
+        | Reply::Aac { name, file } => Some((name, file)),
         _ => None,
     }
 }
 
 /// The request of `kind` after its trip, which first asserts the `type`
 /// on the wire.
-fn lossless_trip(kind: &str, r: &Request) -> ToWorker {
+fn blob_trip(kind: &str, r: &Request) -> ToWorker {
     let (msg, transfer) = r.to_js(&Settings::default());
     assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
     ToWorker::from_js(&post(&msg, &transfer)).expect("decodes")
 }
 
 #[wasm_bindgen_test]
-fn a_lossless_request_keeps_its_name_and_rate() {
-    for kind in LOSSLESS {
+fn a_blob_kind_request_keeps_its_name_and_rate() {
+    for kind in BLOB_KINDS {
         let (left, right) = (samples(&[0.1]), samples(&[0.2]));
-        let r = lossless_request(
+        let r = blob_request(
             kind,
             Some(format!("bass.{kind}")),
             Encode::Arrays {
@@ -417,7 +422,7 @@ fn a_lossless_request_keeps_its_name_and_rate() {
                 rate: Some(48_000),
             },
         );
-        let got = lossless_trip(kind, &r).request;
+        let got = blob_trip(kind, &r).request;
         assert_eq!(got.kind(), kind);
         match encode_request(got) {
             Some((
@@ -435,7 +440,7 @@ fn a_lossless_request_keeps_its_name_and_rate() {
             other => panic!("{kind}: {other:?}"),
         }
         assert_eq!(left.length() + right.length(), 0, "{kind}: transferred");
-        let none = lossless_request(
+        let none = blob_request(
             kind,
             None,
             Encode::Arrays {
@@ -444,7 +449,7 @@ fn a_lossless_request_keeps_its_name_and_rate() {
                 rate: None,
             },
         );
-        let got = lossless_trip(kind, &none).request;
+        let got = blob_trip(kind, &none).request;
         assert_eq!(got.kind(), kind);
         assert!(
             matches!(
@@ -480,6 +485,13 @@ fn a_stored_encode_names_its_files_and_transfers_nothing() {
         (
             "alac",
             Request::Alac {
+                name: Some("lloyd - mix.m4a".into()),
+                source: stored_encode(),
+            },
+        ),
+        (
+            "aac",
+            Request::Aac {
                 name: Some("lloyd - mix.m4a".into()),
                 source: stored_encode(),
             },
@@ -521,7 +533,7 @@ fn a_stored_encode_names_its_files_and_transfers_nothing() {
 /// not read as a default.
 #[wasm_bindgen_test]
 fn an_encode_must_name_one_source_with_whole_frames_and_an_output() {
-    for kind in ["flac", "alac", "mp3"] {
+    for kind in ["flac", "alac", "aac", "mp3"] {
         let err = |json: &str| {
             let e = ToWorker::from_js(&from_json(&json.replace("KIND", kind)))
                 .expect_err(&format!("{kind}: {json}"));
@@ -840,11 +852,11 @@ fn an_mp3_reply_transfers_its_file() {
 /// A `Blob` is not transferable: it crosses as a reference to the same
 /// file, so the reply keeps it whole and the page does not copy it.
 #[wasm_bindgen_test]
-fn a_lossless_reply_keeps_its_blob() {
-    for kind in LOSSLESS {
+fn a_blob_reply_keeps_its_blob() {
+    for kind in BLOB_KINDS {
         let parts = Array::of1(&Uint8Array::from(&b"fLaC"[..]));
         let file = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
-        let reply = lossless_reply(kind, "bass", Encoded::Blob(file));
+        let reply = blob_reply(kind, "bass", Encoded::Blob(file));
         let (msg, transfer) = reply.to_js();
         assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
         let got = Reply::from_js(&post(&msg, &transfer)).expect("decodes");
@@ -867,9 +879,9 @@ fn a_stored_encode_reply_names_its_file_or_why_it_failed() {
             name: "bass".into(),
             file,
         },
-        lossless => lossless_reply(lossless, "bass", file),
+        blob_kind => blob_reply(blob_kind, "bass", file),
     };
-    for kind in ["flac", "alac", "mp3"] {
+    for kind in ["flac", "alac", "aac", "mp3"] {
         let stored = made(
             kind,
             Encoded::Stored {
@@ -887,25 +899,57 @@ fn a_stored_encode_reply_names_its_file_or_why_it_failed() {
             matches!(&file, Encoded::Stored { path } if path == "saves/1-2.flac"),
             "{kind}: {file:?}"
         );
-        let failed = made(
-            kind,
-            Encoded::Failed {
-                path: "saves/1-2.mp3".into(),
-                text: "QuotaExceededError: the disk is full".into(),
-            },
-        );
-        let (msg, transfer) = failed.to_js();
-        assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
-        assert_eq!(transfer.length(), 0, "{kind}: nothing crosses");
-        let got = reply_trip(&failed);
-        assert_eq!(got.kind(), kind);
-        match encode_reply(got) {
-            Some((_, Encoded::Failed { path, text })) => {
-                assert_eq!(path, "saves/1-2.mp3");
-                assert_eq!(text, "QuotaExceededError: the disk is full");
+        // M4 of `plans/active/m4a.md`: a failure of the encoder, or of
+        // browser storage.
+        for in_encoder in [false, true] {
+            let failed = made(
+                kind,
+                Encoded::Failed {
+                    path: "saves/1-2.mp3".into(),
+                    text: "QuotaExceededError: the disk is full".into(),
+                    in_encoder,
+                },
+            );
+            let (msg, transfer) = failed.to_js();
+            assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
+            assert_eq!(transfer.length(), 0, "{kind}: nothing crosses");
+            let got = reply_trip(&failed);
+            assert_eq!(got.kind(), kind);
+            match encode_reply(got) {
+                Some((
+                    _,
+                    Encoded::Failed {
+                        path,
+                        text,
+                        in_encoder: got,
+                    },
+                )) => {
+                    assert_eq!(path, "saves/1-2.mp3");
+                    assert_eq!(text, "QuotaExceededError: the disk is full");
+                    assert_eq!(got, in_encoder, "{kind}: in_encoder");
+                }
+                other => panic!("{kind}: {other:?}"),
             }
-            other => panic!("{kind}: {other:?}"),
         }
+    }
+}
+
+/// M4 of `plans/active/m4a.md`, TD-16: a failed reply with no `in_encoder`,
+/// as an older worker sends, is a failure of browser storage.
+#[wasm_bindgen_test]
+fn a_failed_reply_without_in_encoder_is_a_storage_failure() {
+    for kind in ["flac", "alac", "aac", "mp3"] {
+        let json = format!(
+            r#"{{"type": "{kind}", "name": "bass", "path": "saves/1-1.m4a", "failed": "full"}}"#
+        );
+        let got = Reply::from_js(&from_json(&json)).map(encode_reply);
+        assert!(
+            matches!(
+                &got,
+                Ok(Some((_, Encoded::Failed { in_encoder: false, text, .. }))) if text == "full"
+            ),
+            "{kind}: {got:?}"
+        );
     }
 }
 
@@ -914,9 +958,9 @@ fn a_stored_encode_reply_names_its_file_or_why_it_failed() {
 /// does not arrive.
 #[wasm_bindgen_test]
 fn a_reply_with_the_other_codecs_file_is_refused() {
-    for kind in LOSSLESS {
-        let lossless = lossless_reply(kind, "bass", Encoded::Bytes(Uint8Array::from(&[1u8][..])));
-        let (msg, transfer) = lossless.to_js();
+    for kind in BLOB_KINDS {
+        let blob_kind = blob_reply(kind, "bass", Encoded::Bytes(Uint8Array::from(&[1u8][..])));
+        let (msg, transfer) = blob_kind.to_js();
         assert_eq!(stem_protocol::kind_of(&msg), kind, "the type on the wire");
         let e = Reply::from_js(&post(&msg, &transfer)).expect_err("refused");
         assert_eq!(e.text, format!("{kind} message: no file"));
@@ -947,7 +991,7 @@ fn an_encode_reply_without_its_file_is_refused() {
             "failed must be text",
         ),
     ];
-    for kind in LOSSLESS {
+    for kind in BLOB_KINDS {
         for (json, why) in [
             (r#"{"type": "KIND", "name": "bass", "file": 1}"#, "no file"),
             (r#"{"type": "KIND", "name": "bass"}"#, "no file"),
@@ -958,6 +1002,10 @@ fn an_encode_reply_without_its_file_is_refused() {
             (
                 r#"{"type": "KIND", "name": "bass", "path": "saves/1-1.m4a", "failed": 3}"#,
                 "failed must be text",
+            ),
+            (
+                r#"{"type": "KIND", "name": "bass", "path": "saves/1-1.m4a", "failed": "x", "in_encoder": "yes"}"#,
+                "in_encoder must be true or false",
             ),
         ] {
             cases.push((json.replace("KIND", kind), why));
@@ -971,7 +1019,7 @@ fn an_encode_reply_without_its_file_is_refused() {
     }
     // Nit 1-13 of review round 1 of M8: an MP3 carries bytes, and a FLAC or
     // an ALAC a `Blob`, never the other way round.
-    for kind in LOSSLESS {
+    for kind in BLOB_KINDS {
         let with_bytes = from_json(&format!(r#"{{"type": "{kind}", "name": "bass"}}"#));
         let _ = Reflect::set(&with_bytes, &"bytes".into(), &Uint8Array::from(&[1u8][..]));
         let e = Reply::from_js(&with_bytes).expect_err("refused");

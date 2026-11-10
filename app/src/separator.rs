@@ -117,6 +117,26 @@ pub enum Event {
         name: String,
         file: Encoded,
     },
+    /// The encoded AAC M4A: a `Blob`, as the worker sent it (the memory
+    /// path), or its path in browser storage (the storage path).
+    Aac {
+        name: String,
+        file: Encoded,
+    },
+}
+
+impl Event {
+    /// The `type` of the request whose file this event carries: `mp3`,
+    /// `flac`, `alac` or `aac`.  `None` for an event of no encode.
+    pub fn encode_kind(&self) -> Option<&'static str> {
+        match self {
+            Event::Mp3 { .. } => Some(kind::MP3),
+            Event::Flac { .. } => Some(kind::FLAC),
+            Event::Alac { .. } => Some(kind::ALAC),
+            Event::Aac { .. } => Some(kind::AAC),
+            _ => None,
+        }
+    }
 }
 
 pub struct Separator {
@@ -130,7 +150,7 @@ pub struct Separator {
     /// runs them in that order, and ends each with one `done`, `error` or
     /// `unstored`, so each reply belongs to the oldest one.
     separations: Rc<RefCell<VecDeque<Posted>>>,
-    /// Sent with every request but MP3, FLAC and M4A encoding.
+    /// Sent with every request but MP3, FLAC, ALAC and AAC encoding.
     settings: Settings,
     pub model_ready: bool,
     /// Whether browser storage holds a model file, usable or not.
@@ -379,6 +399,7 @@ impl Separator {
                 Reply::Mp3 { name, file } => Some(Event::Mp3 { name, file }),
                 Reply::Flac { name, file } => Some(Event::Flac { name, file }),
                 Reply::Alac { name, file } => Some(Event::Alac { name, file }),
+                Reply::Aac { name, file } => Some(Event::Aac { name, file }),
                 Reply::Download { done, total } => Some(Event::Download { done, total }),
             };
             if let Some(event) = event {
@@ -809,6 +830,7 @@ export function spy_on_post(worker) {
                 file: Encoded::Failed {
                     path: "saves/1-2.mp3".into(),
                     text: "QuotaExceededError: full".into(),
+                    in_encoder: false,
                 },
             },
         ] {
@@ -825,7 +847,7 @@ export function spy_on_post(worker) {
                 } => Some(format!("flac {name} {path}")),
                 Event::Mp3 {
                     name,
-                    file: Encoded::Failed { path, text },
+                    file: Encoded::Failed { path, text, .. },
                 } => Some(format!("mp3 {name} {path} {text}")),
                 _ => None,
             })
@@ -1173,6 +1195,38 @@ export function spy_on_post(worker) {
             Object::is(&file, &sent),
             "MEM-1: the page made a new file from the M4A that the worker sent.  \
              Fix: keep the Blob in Event::Alac."
+        );
+    }
+
+    /// M4 of `plans/active/m4a.md`: an AAC reply reaches the page as an
+    /// `Event::Aac` with the worker's `Blob`.
+    #[wasm_bindgen_test]
+    fn an_aac_reply_reaches_the_page_as_sent() {
+        let mut sep = Separator::new(egui::Context::default()).expect("a worker");
+        let parts = js_sys::Array::of1(&Uint8Array::from(&b"ftyp"[..]));
+        let sent = web_sys::Blob::new_with_u8_array_sequence(&parts).expect("a blob");
+        let (message, _) = Reply::Aac {
+            name: "bass.m4a".into(),
+            file: Encoded::Blob(sent.clone()),
+        }
+        .to_js();
+        deliver(&sep.worker, &message);
+        let aac = sep.take_events().into_iter().find_map(|e| match e {
+            Event::Aac {
+                name,
+                file: Encoded::Blob(file),
+            } => Some((name, file)),
+            _ => None,
+        });
+        // Before any assert: a failed assert aborts the test.
+        sep.stop();
+        assert!(aac.is_some(), "an Event::Aac of the reply");
+        let (name, file) = aac.expect("an Event::Aac");
+        assert_eq!(name, "bass.m4a");
+        assert!(
+            Object::is(&file, &sent),
+            "MEM-1: the page made a new file from the M4A that the worker sent.  \
+             Fix: keep the Blob in Event::Aac."
         );
     }
 }

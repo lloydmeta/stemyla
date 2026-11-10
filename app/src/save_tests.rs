@@ -852,6 +852,7 @@ fn failed(name: &str, out: &str) -> stem_protocol::Reply {
         file: stem_protocol::Encoded::Failed {
             path: out.into(),
             text: "QuotaExceededError: the disk is full".into(),
+            in_encoder: false,
         },
     }
 }
@@ -1460,5 +1461,94 @@ async fn a_memory_save_posts_the_arrays_of_its_format() {
             "MEM-2: {ext}: the transfer list holds the arrays of the request"
         );
         assert!(status.contains("held in memory"), "{ext}: {status}");
+    }
+}
+
+/// M4 of `plans/active/m4a.md`: an `error` reply of an AAC encode names
+/// AAC encoding on the status line, not M4A encoding.
+#[wasm_bindgen_test]
+async fn an_aac_encode_error_names_aac_encoding() {
+    let id = "m4-aac-error";
+    let (shown, _) = stored_song(id, SECOND, 1).await;
+    let (mut app, _worker) = page(id, shown, true);
+    reply(
+        &mut app,
+        stem_protocol::Reply::Error {
+            of: stem_protocol::kind::AAC.into(),
+            text: "AAC encoder: this browser has no AAC encoder".into(),
+        },
+    );
+    let status = app.status.clone();
+    app.load_demo();
+    store::test_remove(&format!("sessions/{id}")).await;
+    assert_eq!(
+        status,
+        "AAC encoding failed: AAC encoder: this browser has no AAC encoder"
+    );
+}
+
+/// A stored save of `format` of the mix of `app`'s song, posted to
+/// `worker`: the output file that the request names, and its name.
+async fn posted_save(
+    app: &mut StemApp,
+    worker: &FakeWorker,
+    format: export::Format,
+) -> (String, String) {
+    app.start_save(None, format);
+    run_save(app).await;
+    match requests(worker).pop() {
+        Some((
+            stem_protocol::Request::Flac { name, source }
+            | stem_protocol::Request::Alac { name, source }
+            | stem_protocol::Request::Aac { name, source }
+            | stem_protocol::Request::Mp3 { name, source },
+            _,
+        )) => match source {
+            stem_protocol::Encode::Stored { out, .. } => (out, name.expect("a name")),
+            other => panic!("{other:?}"),
+        },
+        other => panic!("{other:?}"),
+    }
+}
+
+/// M4 of `plans/active/m4a.md`: a stored AAC encode whose encoder failed
+/// says so, and does not encode again in memory.  A second encode would
+/// fail the same way, and browser storage did not fail.  This holds for a
+/// short song and for one too long for the memory path.
+#[wasm_bindgen_test]
+async fn a_failed_aac_encoder_says_so_and_does_not_encode_again() {
+    let text = "AAC encoder: the probe gave a delay of 9000 frames, not 0 to 8191";
+    let mut outcomes = Vec::new();
+    for (id, frames) in [
+        ("m4-aac-encoder-short", 30 * SECOND),
+        ("m4-aac-encoder-long", MEMORY_PATH_MAX_FRAMES + SECOND),
+    ] {
+        let (shown, _) = stored_song(id, frames, 1).await;
+        store::test_remove(store::SAVES).await;
+        let (mut app, worker) = page(id, shown, true);
+        let worker = worker.expect("a worker");
+        let (out, name) = posted_save(&mut app, &worker, export::Format::M4a).await;
+        reply(
+            &mut app,
+            stem_protocol::Reply::Aac {
+                name,
+                file: stem_protocol::Encoded::Failed {
+                    path: out,
+                    text: text.into(),
+                    in_encoder: true,
+                },
+            },
+        );
+        let saving = app.saving.is_some();
+        run_save(&mut app).await;
+        outcomes.push((id, saving, requests(&worker).len(), app.status.clone()));
+        app.load_demo();
+        store::test_remove(store::SAVES).await;
+        store::test_remove(&format!("sessions/{id}")).await;
+    }
+    for (id, saving, posts, status) in outcomes {
+        assert!(!saving, "{id}: no save in memory starts");
+        assert_eq!(posts, 0, "{id}: no second encode");
+        assert_eq!(status, format!("AAC encoding failed: {text}"), "{id}");
     }
 }

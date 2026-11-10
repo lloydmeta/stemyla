@@ -37,7 +37,11 @@
 //! * `{type: "alac", name, left, right, rate?}`: encode one stem or mix as
 //!   a 16-bit Apple Lossless (ALAC) M4A (buffers transferred, the memory
 //!   path of a save).  The worker takes 44,100 Hz with no `rate`.
-//! * `{type: "mp3", "flac" or "alac", name, wav, frames, out, rate}`:
+//! * `{type: "aac", name, left, right, rate?}`: encode one stem or mix as
+//!   an AAC-LC M4A at 256 kbit/s, with the browser's `AudioEncoder`
+//!   ([`AAC_ENCODER`]).  The buffers are transferred (the memory path of a
+//!   save).  The worker takes 44,100 Hz with no `rate`.
+//! * `{type: "mp3", "flac", "alac" or "aac", name, wav, frames, out, rate}`:
 //!   encode the 16-bit stereo WAV file at `wav`, of `frames` frames, into
 //!   the file at `out` ([`Encode::Stored`], the storage path of a save).
 //!   Both paths are from the root of the private file system, in its
@@ -76,21 +80,59 @@
 //! * `{type: "status", text}`, `{type: "log", text}`,
 //!   `{type: "selftest", ok, text}`, `{type: "bench", text}`.
 //! * `{type: "mp3", name, bytes}` (buffer transferred).
-//! * `{type: "flac" or "alac", name, file: Blob}`: a `Blob` crosses as a
-//!   reference, so the file is not copied.
-//! * `{type: "mp3", "flac" or "alac", name, path}`: a stored encode wrote
-//!   its file at `path`, the request's `out` ([`Encoded::Stored`]).
-//! * `{type: "mp3", "flac" or "alac", name, path, failed: text}`: a stored
-//!   encode failed, for the reason `text` ([`Encoded::Failed`]).  The worker
-//!   removed the file at `path` and the WAV file.  A stored encode that the
-//!   worker started replies with one of these two, not with `error`, so the
-//!   page knows which save failed.
+//! * `{type: "flac", "alac" or "aac", name, file: Blob}`: a `Blob` crosses
+//!   as a reference, so the file is not copied.
+//! * `{type: "mp3", "flac", "alac" or "aac", name, path}`: a stored encode
+//!   wrote its file at `path`, the request's `out` ([`Encoded::Stored`]).
+//! * `{type: "mp3", "flac", "alac" or "aac", name, path, failed: text,
+//!   in_encoder?: bool}`: a stored encode failed, for the reason `text`
+//!   ([`Encoded::Failed`]).  `in_encoder: true` says that the encoder
+//!   failed, not browser storage.  A reply without it is a failure of
+//!   browser storage.  The worker removed the file at `path` and the WAV
+//!   file.  A stored encode that the worker started replies with one of
+//!   these two, not with `error`, so the page knows which save failed.
 
 use js_sys::{Array, Float32Array, Object, Reflect, Uint8Array};
 use wasm_bindgen::{JsCast, JsValue};
 use web_sys::Blob;
 
 pub mod decode;
+
+/// The config of the WebCodecs `AudioEncoder` of an AAC save, without its
+/// rate.  The stem worker encodes with it, and the page probes the encoder
+/// with it.  This is the one copy of these values (LAYER-1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AacEncoderConfig {
+    /// The codec string of AAC-LC.
+    pub codec: &'static str,
+    pub channels: u32,
+    /// The bit rate in bits each second.
+    pub bitrate: u32,
+    /// `constant`, since Safari's `variable` mode gave 72 kbit/s for a
+    /// target of 256 kbit/s (M4 of `plans/active/m4a.md`).
+    pub bitrate_mode: &'static str,
+}
+
+/// The AAC encoder config of a save: AAC-LC in stereo at 256 kbit/s.
+pub const AAC_ENCODER: AacEncoderConfig = AacEncoderConfig {
+    codec: "mp4a.40.2",
+    channels: 2,
+    bitrate: 256_000,
+    bitrate_mode: "constant",
+};
+
+impl AacEncoderConfig {
+    /// The `AudioEncoderConfig` at `rate` Hz, as a JS object.
+    pub fn to_js(&self, rate: u32) -> Object {
+        let o = Object::new();
+        set(&o, "codec", self.codec);
+        set(&o, "sampleRate", rate);
+        set(&o, "numberOfChannels", self.channels);
+        set(&o, "bitrate", self.bitrate);
+        set(&o, "bitrateMode", self.bitrate_mode);
+        o
+    }
+}
 
 /// The `type` of each message.
 pub mod kind {
@@ -104,6 +146,7 @@ pub mod kind {
     pub const MP3: &str = "mp3";
     pub const FLAC: &str = "flac";
     pub const ALAC: &str = "alac";
+    pub const AAC: &str = "aac";
     pub const ALIVE: &str = "alive";
     pub const PROGRESS: &str = "progress";
     pub const SEGMENT: &str = "segment";
@@ -143,6 +186,7 @@ mod field {
     pub const OUT: &str = "out";
     pub const PATH: &str = "path";
     pub const FAILED: &str = "failed";
+    pub const IN_ENCODER: &str = "in_encoder";
     pub const CHUNK: &str = "chunk";
     pub const OVERLAP: &str = "overlap";
     pub const MAX_ELEMS: &str = "max_elems";
@@ -347,7 +391,7 @@ pub enum Mix {
     Stored { path: String, frames: usize },
 }
 
-/// The audio that an MP3, FLAC or ALAC encode reads.
+/// The audio that an MP3, FLAC, ALAC or AAC encode reads.
 #[derive(Clone, Debug)]
 pub enum Encode {
     /// Both channels, transferred with the request (the memory path of a
@@ -369,19 +413,25 @@ pub enum Encode {
     },
 }
 
-/// The file that an MP3, FLAC or ALAC encode gives.
+/// The file that an MP3, FLAC, ALAC or AAC encode gives.
 #[derive(Clone, Debug)]
 pub enum Encoded {
     /// The MP3 of an [`Encode::Arrays`] (transferred).
     Bytes(Uint8Array),
-    /// The FLAC or the ALAC M4A of an [`Encode::Arrays`] (a reference, not a
-    /// copy).
+    /// The FLAC, or the ALAC or AAC M4A, of an [`Encode::Arrays`] (a
+    /// reference, not a copy).
     Blob(Blob),
     /// A stored encode wrote its file at `path`.
     Stored { path: String },
     /// A stored encode failed, for the reason `text`.  The worker removed
-    /// the file at `path` and the WAV file.
-    Failed { path: String, text: String },
+    /// the file at `path` and the WAV file.  `in_encoder` tells a failure
+    /// of the encoder from a failure of browser storage: a second encode
+    /// in memory fails the same way.  Only an AAC encode sets it.
+    Failed {
+        path: String,
+        text: String,
+        in_encoder: bool,
+    },
 }
 
 /// A request from the page to the worker.
@@ -411,6 +461,10 @@ pub enum Request {
         source: Encode,
     },
     Alac {
+        name: Option<String>,
+        source: Encode,
+    },
+    Aac {
         name: Option<String>,
         source: Encode,
     },
@@ -448,6 +502,7 @@ impl Request {
             Self::Mp3 { .. } => kind::MP3,
             Self::Flac { .. } => kind::FLAC,
             Self::Alac { .. } => kind::ALAC,
+            Self::Aac { .. } => kind::AAC,
         }
     }
 
@@ -483,7 +538,8 @@ impl Request {
             }
             Self::Mp3 { name, source }
             | Self::Flac { name, source }
-            | Self::Alac { name, source } => {
+            | Self::Alac { name, source }
+            | Self::Aac { name, source } => {
                 if let Some(n) = name {
                     set(&o, field::NAME, n.as_str());
                 }
@@ -551,6 +607,10 @@ impl ToWorker {
                 source: encode_source(msg).map_err(bad)?,
             },
             kind::ALAC => Request::Alac {
+                name: string(msg, field::NAME),
+                source: encode_source(msg).map_err(bad)?,
+            },
+            kind::AAC => Request::Aac {
                 name: string(msg, field::NAME),
                 source: encode_source(msg).map_err(bad)?,
             },
@@ -635,6 +695,10 @@ pub enum Reply {
         name: String,
         file: Encoded,
     },
+    Aac {
+        name: String,
+        file: Encoded,
+    },
 }
 
 impl Reply {
@@ -656,6 +720,7 @@ impl Reply {
             Self::Mp3 { .. } => kind::MP3,
             Self::Flac { .. } => kind::FLAC,
             Self::Alac { .. } => kind::ALAC,
+            Self::Aac { .. } => kind::AAC,
         }
     }
 
@@ -715,7 +780,10 @@ impl Reply {
                 set(&o, field::OK, *ok);
                 set(&o, field::TEXT, text.as_str());
             }
-            Self::Mp3 { name, file } | Self::Flac { name, file } | Self::Alac { name, file } => {
+            Self::Mp3 { name, file }
+            | Self::Flac { name, file }
+            | Self::Alac { name, file }
+            | Self::Aac { name, file } => {
                 set(&o, field::NAME, name.as_str());
                 match file {
                     Encoded::Bytes(bytes) => {
@@ -724,9 +792,14 @@ impl Reply {
                     }
                     Encoded::Blob(blob) => set(&o, field::FILE, blob),
                     Encoded::Stored { path } => set(&o, field::PATH, path.as_str()),
-                    Encoded::Failed { path, text } => {
+                    Encoded::Failed {
+                        path,
+                        text,
+                        in_encoder,
+                    } => {
                         set(&o, field::PATH, path.as_str());
                         set(&o, field::FAILED, text.as_str());
+                        set(&o, field::IN_ENCODER, *in_encoder);
                     }
                 }
             }
@@ -830,6 +903,10 @@ impl Reply {
                 name: string(msg, field::NAME).unwrap_or_default(),
                 file: encoded(msg, &kind).map_err(bad)?,
             },
+            kind::AAC => Self::Aac {
+                name: string(msg, field::NAME).unwrap_or_default(),
+                file: encoded(msg, &kind).map_err(bad)?,
+            },
             other => return Err(bad(&format!("unknown type {other:?}"))),
         })
     }
@@ -899,8 +976,8 @@ fn whole_frames(msg: &JsValue) -> Result<usize, String> {
     Ok(frames as usize)
 }
 
-/// The source of an `mp3`, `flac` or `alac` request: a stored WAV if it has
-/// `wav`, else the two arrays.  A missing field is refused, not read as a
+/// The source of an `mp3`, `flac`, `alac` or `aac` request: a stored WAV
+/// if it has `wav`, else the two arrays.  A missing field is refused, not read as a
 /// default (TD-16).
 fn encode_source(msg: &JsValue) -> Result<Encode, String> {
     let has = |k| !get(msg, k).is_undefined();
@@ -951,8 +1028,8 @@ fn whole_rate(msg: &JsValue) -> Result<u32, String> {
         })
 }
 
-/// The file of an `mp3`, `flac` or `alac` reply: a stored file if it has
-/// `path`, else the bytes of an MP3, or the `Blob` of a FLAC or an M4A.
+/// The file of an `mp3`, `flac`, `alac` or `aac` reply: a stored file if
+/// it has `path`, else the bytes of an MP3, or the `Blob` of a FLAC or an M4A.
 fn encoded(msg: &JsValue, kind: &str) -> Result<Encoded, &'static str> {
     let path = get(msg, field::PATH);
     if !path.is_undefined() {
@@ -962,7 +1039,21 @@ fn encoded(msg: &JsValue, kind: &str) -> Result<Encoded, &'static str> {
             return Ok(Encoded::Stored { path });
         }
         let text = failed.as_string().ok_or("failed must be text")?;
-        return Ok(Encoded::Failed { path, text });
+        // A reply of an older worker has no `in_encoder`: a failure of
+        // browser storage, as before (TD-16).
+        let in_encoder = get(msg, field::IN_ENCODER);
+        let in_encoder = if in_encoder.is_undefined() {
+            false
+        } else {
+            in_encoder
+                .as_bool()
+                .ok_or("in_encoder must be true or false")?
+        };
+        return Ok(Encoded::Failed {
+            path,
+            text,
+            in_encoder,
+        });
     }
     if kind == kind::MP3 {
         return get(msg, field::BYTES)
@@ -989,8 +1080,8 @@ fn stereo(msg: &JsValue) -> Result<(Float32Array, Float32Array), String> {
 mod tests {
     use super::*;
 
-    /// Each reply's `type`.  `mp3`, `flac` and `alac` carry JS values, which
-    /// a native test cannot make; the browser tests cover them.
+    /// Each reply's `type`.  `mp3`, `flac`, `alac` and `aac` carry JS values,
+    /// which a native test cannot make; the browser tests cover them.
     #[test]
     fn each_reply_names_its_type() {
         let text = || "t".to_string();

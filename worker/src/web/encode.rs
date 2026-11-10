@@ -1,4 +1,4 @@
-//! The MP3, FLAC and ALAC encoders of a save (M8 of
+//! The MP3, FLAC, ALAC and AAC encoders of a save (M8 of
 //! `plans/completed/stream-from-storage.md`, and M3 of
 //! `plans/active/m4a.md`).
 //!
@@ -10,12 +10,12 @@
 //! bits back.
 //!
 //! On the memory path, the reply carries the file: the MP3's bytes, or a
-//! `Blob` of the encoded parts of a FLAC or an M4A.  On the storage path,
-//! the encoder writes the file to `out` through one
+//! `Blob` of the encoded parts of a FLAC or an M4A (ALAC or AAC).  On the
+//! storage path, the encoder writes the file to `out` through one
 //! `FileSystemSyncAccessHandle`, each write a whole new `Uint8Array`
-//! (MEM-5).  It replies with the path
-//! ([`Encoded::Stored`]).  At the end of a stored encode, the worker
-//! removes the WAV file, also when the encode fails.  A failed stored
+//! (MEM-5).  It replies with the path ([`Encoded::Stored`]).  At the end of
+//! a stored encode, the worker removes the WAV file, also when the encode
+//! fails.  A failed stored
 //! encode also removes its output, and replies with the reason
 //! ([`Encoded::Failed`]), not with `error`.  So the page knows which save
 //! failed.  A malformed request, or a file outside `saves/`, gives `error`,
@@ -32,6 +32,12 @@
 //! packet of 4096 frames as it is encoded, then puts the final head in
 //! place of the reserve.  It keeps only the packet table, 4 bytes for
 //! each packet, since `moov` needs the size of each packet.
+//!
+//! An AAC encode uses the browser's WebCodecs `AudioEncoder`, and writes an
+//! M4A with its `moov` last ([`super::aac`]).  It probes the encoder's delay,
+//! puts a lead-in of silence before the source, and waits for the
+//! encoder's queue and its output.  Only its failures tell the encoder from
+//! browser storage ([`Failure`]).
 //!
 //! The MP3 exception (D4 of the M8 plan, TD-59).  `rusty_mp3` 1.0.0 keeps
 //! every encoded frame until `finish()` at 256 kbps or less on MPEG-1 (its
@@ -53,6 +59,7 @@ use stem_protocol::{Encode, Encoded, Reply};
 use wasm_bindgen::prelude::*;
 use web_sys::Blob;
 
+use super::aac::aac_into;
 use super::mix::mix_file;
 use super::{blob_range, js_text, log, pcm16, send};
 
@@ -130,13 +137,15 @@ const WAV_FRAME_BYTES: usize = 4;
 /// The folder of the save files, at the root of the private file system.
 const SAVES: &str = "saves/";
 
-/// The three encoders.
+/// The four encoders.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Codec {
     Mp3,
     Flac,
     /// Apple Lossless (ALAC) in an M4A.
     Alac,
+    /// AAC-LC in an M4A, from the browser's `AudioEncoder`.
+    Aac,
 }
 
 impl Codec {
@@ -145,6 +154,7 @@ impl Codec {
             Codec::Mp3 => stem_protocol::kind::MP3,
             Codec::Flac => stem_protocol::kind::FLAC,
             Codec::Alac => stem_protocol::kind::ALAC,
+            Codec::Aac => stem_protocol::kind::AAC,
         }
     }
 
@@ -154,6 +164,7 @@ impl Codec {
             Codec::Mp3 => "mp3",
             Codec::Flac => "flac",
             Codec::Alac => "m4a",
+            Codec::Aac => "m4a",
         }
     }
 
@@ -162,12 +173,13 @@ impl Codec {
             Codec::Mp3 => Reply::Mp3 { name, file },
             Codec::Flac => Reply::Flac { name, file },
             Codec::Alac => Reply::Alac { name, file },
+            Codec::Aac => Reply::Aac { name, file },
         }
     }
 }
 
 /// The audio of an encode, read one block at a time.
-enum Input {
+pub(super) enum Input {
     Arrays([Float32Array; 2]),
     /// A 16-bit stereo WAV file of `frames` frames, as a `File` of its
     /// state at the open.
@@ -197,7 +209,7 @@ impl Input {
     }
 
     #[cfg_attr(mutants, mutants::skip)]
-    fn frames(&self) -> usize {
+    pub(super) fn frames(&self) -> usize {
         match self {
             Self::Arrays([left, right]) => left.length().min(right.length()) as usize,
             Self::Wav { frames, .. } => *frames,
@@ -207,7 +219,12 @@ impl Input {
     /// Reads the frames from `at` into `left` and `right`, which have the
     /// same length.
     #[cfg_attr(mutants, mutants::skip)]
-    fn read(&self, at: usize, left: &mut [f32], right: &mut [f32]) -> Result<(), String> {
+    pub(super) fn read(
+        &self,
+        at: usize,
+        left: &mut [f32],
+        right: &mut [f32],
+    ) -> Result<(), String> {
         let n = left.len();
         match self {
             Self::Arrays([l, r]) => {
@@ -337,6 +354,21 @@ impl EncodeOut {
         }
     }
 
+    /// Puts the JS array `whole`, which the caller made as a new array,
+    /// never a view (MEM-5).  On the storage path, it is written as it is.
+    /// On the memory path, it is the part.  So WebAssembly memory never
+    /// holds its bytes.
+    #[cfg_attr(mutants, mutants::skip)]
+    pub(super) async fn put_array(&mut self, whole: &Uint8Array) -> Result<(), String> {
+        match self {
+            Self::Parts(parts) => {
+                parts.push(whole);
+                Ok(())
+            }
+            Self::File(file) => file.append_array(whole).await,
+        }
+    }
+
     /// Puts `len` zero bytes, as one unit that [`Self::replace_head`]
     /// replaces.  Call it first in an encode, before each `put`.  JS makes
     /// the zeros, so WebAssembly memory never holds them.  On the storage
@@ -375,8 +407,38 @@ impl EncodeOut {
     }
 }
 
-/// Encodes one stem or mix (`{type: "mp3"}`, `{type: "flac"}` or
-/// `{type: "alac"}`) and replies with its file.  An error is a malformed
+/// Why an encode failed, and whether the encoder failed, not a read or a
+/// write of browser storage.  Only the AAC encode tells an encoder failure
+/// apart: a second encode in memory would fail the same way.  The other
+/// encoders fail only on inputs that the app does not send.
+#[derive(Debug)]
+pub(super) struct Failure {
+    pub(super) text: String,
+    pub(super) in_encoder: bool,
+}
+
+impl Failure {
+    /// A failure of the encoder.
+    pub(super) fn encoder(text: String) -> Self {
+        Self {
+            text,
+            in_encoder: true,
+        }
+    }
+}
+
+/// A failure of a read or a write, or of an encoder other than AAC.
+impl From<String> for Failure {
+    fn from(text: String) -> Self {
+        Self {
+            text,
+            in_encoder: false,
+        }
+    }
+}
+
+/// Encodes one stem or mix (`{type: "mp3"}`, `{type: "flac"}`,
+/// `{type: "alac"}` or `{type: "aac"}`) and replies with its file.  An error is a malformed
 /// request, or a failed encode on the memory path, for an `error` reply.
 #[cfg_attr(mutants, mutants::skip)]
 pub(super) async fn encode(
@@ -406,6 +468,11 @@ pub(super) async fn encode(
                     let size = blob.size();
                     (Encoded::Blob(blob), size)
                 }
+                Codec::Aac => {
+                    let blob = aac_blob(&input, rate).await.map_err(|f| f.text)?;
+                    let size = blob.size();
+                    (Encoded::Blob(blob), size)
+                }
             };
             log_memory(codec, &name, before, size);
             send(codec.reply(name, file));
@@ -431,9 +498,13 @@ pub(super) async fn encode(
                     log_memory(codec, &out, before, size);
                     Encoded::Stored { path: out }
                 }
-                Err(text) => {
+                Err(Failure { text, in_encoder }) => {
                     log_memory(codec, &out, before, 0.0);
-                    Encoded::Failed { path: out, text }
+                    Encoded::Failed {
+                        path: out,
+                        text,
+                        in_encoder,
+                    }
                 }
             };
             send(codec.reply(name, file));
@@ -458,23 +529,30 @@ async fn stored(
     frames: usize,
     out: &str,
     rate: u32,
-) -> Result<f64, String> {
+) -> Result<f64, Failure> {
     let input = Input::wav(wav, frames).await?;
     let mut file = match OutFile::open(out).await {
         Ok(file) => file,
         Err(e) => {
             save_remove(out).await;
-            return Err(e);
+            return Err(e.into());
         }
     };
-    let written = match codec {
-        Codec::Mp3 => mp3_into(&input, rate, &mut file).await,
-        Codec::Flac | Codec::Alac => {
+    let written: Result<(), Failure> = match codec {
+        Codec::Mp3 => mp3_into(&input, rate, &mut file)
+            .await
+            .map_err(Failure::from),
+        Codec::Flac | Codec::Alac | Codec::Aac => {
             let mut sink = EncodeOut::File(file);
-            let written = if codec == Codec::Flac {
-                flac_into(&input, rate, &mut sink).await
-            } else {
-                alac_into(&input, rate, &mut sink).await
+            let written = match codec {
+                Codec::Flac => flac_into(&input, rate, &mut sink)
+                    .await
+                    .map_err(Failure::from),
+                Codec::Alac => alac_into(&input, rate, &mut sink)
+                    .await
+                    .map_err(Failure::from),
+                Codec::Aac => aac_into(&input, rate, &mut sink).await,
+                Codec::Mp3 => unreachable!("an MP3 writes to its file"),
             };
             let EncodeOut::File(back) = sink else {
                 unreachable!("a file stays a file")
@@ -484,7 +562,7 @@ async fn stored(
         }
     };
     let closed = match written {
-        Ok(()) => file.close().await,
+        Ok(()) => file.close().await.map_err(Failure::from),
         Err(e) => Err(e),
     };
     match closed {
@@ -630,6 +708,26 @@ async fn flac_into(input: &Input, rate: u32, out: &mut EncodeOut) -> Result<(), 
     out.replace_head(sink.as_slice()).await
 }
 
+/// The AAC M4A of `input`, for the reply of the memory path: a `Blob` of
+/// its parts, which stay outside WebAssembly memory.
+#[cfg_attr(mutants, mutants::skip)]
+async fn aac_blob(input: &Input, rate: u32) -> Result<Blob, Failure> {
+    let mut out = EncodeOut::Parts(js_sys::Array::new());
+    aac_into(input, rate, &mut out).await?;
+    let EncodeOut::Parts(parts) = out else {
+        unreachable!("parts stay parts")
+    };
+    m4a_blob(&parts).map_err(Failure::from)
+}
+
+/// A `Blob` of type `audio/mp4` of the M4A `parts`.
+fn m4a_blob(parts: &js_sys::Array) -> Result<Blob, String> {
+    let options = web_sys::BlobPropertyBag::new();
+    options.set_type("audio/mp4");
+    Blob::new_with_u8_array_sequence_and_options(parts, &options)
+        .map_err(|e| format!("M4A file: {e:?}"))
+}
+
 /// The ALAC M4A of `input`, for the reply of the memory path: a `Blob` of
 /// its parts, which stay outside WebAssembly memory.
 #[cfg_attr(mutants, mutants::skip)]
@@ -639,10 +737,7 @@ async fn alac_blob(input: &Input, rate: u32) -> Result<Blob, String> {
     let EncodeOut::Parts(parts) = out else {
         unreachable!("parts stay parts")
     };
-    let options = web_sys::BlobPropertyBag::new();
-    options.set_type("audio/mp4");
-    Blob::new_with_u8_array_sequence_and_options(&parts, &options)
-        .map_err(|e| format!("M4A file: {e:?}"))
+    m4a_blob(&parts)
 }
 
 /// Encodes `input` as a 16-bit ALAC M4A into `out`, with its head first
