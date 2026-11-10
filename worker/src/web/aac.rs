@@ -105,9 +105,11 @@ export async function aac_wait_queue(s, most, ms) {
   }
   return true;
 }
-// Waits for the next output or error: whether one came within `ms`.
+// Waits for the next output or error: whether one came within `ms`.  An
+// error that came before the wait ends it at once.
 export function aac_wait_output(s, ms) {
   const seen = s.received;
+  if (s.error) return Promise.resolve(true);
   return new Promise((r) => {
     let timer = null;
     const done = () => { clearTimeout(timer); s.wake = null; r(s.received > seen || !!s.error); };

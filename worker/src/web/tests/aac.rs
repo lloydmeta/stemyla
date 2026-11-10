@@ -613,6 +613,13 @@ fn refusals() -> Vec<(&'static str, String, u32, usize, String)> {
             rest("22000 Hz is not a rate of the AAC table"),
         ),
         (
+            "a config of 48 kHz",
+            r#"{"main_description": [17, 144]}"#.into(),
+            TONE_RATE,
+            3000,
+            rest("the encoder gave 48000 Hz, not 44100 Hz"),
+        ),
+        (
             "960 frames",
             r#"{"main_description": [18, 20]}"#.into(),
             TONE_RATE,
@@ -1030,8 +1037,8 @@ fn relative_error(got: &[f32], want: &[f32]) -> f64 {
 
 /// The most relative error of the trimmed decode, over the first 4096
 /// frames and over the whole file.  On 2026-11-10 on an Apple M2 Pro, Chrome
-/// 157 gave 0.0275 and 0.0135, and Safari 27.2 gave 0.0092 and 0.0092.  The
-/// bounds are more than 3 times the larger.  A loss of the first 1024
+/// 157 gave 0.0275 and 0.0135, and Safari 27.2 gave 0.0091 to 0.0092 for
+/// each.  The bounds are more than 3 times the larger.  A loss of the first 1024
 /// frames, as Safari makes with no lead-in, gives about 0.5 at the start.
 const MOST_START_ERROR: f64 = 0.1;
 const MOST_ERROR: f64 = 0.05;
@@ -1155,11 +1162,13 @@ async fn an_encoder_error_in_the_output_wait_ends_the_encode() {
     fresh().await;
     let fake =
         Fake::new(r#"{"queue": false, "flush_only": true, "error_after": 34000, "record": false}"#);
-    set_output_wait_ms(300);
+    // Finding 2-1 of review round 2: the wait is longer than the race, so
+    // an error that waits out the timer fails the test.
+    set_output_wait_ms(2_500);
     let (left, right) = (tone(220.0, 20 * AAC_BLOCK), tone(330.0, 20 * AAC_BLOCK));
-    let end = encode_within(&left, &right, 3_000).await;
+    let end = encode_within(&left, &right, 1_000).await;
     set_output_wait_ms(10_000);
-    assert!(end.is_some(), "the encode did not end within 3 s");
+    assert!(end.is_some(), "the encode did not end within 1 s");
     assert_eq!(
         end,
         Some(Err("AAC encoder: EncodingError: the fake failed".into()))

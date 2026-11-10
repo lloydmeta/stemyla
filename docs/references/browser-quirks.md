@@ -49,5 +49,5 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-10, with WebCodecs 
 
 Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  `GPUAdapterInfo.subgroupMinSize` is `undefined`, and wgpu reads it as a number.
 
-* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in a Safari `web-test` (TD-93).
+* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in a Safari `web-test` (TD-93).  With `WASM_BINDGEN_NO_DEBUG=1`, both pass.  WebKit's WGSL compiler also words its errors in its own way, such as "Expected a Identifier", so a test of a compile error takes the text of each browser.
 * Rule: VERIFY-1.

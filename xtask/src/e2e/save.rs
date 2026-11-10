@@ -803,7 +803,7 @@ pub(super) fn saves_folder_check(names: &Value, aac: bool) -> (bool, String) {
 
 /// The most relative error of an AAC save to the planted mix, over the
 /// whole file and over its first 4096 frames.  On an Apple M2 Pro on
-/// 2026-11-10, Chrome 157 gave at most 0.00028 and 0.00072, and Safari 27.2
+/// 2026-11-11, Chrome 157 gave at most 0.00028 and 0.00072, and Safari 27.2
 /// 0.00026 and 0.00019.  The bounds are about 7 times the larger.  A decode
 /// one frame off gives about 0.0032 over the whole, and a lost first 1024
 /// frames about 0.5 over the start.

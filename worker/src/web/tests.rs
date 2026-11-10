@@ -3536,10 +3536,14 @@ async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
     let problems = gpu.check_kernels().await.expect("the f32 kernels pass");
     gpu.done().await;
     assert_eq!(problems.len(), roformer_gpu::TILES.len(), "{problems:#?}");
+    // The text of the compiler: Chrome's Tint names a parse error, and
+    // WebKit's says "Expected a Identifier" (finding 2-2 of review round 2
+    // of M4).
+    let names_the_error = |p: &str| p.contains("pars") || p.contains("Expected");
     for p in &problems {
         assert!(
             p.contains("does not compile on this GPU")
-                && p.contains("pars")
+                && names_the_error(p)
                 && !p.contains('\n')
                 && p.ends_with("; weights stay f32"),
             "{p}"

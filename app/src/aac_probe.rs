@@ -1,10 +1,10 @@
 //! The page's probe of the browser's AAC encoder (M4 of
 //! `plans/active/m4a.md`): it decides whether the Save menu offers
 //! "M4A (AAC 256 kbps)".  It runs once at start, on the page, with no
-//! message to the worker.  It passes when three things hold:
+//! message to the worker.  It passes when four things hold:
 //! `AudioEncoder` exists, `isConfigSupported` passes for
-//! `stem_protocol::AAC_ENCODER`, and an encode of 4096 frames, then a
-//! flush, gives a packet within a time limit.
+//! `stem_protocol::AAC_ENCODER`, an encode of 4096 frames, then a flush,
+//! gives a packet within a time limit, and the encoder gives no error.
 
 use wasm_bindgen::prelude::*;
 
