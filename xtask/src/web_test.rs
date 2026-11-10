@@ -4,6 +4,9 @@
 //! compiled for wasm32 and run in a real browser by
 //! `wasm-bindgen-test-runner`.
 //!
+//! It runs each crate, also after a crate fails.  Then it prints one line
+//! for each crate, and fails with the name of each crate that failed.
+//!
 //! It sets Cargo's runner and the driver through the environment, so no
 //! `.cargo/config.toml` is needed, and it checks that the installed runner
 //! matches the `wasm-bindgen` in `Cargo.lock` (the two must be equal).
@@ -46,26 +49,29 @@ pub fn run(args: &[String]) -> Result<()> {
     check_runner(&wanted)?;
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
-    let runs: [&[&str]; 4] = [
-        &[
-            "-p",
+    let runs: [(&str, &[&str]); 4] = [
+        (
             "app",
-            "--lib",
-            "--test",
-            "web",
-            "--test",
-            "web_close",
-            "--test",
-            "web_output",
-        ],
-        &["-p", "stem-worker", "--lib"],
-        &["-p", "decode-worker", "--lib"],
-        &["-p", "stem-protocol", "--test", "web"],
+            &[
+                "--lib",
+                "--test",
+                "web",
+                "--test",
+                "web_close",
+                "--test",
+                "web_output",
+            ],
+        ),
+        ("stem-worker", &["--lib"]),
+        ("decode-worker", &["--lib"]),
+        ("stem-protocol", &["--test", "web"]),
     ];
-    for targets in runs {
+    let mut results = Vec::with_capacity(runs.len());
+    for (package, targets) in runs {
         let mut cmd = Command::new(env!("CARGO"));
         cmd.current_dir(&root);
         cmd.args(["test", "--locked", "--target", "wasm32-unknown-unknown"])
+            .args(["-p", package])
             .args(targets)
             .env(
                 "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER",
@@ -99,15 +105,48 @@ pub fn run(args: &[String]) -> Result<()> {
         if let Some(f) = &filter {
             cmd.args(["--", f]);
         }
-        let status = cmd.status().context("running cargo test")?;
-        if !status.success() {
-            bail!(
-                "browser tests failed in {browser:?}; if no test ran, check the driver: {}",
-                browser.setup_hint()
-            );
-        }
+        let status = cmd
+            .status()
+            .with_context(|| format!("running cargo test for {package}"))?;
+        results.push((package, status.success()));
     }
-    Ok(())
+    match summary(&results) {
+        Ok(lines) => {
+            println!("{lines}");
+            Ok(())
+        }
+        Err(lines) => bail!(
+            "{lines}\nbrowser tests failed in {browser:?}; if no test ran, check the driver: {}",
+            browser.setup_hint()
+        ),
+    }
+}
+
+/// One line for each crate run, with `passed` or `failed`.  It is an
+/// error when a crate run failed, and the last line then names each
+/// failed crate.
+fn summary(results: &[(&str, bool)]) -> Result<String, String> {
+    let lines: Vec<String> = results
+        .iter()
+        .map(|(package, passed)| {
+            let verdict = if *passed { "passed" } else { "failed" };
+            format!("web-test: {package}: {verdict}")
+        })
+        .collect();
+    let failed: Vec<&str> = results
+        .iter()
+        .filter(|(_, passed)| !passed)
+        .map(|(package, _)| *package)
+        .collect();
+    if failed.is_empty() {
+        Ok(lines.join("\n"))
+    } else {
+        Err(format!(
+            "{}\nweb-test: failed crates: {}",
+            lines.join("\n"),
+            failed.join(", ")
+        ))
+    }
 }
 
 /// A `webdriver.json` for the runner that lets Chrome play audio without a
@@ -180,6 +219,33 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             Some("0.4.79")
         );
         assert_eq!(locked_version(LOCK, "wasm"), None);
+    }
+
+    #[test]
+    fn a_failure_before_the_last_crate_names_that_crate() {
+        let result = summary(&[
+            ("app", false),
+            ("stem-worker", true),
+            ("decode-worker", false),
+            ("stem-protocol", true),
+        ]);
+        assert_eq!(
+            result,
+            Err("web-test: app: failed\n\
+                 web-test: stem-worker: passed\n\
+                 web-test: decode-worker: failed\n\
+                 web-test: stem-protocol: passed\n\
+                 web-test: failed crates: app, decode-worker"
+                .to_string())
+        );
+    }
+
+    #[test]
+    fn every_crate_passed_gives_one_line_for_each() {
+        assert_eq!(
+            summary(&[("app", true), ("stem-protocol", true)]),
+            Ok("web-test: app: passed\nweb-test: stem-protocol: passed".to_string())
+        );
     }
 
     #[test]

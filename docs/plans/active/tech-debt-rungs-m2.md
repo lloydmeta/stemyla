@@ -175,7 +175,7 @@ The orchestrator committed it in `808aa66`.  No work.
 ## Progress
 
 * [x] 2026-11-11: step 1, `xtask setup`, in `808aa66` (the orchestrator).
-* [ ] Step 4: `web-test` runs each crate and lists the failed crates.
+* [x] 2026-11-11: step 4, `web-test` runs each crate and lists the failed crates.  The new test `a_failure_before_the_last_crate_names_that_crate` first failed on its `assert_eq!` against a `summary` that kept only the last result: it gave `Ok` with no line of failed crates.
 * [ ] The baseline at wasm-bindgen 0.2.129, in Safari and Chrome.
 * [ ] Step 2: wasm-bindgen 0.2.130.
 * [ ] Step 3: Trunk 0.22.1.
@@ -201,6 +201,7 @@ The orchestrator committed it in `808aa66`.  No work.
 * 2026-11-11, agent: a crate run whose test binary has no wasm test fails `web-test`, on the runner's marker "no tests to run!".  A filtered run with 0 tests passes.  Reason: the runner passes a crate with no `wasm_bindgen_test`, so step 8 could pass with nothing tested.
 * 2026-11-11, agent: a new `Plan` agent reviewed this plan in 2 rounds: 10 findings in round 1 and 2 in round 2, each fixed in the plan before its first commit.
 * 2026-11-11, agent: the macOS job installs Trunk with `xtask setup`, not with the action.  Reason: the action takes the Linux release tarball only, and BUILD-1 allows `cargo install`.
+* 2026-11-11, agent: step 4 does not capture the output of a crate run.  Step 8 adds the capture, with its own tests.  Reason: step 4's acceptance is the summary only, and a small commit is easier to review.
 
 ## Outcomes and retrospective
 
