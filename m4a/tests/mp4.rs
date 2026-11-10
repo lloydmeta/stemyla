@@ -1031,6 +1031,18 @@ fn the_esds_of_the_writer_gives_its_config() {
 /// An `ES_Descriptor` of `flags`, with the fields that they add, and each
 /// size in `size_bytes` bytes.
 fn es_descriptor(flags: u8, size_bytes: usize, config: &[u8]) -> Vec<u8> {
+    es_descriptor_with(flags, size_bytes, config, b"abc", [0, 0])
+}
+
+/// An `ES_Descriptor` as [`es_descriptor`], with the URL `url` and the
+/// `maxBitrate` and `avgBitrate` of `bitrates`.
+fn es_descriptor_with(
+    flags: u8,
+    size_bytes: usize,
+    config: &[u8],
+    url: &[u8],
+    bitrates: [u32; 2],
+) -> Vec<u8> {
     fn descriptor(tag: u8, size_bytes: usize, body: &[u8]) -> Vec<u8> {
         let mut out = vec![tag];
         for i in (0..size_bytes).rev() {
@@ -1045,13 +1057,15 @@ fn es_descriptor(flags: u8, size_bytes: usize, config: &[u8]) -> Vec<u8> {
         es.extend([0x00, 0x02]);
     }
     if flags & 0x40 != 0 {
-        es.push(3);
-        es.extend(b"abc");
+        es.push(url.len() as u8);
+        es.extend(url);
     }
     if flags & 0x20 != 0 {
         es.extend([0x00, 0x03]);
     }
-    let mut decoder = vec![0x40, 0x15, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let mut decoder = vec![0x40, 0x15, 0, 0, 0];
+    decoder.extend(bitrates[0].to_be_bytes());
+    decoder.extend(bitrates[1].to_be_bytes());
     decoder.extend(descriptor(5, size_bytes, config));
     es.extend(descriptor(4, size_bytes, &decoder));
     es.extend(descriptor(6, size_bytes, &[2]));
@@ -1303,4 +1317,39 @@ fn an_aac_moov_last_head_is_36_bytes_at_each_length() {
             }
         }
     }
+}
+
+/// Review round 1 of M4: the 13 fixed bytes of tag 4 are skipped whole,
+/// also when its bit rates are not 0.
+#[test]
+fn a_descriptor_with_bit_rates_gives_its_config() {
+    for size_bytes in [1, 4] {
+        let description =
+            es_descriptor_with(0, size_bytes, &ASC_44K_STEREO, b"", [256_000, 100_000]);
+        assert_eq!(
+            audio_specific_config(&description),
+            Ok(&ASC_44K_STEREO[..]),
+            "{size_bytes} size bytes"
+        );
+    }
+}
+
+/// Review round 1 of M4: an `ES_Descriptor` whose fields end at the end of
+/// its body has no tag 4.  Its fields do not run past the end.
+#[test]
+fn an_es_descriptor_of_its_fields_only_has_no_tag_4() {
+    assert_eq!(
+        audio_specific_config(&[0x03, 0x03, 0x00, 0x01, 0x00]),
+        Err(Error::NoDescriptor { tag: 4, within: 3 })
+    );
+}
+
+/// Review round 1 of M4: a size of 128 bytes or more takes two size
+/// bytes, here for a URL of 200 bytes.
+#[test]
+fn a_descriptor_of_200_bytes_gives_its_config() {
+    let url = [b'u'; 200];
+    let description = es_descriptor_with(0x40, 2, &ASC_44K_STEREO, &url, [0, 0]);
+    assert!(description[1] & 0x80 != 0, "a size of two bytes");
+    assert_eq!(audio_specific_config(&description), Ok(&ASC_44K_STEREO[..]));
 }

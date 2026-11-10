@@ -1758,6 +1758,18 @@ mod web_tests {
         assert_eq!(got, want);
     }
 
+    /// Finding 1-9 of review round 1 of M4: the label of the AAC item names
+    /// the bit rate that the save asks for, from `stem_protocol::AAC_ENCODER`.
+    #[wasm_bindgen_test]
+    fn the_aac_label_names_the_bit_rate_of_the_encoder() {
+        let kbps = stem_protocol::AAC_ENCODER.bitrate / 1000;
+        assert!(
+            Format::Aac.label().contains(&format!("{kbps} kbps")),
+            "{} names {kbps} kbps",
+            Format::Aac.label()
+        );
+    }
+
     #[wasm_bindgen_test]
     fn a_mix_export_does_not_grow_wasm_memory() {
         // 60 s: 10.6 MB for each channel of the mix.

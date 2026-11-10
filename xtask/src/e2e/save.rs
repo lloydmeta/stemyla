@@ -4,8 +4,9 @@
 //! The scenario plants a stored session of 1 minute and one of 10 minutes,
 //! each a 16-bit WAV source and two 16-bit stem WAVs, in the layout of
 //! `old_session`.  For each format, WAV, then FLAC, then M4A (ALAC), then
-//! MP3, then M4A (AAC) where the page offers it, it restores the 1-minute session and saves the mix as heard through the mix
-//! lane's Save menu, then the same for the 10-minute session.  Each restore
+//! MP3, then M4A (AAC) where the page offers it, it restores the 1-minute
+//! session.  It saves the mix as heard through the mix lane's Save menu,
+//! then does the same for the 10-minute session.  Each restore
 //! is a reload, so each save has a new page and new workers.
 //!
 //! AAC (M4 of `docs/plans/active/m4a.md`): each page logs the line of its
@@ -36,13 +37,13 @@
 //!
 //! Checks (D10): for each format, the 10-minute save's measure is at most
 //! [`PAGE_BOUND_MB`] above the 1-minute save's.  A FLAC, an ALAC or an AAC
-//! encode of 10 minutes grows the worker's memory by at most 1 MiB more than one of 1
-//! minute.  An MP3 encode grows it by at most [`MP3_FACTOR`] times its MP3
+//! encode of 10 minutes grows the worker's memory by at most 1 MiB more
+//! than one of 1 minute.  An MP3 encode grows it by at most [`MP3_FACTOR`] times its MP3
 //! plus 1 MiB (the MP3 exception, TD-59).  The 1-minute WAV is the 16-bit
 //! mix of the planted stems, computed here.  The 1-minute FLAC decodes to
 //! the same samples, and the MP3 to the same frames within one MP3 frame
-//! and the encoder's delay.  Each M4A, of 1 and of 10 minutes, decodes to
-//! the samples of the mix of its length, bit for bit (M3 of
+//! and the encoder's delay.  Each ALAC M4A, of 1 and of 10 minutes, decodes
+//! to the samples of the mix of its length, bit for bit (M3 of
 //! `docs/plans/active/m4a.md`).  Each AAC M4A passes [`aac_checks`].
 //!
 //! Checks of D11 (a save that does not wait for the UI frame): for each
@@ -817,6 +818,14 @@ pub(super) const AAC_LAGS: isize = 1024;
 /// about 5.4 x 10^10 multiply-adds for each channel.
 pub(super) const AAC_LAG_FRAMES: usize = 10 * 44_100;
 
+/// The frames of the cross-correlation of an AAC save of `frames` frames:
+/// [`AAC_LAG_FRAMES`] from frame [`AAC_LAGS`], and at least [`AAC_LAGS`]
+/// frames before the end, so that each lag reads whole frames.
+pub(super) fn aac_lag_window(frames: usize) -> std::ops::Range<usize> {
+    let margin = AAC_LAGS as usize;
+    margin..(margin + AAC_LAG_FRAMES).min(frames.saturating_sub(margin))
+}
+
 /// The channels of the planted mix of `seconds`, as floats.
 fn planted_channels(seconds: u32) -> [Vec<f32>; 2] {
     let samples = planted_mix(seconds);
@@ -919,8 +928,7 @@ pub(super) fn aac_checks_of(
         )];
     };
     let got = &audio.channels;
-    let margin = AAC_LAGS as usize;
-    let window = margin..(margin + AAC_LAG_FRAMES).min(frames.saturating_sub(margin));
+    let window = aac_lag_window(frames);
     let lag = best_lag(&got[0], &want[0], window.clone(), AAC_LAGS);
     let worst = |lag: isize, range: std::ops::Range<usize>| {
         (0..2)
@@ -1191,7 +1199,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     p.check(ready.is_some(), "the app started");
     // Safari gives no `performance.memory`, so it cannot measure the JS
     // heap (TD-11).  Each such check prints as not measured.
-    let measured = o.browser != Browser::Safari;
+    let measured = heap_measured(o.browser);
     let probe = p.wait_for(0, PROBE_WAIT_S, |l| probe_line(l).is_some())?;
     let (aac, why_not) = aac_rule(std::env::consts::OS, probe.as_deref().and_then(probe_line));
     p.note(&format!("save: the run saves AAC: {aac} ({probe:?})"));
@@ -1338,11 +1346,38 @@ pub(super) fn aac_rule(os: &str, offered: Option<bool>) -> (bool, Option<String>
 /// note "not measured in Safari" where it does not, so that it does not
 /// pass in silence (TD-11).
 fn check_heap(p: &mut Page, measured: bool, ok: bool, what: &str) {
-    if measured {
-        p.check(ok, what);
-    } else {
-        p.note(&format!("not measured in Safari: {what}"));
+    match heap_report(measured, ok, what) {
+        (Some(ok), what) => p.check(ok, &what),
+        (None, note) => p.note(&note),
     }
+}
+
+/// Whether `browser` measures the JS heap: Chrome does, with
+/// `performance.memory`, and Safari does not (TD-11).
+pub(super) fn heap_measured(browser: Browser) -> bool {
+    browser != Browser::Safari
+}
+
+/// What [`check_heap`] does with a check of the JS heap: a check of `ok`
+/// (`Some`), or a note that the browser does not measure it (`None`).
+pub(super) fn heap_report(measured: bool, ok: bool, what: &str) -> (Option<bool>, String) {
+    if measured {
+        (Some(ok), what.to_string())
+    } else {
+        (None, format!("not measured in Safari: {what}"))
+    }
+}
+
+/// Whether a save of `kind` needs AAC that its page, with the probe line
+/// `offered`, does not offer.
+pub(super) fn aac_not_offered(kind: &str, offered: Option<bool>) -> bool {
+    kind == "aac" && offered != Some(true)
+}
+
+/// The kind of the worker's `memory: encode` line of a save of `kind`.
+/// The page makes a WAV itself, so a WAV save has none.
+pub(super) fn worker_kind(kind: &str) -> Option<&str> {
+    (kind != "wav").then_some(kind)
 }
 
 /// The decode worker's line at the end of an `overviews` request.
@@ -1470,14 +1505,13 @@ fn click_save(
 /// for the probe line of its page first.  An AAC save needs a page that
 /// offers AAC.
 fn save_once(p: &mut Page, o: &Opts, (kind, row): (&str, usize), seconds: u32) -> Result<Save> {
-    let format = kind;
     let page = restore(p, seconds)?;
     let probe = p.wait_for(page, PROBE_WAIT_S, |l| probe_line(l).is_some())?;
     let offered = probe.as_deref().and_then(probe_line);
-    if kind == "aac" && offered != Some(true) {
+    if aac_not_offered(kind, offered) {
         bail!("aac, {seconds} s: the page of the save does not offer AAC ({probe:?})");
     }
-    let worker_kind = (kind != "wav").then_some(kind);
+    let encode_kind = worker_kind(kind);
     p.idle(3.0)?;
     let before = in_page(
         p,
@@ -1487,12 +1521,12 @@ fn save_once(p: &mut Page, o: &Opts, (kind, row): (&str, usize), seconds: u32) -
     )?;
     let wasm_before = in_page(p, WASM_MEMORY, json!([]), SCRIPT_WAIT_S)?.as_f64();
     let mark = p.mark();
-    let throttle = throttled(format, seconds);
-    let offered = click_save(p, o, (format, row, seconds), (true, throttle))?;
+    let throttle = throttled(kind, seconds);
+    let offered = click_save(p, o, (kind, row, seconds), (true, throttle))?;
     let after = in_page(p, AFTER_SAVE, json!([]), SCRIPT_WAIT_S)?;
     let wasm_after = after["wasm"].as_f64();
     p.note(&format!(
-        "save: {format}, {seconds} s: long tasks during the save {:?} ms",
+        "save: {kind}, {seconds} s: long tasks during the save {:?} ms",
         long_tasks(&after["long"])
     ));
     let end = in_page(
@@ -1503,8 +1537,8 @@ fn save_once(p: &mut Page, o: &Opts, (kind, row): (&str, usize), seconds: u32) -
     )?;
     let heap = heap_rise(&end["max"], &before);
     let offered_line = offered;
-    let offered = Some(offer_of(Some(&offered_line), format, seconds)?);
-    let worker = worker_kind.and_then(|kind| {
+    let offered = Some(offer_of(Some(&offered_line), kind, seconds)?);
+    let worker = encode_kind.and_then(|kind| {
         p.log[mark..]
             .iter()
             .find(|l| l.contains(&format!("memory: encode {kind} ")))
@@ -1513,7 +1547,7 @@ fn save_once(p: &mut Page, o: &Opts, (kind, row): (&str, usize), seconds: u32) -
     // V8 settles before the next page.
     p.idle(1.0)?;
     Ok(Save {
-        kind: format.into(),
+        kind: kind.into(),
         seconds,
         heap,
         offered,
@@ -2712,5 +2746,87 @@ mod tests {
         let with = file_checks(Files::default(), true);
         assert_eq!(with.len(), 7, "one failed check for each missing AAC file");
         assert!(with[5].1.starts_with("aac, 60 s") && with[6].1.starts_with("aac, 600 s"));
+    }
+
+    /// Review round 1 of M4: the lag window is 10 s from frame 1024, and
+    /// keeps 1024 frames from the end of a short mix.
+    #[test]
+    fn the_aac_lag_window_is_10_s_from_frame_1024() {
+        assert_eq!(aac_lag_window(26_460_000), 1024..1024 + 441_000);
+        assert_eq!(aac_lag_window(12 * 44_100), 1024..1024 + 441_000);
+        assert_eq!(aac_lag_window(88_200), 1024..88_200 - 1024);
+        assert!(aac_lag_window(1000).is_empty());
+    }
+
+    /// Review round 1 of M4: the error of a silent mix is no number, and a
+    /// decode 1.0001 times the mix has an error of 1e-4.
+    #[test]
+    fn error_at_is_the_relative_error_and_none_for_silence() {
+        let silent = vec![0.0_f32; 64];
+        assert_eq!(error_at(&silent, &silent, 0, 0..64), None);
+        assert_eq!(error_at(&silent, &silent, 0, 0..0), None);
+        let want = planted_channels(1)[0].clone();
+        let got: Vec<f32> = want.iter().map(|x| x * 1.0001).collect();
+        let e = error_at(&got, &want, 0, 0..want.len());
+        assert!(e.is_some_and(|e| (e - 1e-4).abs() < 1e-6), "{e:?}");
+    }
+
+    /// Review round 1 of M4: a silent decode has no peak, and gives lag 0.
+    #[test]
+    fn best_lag_of_a_silent_decode_is_0() {
+        let want = planted_channels(1)[0].clone();
+        let silent = vec![0.0_f32; want.len()];
+        assert_eq!(best_lag(&silent, &want, 1024..2048, 16), 0);
+    }
+
+    /// Review round 1 of M4: the near check reads the lags -2, -1, 1 and 2,
+    /// and fails a decode 0.7 frames early, whose error is least at lag -1.
+    #[test]
+    fn the_near_check_reads_lags_either_side_and_fails_a_part_frame() {
+        let want = planted_channels(2);
+        let early = want.clone().map(|c| {
+            (0..c.len())
+                .map(|i| {
+                    let next = c.get(i + 1).copied().unwrap_or(c[i]);
+                    c[i] + 0.7 * (next - c[i])
+                })
+                .collect::<Vec<f32>>()
+        });
+        let audio = engine::decode::Audio {
+            sample_rate: 44_100,
+            channels: early.into(),
+        };
+        let checks = aac_checks_of(Some(&audio), &want, "aac, 2 s");
+        let near = checks
+            .iter()
+            .find(|(_, what)| what.contains("is less than at lags"))
+            .expect("the near check");
+        assert!(!near.0, "{}", near.1);
+        for lag in ["(-2, Some(", "(-1, Some(", "(1, Some(", "(2, Some("] {
+            assert!(near.1.contains(lag), "{lag} in {}", near.1);
+        }
+    }
+
+    /// Review round 1 of M4: the decisions of the browser code of the run.
+    #[test]
+    fn the_heap_and_the_aac_decisions_of_a_run() {
+        assert!(heap_measured(Browser::Chrome));
+        assert!(!heap_measured(Browser::Safari));
+        assert_eq!(
+            heap_report(true, false, "x"),
+            (Some(false), "x".to_string())
+        );
+        assert_eq!(heap_report(true, true, "x"), (Some(true), "x".to_string()));
+        assert_eq!(
+            heap_report(false, false, "x"),
+            (None, "not measured in Safari: x".to_string())
+        );
+        assert!(aac_not_offered("aac", Some(false)));
+        assert!(aac_not_offered("aac", None));
+        assert!(!aac_not_offered("aac", Some(true)));
+        assert!(!aac_not_offered("alac", Some(false)));
+        assert_eq!(worker_kind("wav"), None);
+        assert_eq!(worker_kind("aac"), Some("aac"));
+        assert_eq!(worker_kind("flac"), Some("flac"));
     }
 }

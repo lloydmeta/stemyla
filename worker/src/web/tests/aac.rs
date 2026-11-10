@@ -24,11 +24,13 @@ let fake = null;
 // * error_after: the encoder fails once it holds more frames than this.
 // * peak: the value of the probe's impulse in the decode.
 // * record: whether the encoder keeps each input sample.
+// * stuck_queue: `encode` adds to the queue, which never moves and sends
+//   no `dequeue` event.
 export function fake_aac_install(json) {
   if (fake) throw new Error("a fake AAC is already installed");
   const o = Object.assign({ delay: 2112, probe_delay: null, extra: 3, description: [0x12, 0x10],
     main_description: undefined, supported: true, queue: true, hold_ms: 0, output_ms: 0,
-    flush_only: false, error_after: -1, peak: 1.0, record: true }, JSON.parse(json));
+    flush_only: false, error_after: -1, peak: 1.0, record: true, stuck_queue: false }, JSON.parse(json));
   const bytes = (d) => (d === null ? null : new Uint8Array(d));
   const stats = { data_made: 0, data_closed: 0, enc_made: 0, enc_closed: 0, dec_made: 0,
     dec_closed: 0, max_queue: 0, max_lag: 0, max_burst: 0, encoders: [], decoder_description: null };
@@ -103,6 +105,11 @@ export function fake_aac_install(json) {
       rec.frames_in += n;
       rec.timestamps.push(data.timestamp);
       if (o.record) { rec.left.push(...left); rec.right.push(...right); }
+      if (o.stuck_queue && this.index > 0) {
+        this.encodeQueueSize++;
+        stats.max_queue = Math.max(stats.max_queue, this.encodeQueueSize);
+        return;
+      }
       if (o.queue) this.encodeQueueSize++;
       stats.max_queue = Math.max(stats.max_queue, this.encodeQueueSize);
       if (this.index > 0) {
@@ -197,6 +204,8 @@ export function fake_aac_restore() {
   fake = null;
 }
 export function fake_aac_stats() { return fake.stats; }
+// A promise that gives "late" after `ms`.
+export function late_after(ms) { return new Promise((r) => setTimeout(() => r("late"), ms)); }
 // The packets of encoder `i` (0 is the probe's), and the count of encoders.
 export function fake_aac_packets(i) { return fake.stats.encoders[i].packets; }
 export function fake_aac_encoders() { return fake.stats.encoders.length; }
@@ -212,6 +221,7 @@ extern "C" {
     fn fake_aac_packets(i: u32) -> js_sys::Array;
     fn fake_aac_encoders() -> u32;
     fn fake_aac_input(i: u32) -> js_sys::Array;
+    fn late_after(ms: u32) -> js_sys::Promise;
 }
 
 /// The fake codecs, installed until dropped.
@@ -1107,4 +1117,71 @@ async fn a_real_aac_decodes_to_the_source() {
         );
         assert!(whole < MOST_ERROR, "{path}: the error is {whole}");
     }
+}
+
+/// The result of an encode of `left` and `right` on the memory path, or
+/// `None` when it does not end within `ms`.
+async fn encode_within(
+    left: &Float32Array,
+    right: &Float32Array,
+    ms: u32,
+) -> Option<Result<(), String>> {
+    let source = arrays(left, right, Some(TONE_RATE));
+    let encoded = wasm_bindgen_futures::future_to_promise(async move {
+        let result = encode(Codec::Aac, None, source).await;
+        Ok(JsValue::from(match result {
+            Ok(()) => "ok".to_string(),
+            Err(text) => format!("error: {text}"),
+        }))
+    });
+    let raced = js_sys::Promise::race(&js_sys::Array::of2(&encoded, &late_after(ms)));
+    let end = wasm_bindgen_futures::JsFuture::from(raced)
+        .await
+        .ok()
+        .and_then(|v| v.as_string())
+        .unwrap_or_default();
+    match end.as_str() {
+        "late" => None,
+        "ok" => Some(Ok(())),
+        text => Some(Err(text.trim_start_matches("error: ").to_string())),
+    }
+}
+
+/// Finding 1-1 of review round 1 of M4: an encoder error during the wait
+/// for an output ends the encode with the error, at once.  The fake gives
+/// no output before `flush`, and fails at 34,000 frames, before the wait.
+#[wasm_bindgen_test]
+async fn an_encoder_error_in_the_output_wait_ends_the_encode() {
+    fresh().await;
+    let fake =
+        Fake::new(r#"{"queue": false, "flush_only": true, "error_after": 34000, "record": false}"#);
+    set_output_wait_ms(300);
+    let (left, right) = (tone(220.0, 20 * AAC_BLOCK), tone(330.0, 20 * AAC_BLOCK));
+    let end = encode_within(&left, &right, 3_000).await;
+    set_output_wait_ms(10_000);
+    assert!(end.is_some(), "the encode did not end within 3 s");
+    assert_eq!(
+        end,
+        Some(Err("AAC encoder: EncodingError: the fake failed".into()))
+    );
+    assert_eq!(fake.all_closed(), Ok(()));
+}
+
+/// Finding 1-10 of review round 1 of M4: the wait for the encoder's queue
+/// has the time limit of the wait for an output.  The fake's queue never
+/// moves and sends no `dequeue` event.
+#[wasm_bindgen_test]
+async fn a_queue_that_does_not_move_ends_the_encode() {
+    fresh().await;
+    let fake = Fake::new(r#"{"stuck_queue": true, "record": false}"#);
+    set_output_wait_ms(300);
+    let (left, right) = (tone(220.0, 20 * AAC_BLOCK), tone(330.0, 20 * AAC_BLOCK));
+    let end = encode_within(&left, &right, 3_000).await;
+    set_output_wait_ms(10_000);
+    assert!(end.is_some(), "the encode did not end within 3 s");
+    assert_eq!(
+        end,
+        Some(Err("AAC encoder: the encoder's queue did not move".into()))
+    );
+    assert_eq!(fake.all_closed(), Ok(()));
 }

@@ -44,3 +44,10 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-10, with WebCodecs 
 * The `decoderConfig.description` of Safari's first output is a whole `ES_Descriptor` with 4-byte descriptor sizes, not the bare AudioSpecificConfig that Chrome gives.  Safari's own `AudioDecoder` refuses that description, and takes the bare config.  The code: `m4a::audio_specific_config` takes the config out of either form.  The worker's probe decodes with the bare config, and the file's `esds` holds it.
 * With the default `bitrateMode` (`variable`), Safari gave 72 kbit/s for a target of 256 kbit/s.  With `constant`, it gave 259 kbit/s.  The code: `stem_protocol::AAC_ENCODER` asks for `constant`, so the label "256 kbps" holds.
 * Rule: none.  `a_real_aac_decodes_to_the_source` checks the start, the lag and the error in each browser on a Mac.
+
+## Safari gives no `GPUAdapterInfo.subgroupMinSize`
+
+Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  `GPUAdapterInfo.subgroupMinSize` is `undefined`, and wgpu reads it as a number.
+
+* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in a Safari `web-test` (TD-93).
+* Rule: VERIFY-1.

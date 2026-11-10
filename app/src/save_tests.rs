@@ -1573,7 +1573,9 @@ async fn a_failed_aac_encoder_says_so_and_does_not_encode_again() {
 let saved = null;
 // Puts a stub `AudioEncoder` and `AudioData` on the page, in the form
 // `form`: "absent", "unsupported", "configure throws", "no packet" (its
-// flush never ends) or "packet".  It counts each AudioData and encoder
+// flush never ends), "empty flush" (its flush ends with no packet),
+// "error flush" (its flush calls the error callback, then gives a packet)
+// or "packet".  It counts each AudioData and encoder
 // made and closed.
 export function stub_audio_encoder(form) {
   if (saved) throw new Error("a stub is already on");
@@ -1586,7 +1588,12 @@ export function stub_audio_encoder(form) {
   }
   class StubAudioEncoder {
     static async isConfigSupported(config) { return { supported: form !== "unsupported", config }; }
-    constructor(init) { this.output = init.output; this.state = "unconfigured"; counts.enc_made++; }
+    constructor(init) {
+      this.output = init.output;
+      this.error = init.error;
+      this.state = "unconfigured";
+      counts.enc_made++;
+    }
     configure() {
       if (form === "configure throws") throw new TypeError("the stub refuses the config");
       this.state = "configured";
@@ -1594,6 +1601,13 @@ export function stub_audio_encoder(form) {
     encode() {}
     flush() {
       if (form === "no packet") return new Promise(() => {});
+      if (form === "empty flush") return Promise.resolve();
+      if (form === "error flush") {
+        // A codec is closed after its error callback.
+        this.state = "closed";
+        counts.enc_closed++;
+        this.error(new DOMException("the stub failed", "EncodingError"));
+      }
       this.output({ byteLength: 6 }, {});
       return Promise.resolve();
     }
@@ -1633,6 +1647,8 @@ async fn the_aac_probe_passes_only_with_a_packet_in_time() {
         "unsupported",
         "configure throws",
         "no packet",
+        "empty flush",
+        "error flush",
         "packet",
     ] {
         stub_audio_encoder(form);

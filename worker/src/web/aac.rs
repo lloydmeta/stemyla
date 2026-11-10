@@ -82,17 +82,28 @@ export function aac_encode_silence(s, frames, rate, timestamp) {
   aac_encode(s, new Float32Array(2 * frames), frames, rate, timestamp);
 }
 // Waits while the encoder's queue holds more than `most` blocks, or until
-// an error.  The listener is added before the queue is read again, so the
-// wait cannot miss the event.
-export async function aac_wait_queue(s, most) {
+// an error: whether the queue moved within `ms` at each wait.  The listener
+// is added before the queue is read again, so the wait cannot miss the
+// event.
+export async function aac_wait_queue(s, most, ms) {
   while (!s.error && s.enc.encodeQueueSize > most) {
-    await new Promise((r) => {
-      const done = () => { s.enc.removeEventListener("dequeue", done); s.wake = null; r(); };
-      s.wake = done;
-      s.enc.addEventListener("dequeue", done);
-      if (s.error || s.enc.encodeQueueSize <= most) done();
+    const moved = await new Promise((r) => {
+      let timer = null;
+      const done = (ok) => {
+        clearTimeout(timer);
+        s.enc.removeEventListener("dequeue", on);
+        s.wake = null;
+        r(ok);
+      };
+      const on = () => done(true);
+      s.wake = on;
+      s.enc.addEventListener("dequeue", on);
+      if (s.error || s.enc.encodeQueueSize <= most) { done(true); return; }
+      timer = setTimeout(() => done(false), ms);
     });
+    if (!moved) return false;
   }
+  return true;
 }
 // Waits for the next output or error: whether one came within `ms`.
 export function aac_wait_output(s, ms) {
@@ -192,7 +203,7 @@ extern "C" {
         rate: u32,
         timestamp: f64,
     ) -> Result<(), JsValue>;
-    async fn aac_wait_queue(s: &JsValue, most: u32);
+    async fn aac_wait_queue(s: &JsValue, most: u32, ms: u32) -> JsValue;
     async fn aac_wait_output(s: &JsValue, ms: u32) -> JsValue;
     async fn aac_yield();
     fn aac_take(s: &JsValue) -> Array;
@@ -249,10 +260,15 @@ const MOST_DELAY: i64 = 8192;
 /// The probe refuses a peak below this.
 const LEAST_PEAK: f64 = 0.25;
 
+/// The encode reads two channels from `Input`, so a save is stereo by
+/// construction.
+const _: () = assert!(AAC_ENCODER.channels == 2);
+
 /// The packets that the bound of a layout adds to the frames of the encode.
 const BOUND_PACKETS: usize = 8;
 
-/// Milliseconds that an encode waits for an output before it ends.
+/// Milliseconds that an encode waits for an output, or for its queue to
+/// move, before it ends.
 const OUTPUT_WAIT_MS: u32 = 10_000;
 
 thread_local! {
@@ -439,11 +455,18 @@ async fn aac_packets(
         aac_encode(s, &planar[..2 * n], n as u32, rate, timestamp(LEAD_IN + at))
             .map_err(|e| session.failure(&e))?;
         sent += n;
-        aac_wait_queue(s, QUEUE_MOST).await;
+        let wait_ms = OUTPUT_WAIT.with(|wait| wait.get());
+        let moved = aac_wait_queue(s, QUEUE_MOST, wait_ms).await;
+        if moved.as_bool() != Some(true) {
+            return Err(encoder_failure("the encoder's queue did not move"));
+        }
         aac_yield().await;
         session.drain(out, sizes).await?;
         while sent > PACKET_FRAMES * aac_received(s) as usize + OUT_MOST {
-            let came = aac_wait_output(s, OUTPUT_WAIT.with(|wait| wait.get())).await;
+            let came = aac_wait_output(s, wait_ms).await;
+            if let Some(error) = aac_error(s) {
+                return Err(encoder_failure(error));
+            }
             if came.as_bool() != Some(true) {
                 return Err(encoder_failure("the encoder gave no output"));
             }

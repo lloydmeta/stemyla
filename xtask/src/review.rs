@@ -1176,7 +1176,9 @@ pub struct Known {
 /// statement in front of a body mutant.  Then the entry goes stale, and its
 /// mutant goes to the validator, so nothing is hidden.
 pub const KNOWN_MISSED: &[Known] = &[
-    // M8, round 2, finding 2-15.
+    // M8, round 2, finding 2-15.  Since Step 6 of M4 of
+    // `docs/plans/active/m4a.md`, `restore` gives the mark of the log at
+    // its reload, so its body has two mutants (TD-39).
     Known {
         debt: "TD-39",
         file: "xtask/src/e2e/save.rs",
@@ -4317,12 +4319,14 @@ exit 2
     const SAVE_LINES: &[(&str, usize, &str)] =
         &[(SAVE_RS, 503, CODE_503), (SAVE_RS, 427, CODE_427)];
 
-    /// The lines of [`SAVE_LINES`], with the line of `save_once` as the real
-    /// file has it since M4 of `docs/plans/active/m4a.md`.
-    const REAL_SAVE_LINES: &[(&str, usize, &str)] = &[
-        (SAVE_RS, 503, "    let page = restore(p, seconds)?;"),
-        (SAVE_RS, 427, CODE_427),
-    ];
+    /// The first line of the body of the function whose line starts with
+    /// `signature` in `text`.  cargo-mutants puts the mutant of a body on
+    /// it.
+    fn first_body_line(text: &str, signature: &str) -> Option<String> {
+        let mut lines = text.lines().skip_while(|l| !l.starts_with(signature));
+        lines.by_ref().find(|l| l.trim_end().ends_with('{'))?;
+        lines.find(|l| !l.trim().is_empty()).map(String::from)
+    }
 
     #[test]
     fn the_mutant_of_2_17_is_known() {
@@ -4799,8 +4803,20 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     #[test]
     fn the_real_list_knows_2_17_and_not_1_41_or_1_54() {
         let missed = format!("{LINE_1_41}\n{LINE_2_17}\n{LINE_1_54}\n");
+        // Finding 1-3 of review round 1 of M4: the line of the body mutant is
+        // the first statement of `save_once` in the real file, so a new
+        // first statement shows as a drift.
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let real = std::fs::read_to_string(root.join(SAVE_RS)).expect("save.rs");
+        let first = first_body_line(&real, "fn save_once(");
+        assert!(first.is_some(), "save_once has a body");
+        let line_at = move |file: &str, n: usize| match (file, n) {
+            (SAVE_RS, 503) => first.clone(),
+            (SAVE_RS, 427) => Some(CODE_427.to_string()),
+            _ => None,
+        };
         assert_eq!(
-            split(&missed, KNOWN_MISSED, lines_of(REAL_SAVE_LINES)),
+            split(&missed, KNOWN_MISSED, line_at),
             Split {
                 to_validate: vec![LINE_1_41, LINE_1_54],
                 known: vec![(LINE_2_17, "TD-39")],

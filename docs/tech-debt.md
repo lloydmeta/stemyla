@@ -488,9 +488,9 @@ The worker's probe measures the encoder's delay through `AudioDecoder`, so it as
 
 This entry concerns VERIFY-1.
 
-`an_f16_variant_the_browser_rejects_keeps_f32_weights` and `a_read_back_is_copied_into_wasm_memory_once` (`worker/src/web/tests.rs`) fail in `web-test --browser safari` on Safari 27.2.  wgpu reads `GPUAdapterInfo.subgroupMinSize`, and Safari 27.2 gives `undefined`.  The debug build of wasm-bindgen then asserts a number, and the test fails.  Both fail the same way at `69e63db`, before M4 of `plans/active/m4a.md`.  Chrome passes both.  The release build of the page has no such assert, so this text does not show that a user sees a failure.
+`an_f16_variant_the_browser_rejects_keeps_f32_weights` and `a_read_back_is_copied_into_wasm_memory_once` (`worker/src/web/tests.rs`) fail in `web-test --browser safari` on Safari 27.2.  wgpu reads `GPUAdapterInfo.subgroupMinSize`, and Safari 27.2 gives `undefined` (`references/browser-quirks.md`).  `wasm-bindgen-test-runner` makes debug glue, unless `WASM_BINDGEN_NO_DEBUG` is set.  That glue asserts a number, and the test fails.  Both fail the same way at `69e63db`, before M4 of `plans/active/m4a.md`.  Chrome passes both.  The GPU code runs in the stem worker.  Its release build has no debug glue and no such assert.  No test shows what a user of Safari 27.2 sees when the worker opens the GPU.
 
-* Fix: a wgpu release that reads `subgroupMinSize` as optional, or a test build that does not assert it.  Then run both tests in Safari again.
+* Fix: a wgpu release that reads `subgroupMinSize` as optional.  Until then, run the two tests in Safari with `WASM_BINDGEN_NO_DEBUG=1`.  It turns off each debug assert of the run, not only this one.
 
 ## Known breaches
 

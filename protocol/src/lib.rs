@@ -99,8 +99,11 @@ use web_sys::Blob;
 pub mod decode;
 
 /// The config of the WebCodecs `AudioEncoder` of an AAC save, without its
-/// rate.  The stem worker encodes with it, and the page probes the encoder
-/// with it.  This is the one copy of these values (LAYER-1).
+/// rate: the codec, the channels, the bit rate and the bit rate mode.  The
+/// stem worker encodes with it, and the page probes the encoder with it
+/// (LAYER-1).  A save is stereo by construction: the worker reads two
+/// channels, and asserts that `channels` is 2.  The page's label of the
+/// format names `bitrate`, and a browser test keeps the two the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AacEncoderConfig {
     /// The codec string of AAC-LC.
