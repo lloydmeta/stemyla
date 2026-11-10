@@ -271,7 +271,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-11, M4: a fake encoder that raises its error with `setTimeout(0)` races the worker's `MessageChannel` yield.  Chrome runs the timer first, and Safari runs the message first.  So a test of an error before a wait passed in Safari with the fix removed (finding 3-1).  The fake now raises that error in a microtask.
 * 2026-11-11, M4: in a Safari 27.2 `web-test`, two GPU tests of the worker fail on `GPUAdapterInfo.subgroupMinSize`, also at `69e63db` (TD-93).  With `WASM_BINDGEN_NO_DEBUG=1`, both pass, after the f16 test also takes WebKit's WGSL text.
 * 2026-11-11, M4, review round 3: the reviewer and the wire-reviewer both named their worktree `target/review/3-reviewer-1`.  `review check 3` printed "no change", so no result is wrong.  From round 4, each brief names a unique worktree path.
-* 2026-11-11, intent review of M4: Chromium's Windows AAC encoder (`media/gpu/windows/mf_audio_encoder.cc` on `main`) takes only 96, 128, 160 and 192 kbit/s.  It refuses any other rate with `kEncoderUnsupportedConfig`.  So Chrome and Edge on Windows probably fail the page's probe at 256 kbit/s, and their Save menu shows no AAC item.  Nobody checked this on Windows.  No user gets a wrong file or a wrong label.
+* 2026-11-11, intent review of M4: Chromium's Windows AAC encoder (`media/gpu/windows/mf_audio_encoder.cc` on `main`) takes only 96, 128, 160 and 192 kbit/s.  It refuses any other rate with `kEncoderUnsupportedConfig`.  So Chrome and Edge on Windows probably fail the page's probe at 256 kbit/s, and their Save menu shows no AAC item.  Nobody checked this on Windows.  No user gets a wrong file or a wrong label (TD-94).
 
 ## Decision log
 
@@ -313,7 +313,7 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-10, orchestrator (intent review of M3, round 2): decision 0028 gets an amendment for the sink of M3 (`c738fdd`).  Review round 4 ran on it and found 6 nits, reported and not fixed.  So `plans/completed/m4a-m3.md` keeps the numbers of 3 rounds, and the M3 Progress line holds those of 4 rounds.
 * 2026-11-10, orchestrator (intent review of M3, round 3, the last by decision 0024): 3 nits.  The M4 list names `saves_folder_check` too.  The two nits on the completed milestone plan are not fixed, as 4-4.
 * 2026-11-10, agent (M4 team leader): the AAC save writes `moov` last (`Order::MoovLast`), with no change of `Layout`.  The worker measures the encoder's delay at each encode, and puts 2048 silent frames before the source for Safari.  The encoder runs in `constant` mode.  `Encoded::Failed` gets the wire field `in_encoder`, so a failed stored AAC encode is not taken as a storage failure (PROTO-1).  Detail: `plans/completed/m4a-m4.md`, Decision log.
-* 2026-11-11, orchestrator (intent review of M4, round 1): the Windows gap of 256 kbit/s goes to a new TD, and M4 adds no fallback rate.  Reason: a fallback is new behaviour and a new label, and the late rules apply.  The maintainer decides it at the PR review.  TD-92 and `browser-quirks.md` get true texts in review round 6.
+* 2026-11-11, orchestrator (intent review of M4, round 1): the Windows gap of 256 kbit/s goes to TD-94 (`76ee090`), and M4 adds no fallback rate.  Reason: a fallback is new behaviour and a new label, and the late rules apply.  The maintainer decides it at the PR review.  TD-92 and `browser-quirks.md` get true texts in review round 6.
 
 ## Outcomes and retrospective
 
