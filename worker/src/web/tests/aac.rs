@@ -782,3 +782,131 @@ async fn a_stored_aac_writes_whole_arrays_in_order() {
         "the first read comes before the first packet: {record}"
     );
 }
+
+/// The packets of the encoder of the save, from the fake.
+fn packets_of_the_save() -> usize {
+    let last = fake_aac_encoders().saturating_sub(1);
+    fake_aac_packets(last).length() as usize
+}
+
+/// The growth of an AAC encode's peak from 10 s to 60 s, on `path`, is the
+/// packet table only (Step 3 of `plans/active/m4a-m4.md`).  At 10 s and
+/// 60 s the peak is in the loop, where only the sizes grow: 4 bytes for
+/// each packet, with a fixed slack of 1 KiB.
+fn assert_aac_table_growth(
+    path: &str,
+    (ten, ten_packets): (usize, usize),
+    (sixty, sixty_packets): (usize, usize),
+) {
+    let more = sixty_packets - ten_packets;
+    let slack = 1024;
+    let growth = sixty.saturating_sub(ten);
+    web_sys::console::log_1(
+        &format!(
+            "an AAC of 10 s and 60 s on the {path} path: peaks of {ten} and {sixty} bytes, \
+             {growth} bytes more for {more} more packets"
+        )
+        .into(),
+    );
+    assert!(
+        growth <= 4 * more + slack,
+        "MEM-1: on the {path} path, an AAC of 60 s held {growth} bytes more than one of 10 s, \
+         more than 4 bytes for each of {more} more packets and {slack}.  Fix: keep only the \
+         packet sizes, made with `Vec::with_capacity`, and put each packet as a JS array."
+    );
+}
+
+/// MEM-1 and MEM-4: a stored AAC encode holds its packet table, and no
+/// more, as the song grows.
+#[wasm_bindgen_test]
+async fn a_stored_aac_holds_only_its_packet_table() {
+    let _fake = Fake::new(r#"{"record": false}"#);
+    let (ten, _) = stored_peak(Codec::Aac, 10).await;
+    let ten_packets = packets_of_the_save();
+    let (sixty, _) = stored_peak(Codec::Aac, 60).await;
+    let sixty_packets = packets_of_the_save();
+    assert_aac_table_growth("storage", (ten, ten_packets), (sixty, sixty_packets));
+    let heap = js_sys::Reflect::get(&js_sys::global(), &"performance".into())
+        .and_then(|p| js_sys::Reflect::get(&p, &"memory".into()))
+        .map(|m| !m.is_undefined())
+        .unwrap_or(false);
+    web_sys::console::log_1(&format!("the worker gives performance.memory: {heap}").into());
+}
+
+/// MEM-1 and MEM-4: an AAC encode on the memory path holds its packet
+/// table, and no more, as the song grows.  JS holds the input and the
+/// parts.
+#[wasm_bindgen_test]
+async fn an_aac_is_encoded_in_blocks() {
+    let _fake = Fake::new(r#"{"record": false}"#);
+    let ten = arrays_peak(Codec::Aac, 10).await;
+    let ten_packets = packets_of_the_save();
+    let sixty = arrays_peak(Codec::Aac, 60).await;
+    let sixty_packets = packets_of_the_save();
+    assert_aac_table_growth("memory", (ten, ten_packets), (sixty, sixty_packets));
+}
+
+/// The end of an AAC encode holds only the `moov` beside the packet table,
+/// on each sink: at most 12 bytes for each packet with the sizes, and a
+/// slack of 1 KiB.  The layout has 20 minutes, 51,679 packets, where the
+/// end is the peak.  The test makes the sizes, so it encodes nothing.
+#[wasm_bindgen_test]
+async fn the_end_of_an_aac_holds_only_its_moov() {
+    fresh().await;
+    let packets = 20 * 60 * TONE_RATE as usize / 1024;
+    let frames = packets * 1024 - LEAD_IN - 2112;
+    let config = [0x12, 0x10];
+    let layout = m4a::Layout::new(
+        m4a::Codec::Aac {
+            channels: 2,
+            config_len: 2,
+        },
+        (packets * 1024) as u64,
+        TONE_RATE,
+        Some(m4a::Edit {
+            skip: (LEAD_IN + 2112) as u32,
+            frames: frames as u64,
+        }),
+        m4a::Order::MoovLast,
+    )
+    .and_then(|l| {
+        l.with_gapless(m4a::Gapless {
+            delay: (LEAD_IN + 2112) as u32,
+            padding: 0,
+            frames: frames as u64,
+        })
+    })
+    .expect("a layout");
+    let sizes = vec![700_u32; packets];
+    let slack = 1024;
+    assert!(
+        4 * packets + layout.tail_len() <= 12 * packets + slack,
+        "the sizes and the moov are at most 12 bytes for each packet"
+    );
+    for mut out in [file_sink().await, EncodeOut::Parts(js_sys::Array::new())] {
+        out.reserve(36).await.expect("reserved");
+        let before = LIVE.with(Cell::get);
+        PEAK.with(|peak| peak.set(before));
+        let ended = crate::web::aac::aac_end(&layout, &sizes, config.into(), 36, &mut out).await;
+        let held = PEAK.with(Cell::get) - before;
+        assert!(ended.is_ok(), "{ended:?}");
+        let what = match &out {
+            EncodeOut::File(_) => "file",
+            EncodeOut::Parts(_) => "parts",
+        };
+        web_sys::console::log_1(
+            &format!("the end of an AAC of {packets} packets on the {what} sink held {held} bytes")
+                .into(),
+        );
+        assert!(
+            held <= layout.tail_len() + slack,
+            "MEM-1: the end of an AAC of {packets} packets on the {what} sink held {held} bytes, \
+             more than its moov of {} bytes and {slack}.  Fix: make the moov in one buffer of \
+             `tail_len()`, and drop it before the head.",
+            layout.tail_len()
+        );
+        if let EncodeOut::File(file) = out {
+            file.close().await.expect("closed");
+        }
+    }
+}
