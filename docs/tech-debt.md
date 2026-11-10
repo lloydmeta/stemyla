@@ -504,6 +504,14 @@ The save asks for 256,000 bit/s (`stem_protocol::AAC_ENCODER`).  Chromium's Wind
 
 * Fix: the maintainer decides.  One option is a fallback rate of 192 kbit/s with its own label.  Another is no AAC on Windows, as today.
 
+### TD-95: six decode-worker tests fail in a Safari 27.2 `web-test`
+
+This entry concerns VERIFY-1.
+
+In Safari 27.2, `cargo test --target wasm32-unknown-unknown -p decode-worker --lib` fails 6 of its 12 tests.  These are `the_queue_takes_each_request_in_turn`, `decode_writes_pass_whole_arrays`, `an_m4a_with_an_edit_decodes_into_session_files`, `a_wav_a_flac_and_an_mp3_decode_into_session_files`, `a_short_read_ends_with_unstored_and_its_sizes` and `a_decode_keeps_the_worker_memory_flat`.  Each test file decodes as `Undecodable`, for example "no decoder for codec: unsupported feature: core (codec): unsupported audio codec" for a WAV.  The same 6 fail at `69e63db`, before M4 of `plans/active/m4a.md`, and with `WASM_BINDGEN_NO_DEBUG=1`.  Chrome 157 passes all 12.  `xtask web-test --browser safari` stops at the stem worker (TD-93), so no run of M4 reached this crate before 2026-11-11.  `xtask e2e decode --browser safari` passes, so the release decode worker decodes in Safari 27.2.  The cause is not known.
+
+* Fix: find why the test build of the decode worker decodes nothing in Safari, and fix the test or the code.  Until then, run the decode worker's tests in Chrome, and `e2e decode` in Safari.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
