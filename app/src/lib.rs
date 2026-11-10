@@ -10,6 +10,8 @@ use lanes::{LaneAudio, Shown, ShownLane};
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
 
+#[cfg(target_arch = "wasm32")]
+pub mod aac_probe;
 pub mod assemble;
 pub mod decoder;
 pub mod export;
@@ -547,7 +549,7 @@ fn save_type(format: export::Format) -> &'static str {
     match format {
         export::Format::Wav => "audio/wav",
         export::Format::Flac => "audio/flac",
-        export::Format::M4a => "audio/mp4",
+        export::Format::M4a | export::Format::Aac => "audio/mp4",
         export::Format::Mp3 => "audio/mpeg",
     }
 }
@@ -1448,6 +1450,11 @@ pub struct StemApp {
     /// and its end until it ends (finding 2-1 of review round 2 of M8).
     #[cfg(target_arch = "wasm32")]
     save_reports: Vec<String>,
+    /// Whether this browser can save AAC, from the probe at start (M4 of
+    /// `plans/active/m4a.md`).  `None` until the probe ends, and the Save
+    /// menu does not offer AAC until then.
+    #[cfg(target_arch = "wasm32")]
+    aac_encoder: std::rc::Rc<std::cell::Cell<Option<bool>>>,
 }
 
 /// What a save makes: its file's name and format, and what it reads (D8
@@ -2100,6 +2107,8 @@ impl Default for StemApp {
             save_queue: Vec::new(),
             #[cfg(target_arch = "wasm32")]
             save_reports: Vec::new(),
+            #[cfg(target_arch = "wasm32")]
+            aac_encoder: std::rc::Rc::default(),
         }
     }
 }
@@ -2138,6 +2147,10 @@ impl StemApp {
             Ok(s) => app.separator = Some(s),
             Err(e) => log::warn!("stem separation unavailable: {e}"),
         }
+        // M4 of `plans/active/m4a.md`: the Save menu offers AAC once the
+        // browser's encoder passes the probe.
+        #[cfg(target_arch = "wasm32")]
+        wasm_bindgen_futures::spawn_local(app.probe_aac(aac_probe::PROBE_MS));
         #[cfg(target_arch = "wasm32")]
         wasm_bindgen_futures::spawn_local(async {
             // Save files that a reload, or a page that stopped, left (D7
@@ -4547,7 +4560,7 @@ impl StemApp {
                     );
                     ui.separator();
                 }
-                for format in export::Format::ALL {
+                for format in self.save_formats() {
                     // A stopped worker counts as no worker.
                     let can = !format.needs_worker() || self.can_encode();
                     if ui
@@ -4563,6 +4576,28 @@ impl StemApp {
         .response
         .on_disabled_hover_text(why_not.unwrap_or_default());
         chosen
+    }
+
+    /// The formats of the Save menu: AAC only after the probe at start
+    /// passed (M4 of `plans/active/m4a.md`).
+    #[cfg(target_arch = "wasm32")]
+    fn save_formats(&self) -> Vec<export::Format> {
+        export::offered(self.aac_encoder.get() == Some(true)).collect()
+    }
+
+    /// Probes the browser's AAC encoder within `ms`, logs the result, and
+    /// keeps it for the Save menu.
+    #[cfg(target_arch = "wasm32")]
+    fn probe_aac(&self, ms: u32) -> impl std::future::Future<Output = ()> + use<> {
+        let kept = self.aac_encoder.clone();
+        async move {
+            let result = aac_probe::aac_encoder(ms).await;
+            match &result {
+                Ok(()) => log::info!("export: AAC encoder: yes"),
+                Err(why) => log::info!("export: AAC encoder: no ({why})"),
+            }
+            kept.set(Some(result.is_ok()));
+        }
     }
 
     /// Whether the worker can encode a FLAC, an M4A or an MP3 now: it runs,
@@ -4795,6 +4830,7 @@ impl StemApp {
             export::Format::Flac => separator::Separator::encode_flac,
             export::Format::M4a => separator::Separator::encode_alac,
             export::Format::Mp3 => separator::Separator::encode_mp3,
+            export::Format::Aac => separator::Separator::encode_aac,
         };
         let sep = self.separator.as_ref().filter(|s| s.stopped.is_none());
         let Some(sep) = sep else {
@@ -4872,7 +4908,12 @@ impl StemApp {
                 self.save_notes.push(&name, note);
                 format!("Encoding {name}…{held}")
             }
-            (JsSink::Flac(_) | JsSink::M4a(_) | JsSink::Mp3(_), None) => {
+            (JsSink::Aac(c), Some(sep)) => {
+                sep.encode_aac(&name, c.into_encode(rate));
+                self.save_notes.push(&name, note);
+                format!("Encoding {name}…{held}")
+            }
+            (JsSink::Flac(_) | JsSink::M4a(_) | JsSink::Mp3(_) | JsSink::Aac(_), None) => {
                 format!("Could not save {name}: the encoding worker is not running.")
             }
         };

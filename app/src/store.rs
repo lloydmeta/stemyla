@@ -42,7 +42,8 @@
 //!   [`keep_stored_stems`] moves it onto its `.wav` file.  A separation
 //!   that stopped can leave one; no reader opens it.
 //! * `saves/<page>-<n>.wav`, `.flac`, `.m4a` and `.mp3`: save files (D1 and
-//!   D7 of M8).  The page writes a save's 16-bit WAV here through
+//!   D7 of M8).  An ALAC and an AAC save both have the extension `.m4a`.
+//!   The page writes a save's 16-bit WAV here through
 //!   [`save_open`], [`save_put`] and [`save_close`], which count in the
 //!   writes that [`close`] waits for.  [`download_file`] offers a file, and
 //!   removes it after [`OFFERED_MS`].  [`clean_saves`] removes old ones at

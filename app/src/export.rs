@@ -440,11 +440,21 @@ pub enum Format {
     /// Apple Lossless (ALAC) in an M4A, which Logic Pro and GarageBand take.
     M4a,
     Mp3,
+    /// AAC-LC in an M4A, from the browser's `AudioEncoder`.  The Save menu
+    /// offers it only where the page's probe passes ([`offered`]).
+    Aac,
 }
 
 impl Format {
-    /// The items of the Save menu, in order: the lossless formats first.
-    pub const ALL: [Format; 4] = [Format::Wav, Format::Flac, Format::M4a, Format::Mp3];
+    /// The items of the Save menu, in order: the lossless formats first,
+    /// then MP3, then AAC.
+    pub const ALL: [Format; 5] = [
+        Format::Wav,
+        Format::Flac,
+        Format::M4a,
+        Format::Mp3,
+        Format::Aac,
+    ];
 
     pub fn extension(self) -> &'static str {
         match self {
@@ -452,6 +462,7 @@ impl Format {
             Format::Flac => "flac",
             Format::M4a => "m4a",
             Format::Mp3 => "mp3",
+            Format::Aac => "m4a",
         }
     }
 
@@ -462,6 +473,7 @@ impl Format {
             Format::Flac => "FLAC (16-bit, lossless)",
             Format::M4a => "M4A (16-bit Apple Lossless)",
             Format::Mp3 => "MP3 (192 kbps)",
+            Format::Aac => "M4A (AAC 256 kbps)",
         }
     }
 
@@ -469,6 +481,14 @@ impl Format {
     pub fn needs_worker(self) -> bool {
         self != Format::Wav
     }
+}
+
+/// The formats that the Save menu offers, in order: [`Format::ALL`], without
+/// [`Format::Aac`] when this browser cannot encode AAC (`aac` false).
+pub fn offered(aac: bool) -> impl Iterator<Item = Format> {
+    Format::ALL
+        .into_iter()
+        .filter(move |format| aac || *format != Format::Aac)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -563,6 +583,7 @@ mod web {
         Flac(JsChannels),
         M4a(JsChannels),
         Mp3(JsChannels),
+        Aac(JsChannels),
     }
 
     impl JsSink {
@@ -573,6 +594,7 @@ mod web {
                 Format::Flac => JsSink::Flac(JsChannels::new(frames)),
                 Format::M4a => JsSink::M4a(JsChannels::new(frames)),
                 Format::Mp3 => JsSink::Mp3(JsChannels::new(frames)),
+                Format::Aac => JsSink::Aac(JsChannels::new(frames)),
             }
         }
     }
@@ -582,7 +604,9 @@ mod web {
         fn write(&mut self, at: usize, left: &[f32], right: &[f32]) {
             match self {
                 JsSink::Wav(s) => s.write(at, left, right),
-                JsSink::Flac(s) | JsSink::M4a(s) | JsSink::Mp3(s) => s.write(at, left, right),
+                JsSink::Flac(s) | JsSink::M4a(s) | JsSink::Mp3(s) | JsSink::Aac(s) => {
+                    s.write(at, left, right)
+                }
             }
         }
     }
@@ -1146,8 +1170,9 @@ mod tests {
         assert!(Format::Flac.needs_worker());
         assert!(Format::M4a.needs_worker());
         assert!(Format::Mp3.needs_worker());
+        assert!(Format::Aac.needs_worker());
         let extensions: Vec<&str> = Format::ALL.iter().map(|f| f.extension()).collect();
-        assert_eq!(extensions, ["wav", "flac", "m4a", "mp3"]);
+        assert_eq!(extensions, ["wav", "flac", "m4a", "mp3", "m4a"]);
         let labels: Vec<&str> = Format::ALL.iter().map(|f| f.label()).collect();
         assert_eq!(
             labels,
@@ -1156,8 +1181,24 @@ mod tests {
                 "FLAC (16-bit, lossless)",
                 "M4A (16-bit Apple Lossless)",
                 "MP3 (192 kbps)",
+                "M4A (AAC 256 kbps)",
             ]
         );
+    }
+
+    /// M4 of `plans/active/m4a.md`: the Save menu offers AAC only where the
+    /// page's probe passes, last.
+    #[test]
+    fn the_menu_offers_aac_only_where_the_browser_encodes_it() {
+        let without: Vec<Format> = offered(false).collect();
+        assert_eq!(
+            without,
+            [Format::Wav, Format::Flac, Format::M4a, Format::Mp3],
+            "the four formats of M3, in order"
+        );
+        let with: Vec<Format> = offered(true).collect();
+        assert_eq!(with, Format::ALL, "the five formats, AAC last");
+        assert_eq!(with.last(), Some(&Format::Aac));
     }
 
     /// The mixes of `song`, for a follower's new jobs.
@@ -1727,7 +1768,9 @@ mod web_tests {
             let grew = crate::separator::page_wasm_mb() - before;
             let bytes = match sink {
                 JsSink::Wav(wav) => wav.into_bytes().length() as usize,
-                JsSink::Flac(c) | JsSink::M4a(c) | JsSink::Mp3(c) => 4 * c.left.length() as usize,
+                JsSink::Flac(c) | JsSink::M4a(c) | JsSink::Mp3(c) | JsSink::Aac(c) => {
+                    4 * c.left.length() as usize
+                }
             };
             assert!(
                 bytes >= 4 * song.frames,

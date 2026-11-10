@@ -547,6 +547,17 @@ impl Separator {
         post(&self.worker, &request, &Settings::default());
     }
 
+    /// Asks the worker to encode a stem or a mix as an AAC-LC M4A, with the
+    /// browser's `AudioEncoder`; the file comes back as [`Event::Aac`].
+    /// Arrays are transferred (MEM-2); a stored WAV crosses as its path.
+    pub fn encode_aac(&self, name: &str, source: Encode) {
+        let request = Request::Aac {
+            name: Some(name.into()),
+            source,
+        };
+        post(&self.worker, &request, &Settings::default());
+    }
+
     /// Asks the worker to delete the model from browser storage and drop it.
     pub fn forget_model(&mut self) {
         if post(&self.worker, &Request::ForgetModel, &self.settings) {
@@ -753,6 +764,30 @@ export function spy_on_post(worker) {
             } => {
                 assert_eq!(name.as_deref(), Some("lloyd - bass.m4a"));
                 assert_eq!(rate, Some(48_000));
+                assert_sent_as_they_are(&transfer, (&left, &right), (&l, &r));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn encode_aac_asks_the_worker_for_an_m4a_of_the_arrays() {
+        let (request, transfer, left, right) = posted_encode(44_100, |sep, source| {
+            sep.encode_aac("lloyd - bass.m4a", source);
+        });
+        assert_eq!(request.kind(), "aac", "an aac request");
+        match request {
+            Request::Aac {
+                name,
+                source:
+                    Encode::Arrays {
+                        left: l,
+                        right: r,
+                        rate,
+                    },
+            } => {
+                assert_eq!(name.as_deref(), Some("lloyd - bass.m4a"));
+                assert_eq!(rate, Some(44_100));
                 assert_sent_as_they_are(&transfer, (&left, &right), (&l, &r));
             }
             other => panic!("{other:?}"),
