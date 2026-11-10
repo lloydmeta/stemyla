@@ -295,7 +295,9 @@ Each step is one commit, and each commit passes `check --tier commit`.  Step 1 c
   * `stem-worker`, with an `alac_into` that writes nothing: 9 tests failed on asserts.  The new ALAC tests failed on the bytes of `alac_file` or on `result.is_err()`.  The order test gave no reads, `errors_name_the_request_they_answer` gave no `alac` errors, and the "write refused" case gave no `failed` reply.  `a_failed_stored_encode_leaves_another_encode_whole` passed with this stub, so it now asserts a stored file with bytes, which then failed.
   * `xtask`: with the new edge, `crate_tests_of_engines_family_do_not_run_engine_alone` failed before its change to `dsp`.  `crate_tests_of_m4a_run_engine_alone` failed on the old fixture.
   * TD-16: `git grep -n "'flac'\|\"flac\"" xtask/` shows `flac` in `xtask/src/e2e.rs` and `xtask/src/e2e/save.rs` only.  No hand-written script writes or reads `alac` in this step.
-* [ ] Step 3: the memory of the encode.
+* [x] Step 3: the memory of the encode.  2026-11-10: `an_alac_is_encoded_in_blocks` (memory path) and `a_stored_alac_holds_only_its_packet_table` (storage path).  From 10 s to 60 s, the packets grow by 538, from 108 to 646.  The peak grew by 2,152 bytes on each path, 4 bytes for each packet.  Stored, it went from 188,952 to 191,104 bytes.  In memory, it went from 172,479 to 174,631 bytes.  First failures:
+  * a stub that also keeps each packet in a `Vec<u8>`: the peak grew by 9,490,792 bytes on each path, past the bound of 12 bytes for each packet.
+  * a stub that makes the sizes with `Vec::new()`: the peak grew by 3,584 bytes stored and 5,376 bytes in memory, past the bound of 4 bytes for each packet (3,176 bytes).
 * [ ] Step 4: the page offers M4A.
 * [ ] Step 5: `xtask e2e save` saves M4A.
 * [ ] Step 6: the numbers and the close.

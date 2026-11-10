@@ -1973,6 +1973,91 @@ async fn a_stored_flac_keeps_the_worker_memory_flat() {
     );
 }
 
+/// The packets of an ALAC of `seconds` at [`TONE_RATE`], from `Layout`.
+fn alac_packets_of(seconds: usize) -> usize {
+    m4a::Layout::new(
+        m4a::Codec::Alac,
+        (seconds * TONE_RATE as usize) as u64,
+        TONE_RATE,
+        None,
+        m4a::Order::FastStart,
+    )
+    .expect("a layout")
+    .packets()
+}
+
+/// The peak of the counting allocator during an encode of `seconds` of
+/// two tones on the memory path.  JS holds the input and the parts.
+async fn arrays_peak(codec: Codec, seconds: usize) -> usize {
+    fresh().await;
+    let frames = seconds * TONE_RATE as usize;
+    let (left, right) = (tone(220.0, frames), tone(330.0, frames));
+    let before = LIVE.with(Cell::get);
+    PEAK.with(|peak| peak.set(before));
+    encode(codec, None, arrays(&left, &right, Some(TONE_RATE)))
+        .await
+        .expect("encoded");
+    let held = PEAK.with(Cell::get) - before;
+    assert_eq!(sent(codec.kind()).len(), 1, "one {} reply", codec.kind());
+    held
+}
+
+/// The growth of an ALAC encode's peak from 10 s to 60 s, on `path`, is the
+/// packet table only ("Memory of the encode", `plans/active/m4a-m3.md`).
+/// The parent allows 12 bytes for each packet more: 4 for its size, and
+/// about 8 in `moov`.  At these lengths the peak is in the loop, where only
+/// the sizes grow, so the growth is also at most 4 bytes for each packet.
+/// Each bound has a fixed slack of 1 KiB.
+fn assert_packet_table_growth(path: &str, ten: usize, sixty: usize) {
+    let more = alac_packets_of(60) - alac_packets_of(10);
+    let slack = 1024;
+    let growth = sixty.saturating_sub(ten);
+    web_sys::console::log_1(
+        &format!(
+            "an ALAC of 10 s and 60 s on the {path} path: peaks of {ten} and {sixty} bytes, \
+             {growth} bytes more for {more} more packets"
+        )
+        .into(),
+    );
+    assert!(
+        growth <= 12 * more + slack,
+        "MEM-1: on the {path} path, an ALAC of 60 s held {growth} bytes more than one of 10 s, \
+         more than 12 bytes for each of {more} more packets and {slack}.  Fix: keep only the \
+         packet sizes, and put each packet at once."
+    );
+    assert!(
+        growth <= 4 * more + slack,
+        "MEM-1: on the {path} path, an ALAC of 60 s held {growth} bytes more than one of 10 s, \
+         more than 4 bytes for each of {more} more packets and {slack}.  Fix: make the sizes \
+         with `Vec::with_capacity(layout.packets())`."
+    );
+}
+
+/// MEM-1 and MEM-4: a stored ALAC encode holds its packet table, and no
+/// more, as the song grows.
+#[wasm_bindgen_test]
+async fn a_stored_alac_holds_only_its_packet_table() {
+    let (ten, _) = stored_peak(Codec::Alac, 10).await;
+    let (sixty, _) = stored_peak(Codec::Alac, 60).await;
+    assert_packet_table_growth("storage", ten, sixty);
+    let (thirty, _) = stored_peak(Codec::Alac, 30).await;
+    let one_channel = 4 * TONE_FRAMES;
+    assert!(
+        thirty < one_channel / 10,
+        "MEM-1: a stored ALAC of 30 s held {thirty} bytes at its peak, more than a tenth \
+         of one channel's {one_channel}"
+    );
+}
+
+/// MEM-1 and MEM-4: an ALAC encode on the memory path holds its packet
+/// table, and no more, as the song grows.
+#[wasm_bindgen_test]
+async fn an_alac_is_encoded_in_blocks() {
+    let ten = arrays_peak(Codec::Alac, 10).await;
+    let sixty = arrays_peak(Codec::Alac, 60).await;
+    assert_packet_table_growth("memory", ten, sixty);
+}
+
 /// The MP3 exception of D4 of M8 (TD-59): a stored MP3 encode holds the
 /// MP3's frames until `finish()`, and no more than 4 times the MP3's size
 /// plus 1 MiB.
