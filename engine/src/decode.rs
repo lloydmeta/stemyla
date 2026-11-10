@@ -6335,6 +6335,74 @@ mod tests {
         file
     }
 
+    /// Findings 17-10, 17-14 and 17-30 of review round 17: the hold of a
+    /// stream with `moov` last.  Two leading tags of `MOST_TAG + 5` bytes in
+    /// all show as two tags of zeros; a file of exactly the limit is held; a
+    /// box of a size of 64 bits before `mdat` is stepped over; and a last
+    /// `moov` of size 0 gets its size from the length of the hold.  Each
+    /// opens bit for bit from a source that cannot seek.
+    #[test]
+    fn the_hold_of_a_stream_with_moov_last_keeps_its_layout() {
+        use crate::test_m4a::{top_box, with_cover, with_stco_moved};
+        use std::io::Read;
+        let last = alac_of(m4a::Order::MoovLast);
+        let want = decode_bytes(last.clone(), Some("m4a")).unwrap().channels;
+        let id3 = |bytes: u64| {
+            let size = (bytes - 10) as u32;
+            let synchsafe = [21, 14, 7, 0].map(|shift| ((size >> shift) & 0x7F) as u8);
+            [&[b'I', b'D', b'3', 4, 0, 0][..], &synchsafe].concat()
+        };
+        let most = 10 + 0x0FFF_FFFF_u64;
+        let (first, second) = (most - 10, 15);
+        let tags = Cursor::new(id3(first))
+            .chain(std::io::repeat(0).take(first - 10))
+            .chain(Cursor::new(id3(second)))
+            .chain(std::io::repeat(0).take(second - 10))
+            .chain(Cursor::new(last.clone()));
+        let got = decode_source(Box::new(ReadOnlySource::new(tags)), Some("m4a"));
+        assert!(
+            got.as_ref().is_ok_and(|got| got.channels == want),
+            "huge tags: {:?}",
+            got.err()
+        );
+        let art = with_cover(last.clone(), 8 << 20);
+        let got = decode_source_within(
+            Box::new(Fifo(Cursor::new(art.clone()))),
+            Some("m4a"),
+            art.len() as u64,
+        );
+        assert!(
+            got.as_ref().is_ok_and(|got| got.channels == want),
+            "the limit: {:?}",
+            got.err()
+        );
+        let (ftyp, size) = top_box(&last, b"ftyp");
+        let large = [
+            &1_u32.to_be_bytes()[..],
+            b"free",
+            &24_u64.to_be_bytes(),
+            &[0; 8],
+        ]
+        .concat();
+        let file = [&last[..ftyp + size], &large, &last[ftyp + size..]].concat();
+        let file = with_stco_moved(file, large.len() as i64);
+        let (_, got) = stream_peak(file, "m4a");
+        assert!(
+            got.as_ref().is_ok_and(|got| *got == want),
+            "a box of 64 bits: {:?}",
+            got.err()
+        );
+        let (moov, _) = top_box(&last, b"moov");
+        let mut open = last.clone();
+        open[moov..moov + 4].copy_from_slice(&[0; 4]);
+        let (_, got) = stream_peak(open, "m4a");
+        assert!(
+            got.as_ref().is_ok_and(|got| *got == want),
+            "a moov of size 0: {:?}",
+            got.err()
+        );
+    }
+
     /// Finding 16-1 of review round 16: the stated length of `StatedEnd` is
     /// the duration of the track in its time base, which Symphonia states
     /// also when the timescale is not the rate.  ALAC and AAC with a
@@ -6646,8 +6714,9 @@ mod tests {
     /// Missed mutants 14-16 and 14-17 of review round 14, and a `moov` after
     /// `mdat` on a stream.  An `mdat` of size 0 past the start passes with
     /// no panic.  A fragmented M4A, whose head ends at its first `moof`,
-    /// decodes through `Fifo` behind a tag.  An M4A with `moov` last gets
-    /// `MOOV_LAST_TEXT`: a stream cannot hold the `mdat` that comes first.
+    /// decodes through `Fifo` behind a tag.  An M4A with `moov` last behind
+    /// more top-level boxes than the window of the scan gets
+    /// `MOOV_LAST_TEXT` (TD-90).
     #[test]
     fn an_m4a_stream_of_other_layouts() {
         use crate::test_audio::id3_tag;
@@ -6701,6 +6770,10 @@ mod tests {
             let want = decode_bytes(plain.clone(), Some("m4a")).unwrap().channels;
             let tag = id3_tag(100);
             let moved = with_stco_moved(plain.clone(), tag.len() as i64);
+            // Finding 17-4 of review round 17: a tag past the window of the
+            // scan shows as a tag of zeros, whose header the walk reads.
+            let far = id3_tag(2 << 20);
+            let far_moved = with_stco_moved(plain.clone(), far.len() as i64);
             for (case, file) in [
                 ("no tag", plain.clone()),
                 (
@@ -6710,6 +6783,14 @@ mod tests {
                 (
                     "a tag, offsets from the file start",
                     [tag.clone(), moved].concat(),
+                ),
+                (
+                    "a tag of 2 MiB, offsets from the MP4 start",
+                    [far.clone(), plain.clone()].concat(),
+                ),
+                (
+                    "a tag of 2 MiB, offsets from the file start",
+                    [far.clone(), far_moved].concat(),
                 ),
             ] {
                 let (_, got) = stream_peak(file, "m4a");

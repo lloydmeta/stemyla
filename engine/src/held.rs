@@ -155,9 +155,10 @@ impl MediaSource for Held {
 /// when `head` ends first.
 pub(crate) fn media_before_moov(head: &[u8], mut at: usize) -> bool {
     loop {
-        let (Some(size), Some(kind)) = (head.get(at..at + 4), head.get(at + 4..at + 8)) else {
+        let Some(header) = at.checked_add(8).and_then(|end| head.get(at..end)) else {
             return false;
         };
+        let (size, kind) = header.split_at(4);
         match kind {
             b"moov" => return false,
             b"mdat" | b"moof" => return true,
@@ -170,8 +171,34 @@ pub(crate) fn media_before_moov(head: &[u8], mut at: usize) -> bool {
             size => u64::from(size),
         };
         match usize::try_from(size).ok().filter(|size| *size >= 8) {
-            Some(size) => at = at.saturating_add(size),
+            Some(size) => match at.checked_add(size) {
+                Some(next) => at = next,
+                None => return false,
+            },
             None => return false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_m4a::bx;
+
+    /// Finding 17-1 of review round 17: a box of a size of 64 bits near
+    /// `u64::MAX` ends the walk, with no overflow.
+    #[test]
+    fn a_box_size_near_u64_max_ends_the_walk() {
+        let ftyp = bx(b"ftyp", &[b"M4A ", &[0; 4]]);
+        let head = [&ftyp[..], &[0, 0, 0, 1], b"free", &[0xFF; 8], &[0; 64]].concat();
+        assert!(!media_before_moov(&head, 0));
+    }
+
+    /// Finding 17-3 of review round 17: a `moof` before any `moov` is media,
+    /// with no `mdat` in the head.
+    #[test]
+    fn a_moof_before_moov_is_media() {
+        let head = [bx(b"ftyp", &[b"M4A ", &[0; 4]]), bx(b"moof", &[&[0; 8]])].concat();
+        assert!(media_before_moov(&head, 0));
     }
 }

@@ -656,6 +656,8 @@ From a source that cannot seek, Symphonia 0.6.1 stops its walk of the top-level 
 
 * Fix: for the second case, a hold that starts only at a box that the stream does not hide.  No fix is in view for the first.
 
+## Legibility for agents
+
 ### TD-18: large files and JavaScript inside Rust strings
 
 `roformer-gpu/src/lib.rs`, `app/src/lib.rs`, `worker/src/web.rs` and `xtask/src/e2e.rs` are each over 1,200 lines, and storage logic is JavaScript inside Rust strings (`worker/src/web.rs`, `app/src/store.rs`, `app/src/reset.rs`), out of reach of Rust tooling.
