@@ -348,8 +348,6 @@ Each step is one commit, and each commit passes `check --tier commit`.  A failed
   * "A test with the encoder stubbed checks both menu states.  It runs in CI": `the_save_menu_offers_aac_after_a_probe_that_passes`, in the app's lib tests of the `browser-tests` job.
   * "`e2e save --browser safari` on the Mac: the AAC save decodes through M2's path to the source's length, with its cross-correlation peak at lag 0": the Safari run of Step 6.
   * "CI cannot run the real encode ... add a TD entry": TD-92.
-
-
 * [x] Review round 1 fixes (2026-11-11).  Each test below failed first on an assert, with the fix undone:
   * 1-1: `an_encoder_error_in_the_output_wait_ends_the_encode` failed with "the encode did not end within 3 s" without the error check in the wait loop.
   * 1-10: `a_queue_that_does_not_move_ends_the_encode` failed the same way without the time limit of the queue wait.  The wait now uses the time limit of the output wait.
@@ -370,6 +368,9 @@ Each step is one commit, and each commit passes `check --tier commit`.  A failed
   * 3-7: the f16 test checks for "Expected a Identifier".  It passed in Safari 27.2 with `WASM_BINDGEN_NO_DEBUG=1`, and in Chrome 157.
   * The docs of 3-4 to 3-6 and 3-8 changed with no test.
 * [x] Review round 4 fixes (2026-11-11).  4-1: the fake has the option `probe_flush_never`, and `a_flush_that_does_not_end_ends_the_encode` has a case of the probe's encoder.  With `await s.enc.flush();` in place of `await aac_flush(s, ms);` in `aac_probe`, it failed with "the encode did not end within 3 s" in Chrome 157 and in Safari 27.2.  The nits 4-2 and 4-3 are reported, not fixed.
+* [x] Review round 5 (2026-11-11): no findings.  The stop rule of decision 0024 holds, so round 5 is the last round.  The fix commit of finding 2-10 gives its mutant a `KNOWN_MISSED` entry (TD-39), in the last commit of M4.
+* [x] 2026-11-11, the review: 5 rounds, 35 agents, 3,028,241 tokens, 92.1 wall minutes, 0 interventions.  The log is `reviews/feature-m4a-m4.md`.  Late rounds (4 and 5): one fix (4-1, a test), and 2 nits reported, not fixed.  Debt: TD-92 and TD-93 are new, and TD-39 names `check_heap`.
+
 ## Surprises and discoveries
 
 * 2026-11-10, team leader: Safari encodes the first 1024 input frames as silence, and its description is a whole `ES_Descriptor`, not the bare config ("Facts").
@@ -409,4 +410,41 @@ Each step is one commit, and each commit passes `check --tier commit`.  A failed
 
 ## Outcomes and retrospective
 
-Not started.
+Done on 2026-11-11.
+
+What M4 achieved:
+
+* The Save menu of each lane has "M4A (AAC 256 kbps)" where the page's probe passes.  The probe needs `AudioEncoder`, a pass of `isConfigSupported`, a packet within 5 s and no encoder error.
+* The stem worker encodes the save with WebCodecs `AudioEncoder`, at 256 kbit/s in constant mode, on the storage path and on the memory path.
+* The worker measures the encoder's delay at each encode with an impulse.  It puts 2048 silent frames before the source, for Safari's silent first 1024 frames.
+* The `m4a` crate writes the AAC M4A with `moov` last, one `elst` entry and an `iTunSMPB` tag.  It takes the config out of a bare description or out of Safari's `ES_Descriptor`.
+* The encode respects the encoder's queue and the outputs in flight.  An error, a queue that does not move, no output or a flush that does not end ends the encode with its own text.
+* A failed stored AAC encode says "AAC encoding failed", with no second encode (`in_encoder` on the wire, PROTO-1).
+* `xtask e2e save` saves AAC of 1 and 10 minutes where the page offers it, keyed by the worker's kind.  The AAC saves decode to the planted mix's length, at lag 0.
+* Apple's `afinfo` and `afconvert` read the 1-minute AAC save with a priming of the skip, 4160 frames.
+* Wasm: `stem-worker_bg.wasm` grew by 36,352 bytes (2.8%) at Step 7.
+
+The review, in numbers: 5 rounds, 35 agents, 3,028,241 tokens, 92.1 wall minutes, 0 interventions.  Three plan reviews ran before any code.
+
+| Round | Agents | Tokens | Wall minutes | Found | Significant |
+| - | - | - | - | - | - |
+| 1 | 11 | 1,113,961 | 35.1 | 4 should-fix, 20 mutants | 1-1 to 1-4, 14 mutants |
+| 2 | 10 | 820,101 | 17.2 | 3 should-fix, 1 mutant | 2-1 to 2-3 |
+| 3 | 6 | 559,815 | 15.3 | 2 should-fix | 3-1 |
+| 4 | 5 | 333,411 | 16.4 | 1 should-fix | 4-1 |
+| 5 | 3 | 200,953 | 8.1 | none | none |
+
+What did not go well:
+
+* The waits of the encode needed four rounds.  Round 1 found a hang on an error in the output wait (1-1).  Round 2 found that its fix still waited 10 s when the error came first (2-1).  Round 3 found that the test of that fix failed only in Chrome (3-1).  Round 4 found an untested limit of the probe's flush (4-1).
+* A fake that raises its error with `setTimeout(0)` races the worker's `MessageChannel` yield.  The order differs between Chrome and Safari, so a test passed in Safari with the fix removed.
+* The first sum of tokens in rounds 1 and 2 left out the validators.  The log has the right totals.
+* Two reviewers of round 3 named the same worktree.  No result was wrong.
+
+What to do differently:
+
+* For each wait or flush with a time limit, test each one: an error before it, an error during it, and no end.  Test each in Chrome and in Safari.
+* In a fake, raise an error that must come first in a microtask, not in a timer.
+* Name a unique worktree path in each reviewer's brief.
+
+Debt: TD-92 and TD-93 are new.  TD-39 names `check_heap`.

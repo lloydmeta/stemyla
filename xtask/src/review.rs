@@ -1193,6 +1193,16 @@ pub const KNOWN_MISSED: &[Known] = &[
         code: "let id = session_id(seconds);",
         offset: 1,
     },
+    // M4 of `docs/plans/active/m4a.md`, review round 2, finding 2-10:
+    // `check_heap` only gives the result of `heap_report` to a `Page`, which
+    // only a live WebDriver makes (TD-39).
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace check_heap with ()",
+        code: "match heap_report(measured, ok, what) {",
+        offset: 1,
+    },
     // M8, round 2, finding 2-17.
     Known {
         debt: "TD-39",

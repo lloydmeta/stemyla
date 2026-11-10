@@ -899,7 +899,7 @@ pub(super) fn best_lag(
 
 /// The checks of an AAC save of `seconds`, decoded through M2's path
 /// (`engine::decode_bytes`), against the planted mix (Step 6 of
-/// `docs/plans/active/m4a-m4.md`).  It has the mix's frames exactly.  Its
+/// `docs/plans/completed/m4a-m4.md`).  It has the mix's frames exactly.  Its
 /// cross-correlation over the first 10 s peaks at lag 0.  Its error is
 /// below a bound over the whole and over the first 4096 frames.  The error
 /// at lag 0 is less than at lags of -2, -1, 1 and 2, since the planted

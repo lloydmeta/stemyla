@@ -818,7 +818,7 @@ fn packets_of_the_save() -> usize {
 }
 
 /// The growth of an AAC encode's peak from 10 s to 60 s, on `path`, is the
-/// packet table only (Step 3 of `plans/active/m4a-m4.md`).  At 10 s and
+/// packet table only (Step 3 of `plans/completed/m4a-m4.md`).  At 10 s and
 /// 60 s the peak is in the loop, where only the sizes grow: 4 bytes for
 /// each packet, with a fixed slack of 1 KiB.
 fn assert_aac_table_growth(
@@ -1054,7 +1054,7 @@ fn relative_error(got: &[f32], want: &[f32]) -> f64 {
 const MOST_START_ERROR: f64 = 0.1;
 const MOST_ERROR: f64 = 0.05;
 
-/// Step 4 of `plans/active/m4a-m4.md`: the browser's own `AudioEncoder`
+/// Step 4 of `plans/completed/m4a-m4.md`: the browser's own `AudioEncoder`
 /// encodes 10 s of a signal with no period, on both paths.  Symphonia
 /// decodes the file.  Trimmed by its `elst` skip, the decode has the
 /// source's frames, lines up with it at lag 0, and keeps its start.  CI's
