@@ -688,8 +688,9 @@ impl BitWriter {
 }
 
 /// `packet`, an AAC raw data block, with a fill element of SBR data
-/// (`EXT_SBR_DATA`, 0xD) of 2 bytes before its ID_END: the form of an
-/// HE-AAC packet whose config does not show SBR (TD-81).
+/// (`EXT_SBR_DATA`, 0xD) of 3 bytes before its ID_END, which starts with an
+/// SBR header: the form of an HE-AAC packet whose config does not show SBR
+/// (TD-81).
 pub fn with_sbr_fill(packet: &[u8]) -> Vec<u8> {
     let bit = |at: usize| u32::from((packet[at / 8] >> (7 - at % 8)) & 1);
     let last_one = (0..packet.len() * 8)
@@ -701,11 +702,25 @@ pub fn with_sbr_fill(packet: &[u8]) -> Vec<u8> {
     for at in 0..end {
         out.put(1, bit(at));
     }
-    // ID_FIL, a count of 2 bytes, EXT_SBR_DATA and 12 bits of payload.
+    // ID_FIL, a count of 3 bytes, EXT_SBR_DATA, then an SBR header:
+    // bs_header_flag 1, bs_amp_res 0, bs_start_freq 5, bs_stop_freq 5,
+    // bs_xover_band 0, bs_reserved 0 and no extra fields, and 3 bits of 0.
     out.put(3, 6);
-    out.put(4, 2);
+    out.put(4, 3);
     out.put(4, 0xD);
-    out.put(12, 0x5A5);
+    for (count, value) in [
+        (1, 1),
+        (1, 0),
+        (4, 5),
+        (4, 5),
+        (3, 0),
+        (2, 0),
+        (1, 0),
+        (1, 0),
+        (3, 0),
+    ] {
+        out.put(count, value);
+    }
     out.put(3, 7);
     out.bytes
 }

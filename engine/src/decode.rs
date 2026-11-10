@@ -95,7 +95,7 @@ pub const VIDEO_TEXT: &str =
 /// The text of an MP4 whose sample tables pass [`most_moov_bytes`], which
 /// Symphonia's MP4 reader would read whole (MEM-4).
 pub const MOOV_TEXT: &str =
-    "The index of this file (its moov box) is too large for its length, so it cannot open.";
+    "The index of this file (its moov box) is too large for its length, so it does not open.";
 
 /// The text of a file whose tags that the decode cannot hide from
 /// Symphonia pass the memory that they may keep
@@ -123,11 +123,11 @@ pub(crate) fn most_moov_bytes_of(duration: u64) -> u64 {
 
 /// The text of a protected file: a sound track of the sample entry
 /// `drms`, `drmi` or `enca`.
-pub const PROTECTED_TEXT: &str = "This file is protected (DRM), so it cannot open.";
+pub const PROTECTED_TEXT: &str = "This file is protected (DRM), so it does not open.";
 
 /// The text of an HE-AAC file: SBR or PS in its AudioSpecificConfig, or a
 /// core rate of half the rate of its sample entry.
-pub const HE_AAC_TEXT: &str = "HE-AAC is not supported.  Open an AAC-LC file.";
+pub const HE_AAC_TEXT: &str = "This file is HE-AAC, which does not open.  Open an AAC-LC file.";
 
 /// The text of an AAC of an object type other than AAC-LC, of a program
 /// config element, of 960 frames, of an AudioSpecificConfig that does not
@@ -137,7 +137,7 @@ pub const AAC_KIND_TEXT: &str = "This kind of AAC does not open.  Open an AAC-LC
 /// The text of an ADTS frame of more than one raw data block and no CRC.
 /// Symphonia 0.6.1 refuses more than one block, and with no CRC the frame
 /// states no position of its blocks to split it by (TD-86).
-pub const ADTS_BLOCKS_TEXT: &str = "This AAC file puts more than one AAC frame in each ADTS frame, so it cannot open.  Open an M4A file, or another AAC file.";
+pub const ADTS_BLOCKS_TEXT: &str = "This AAC file has an ADTS frame of more than one raw data block, so it does not open.  Open an M4A file, or another AAC file.";
 
 /// The text of an AIFC file of a compression type that no decoder of
 /// Symphonia 0.6.1 decodes, such as `MAC3`, `MAC6`, `GSM ` or `QDMC`.  The
@@ -1252,7 +1252,12 @@ const MOST_CHECK_PACKETS: usize = 64;
 /// `track_id`, and gives each packet that it read, to decode first.  It
 /// refuses an HE-AAC stream whose config shows no SBR (TD-81, closed by
 /// review round 7): each packet of the track that it read holds SBR data in
-/// a fill element before its end (`aac_config::has_sbr_fill`).  Symphonia 0.6.1 finds that data too
+/// a fill element before its end (`aac_config::has_sbr_fill`), and the
+/// first of them starts with an SBR header (`aac_config::has_sbr_header`;
+/// item 1 of the intent review of M2).  A packet of AAC-LC can end in bits
+/// that look like SBR data by chance: 21 of the 13,100 packets of the
+/// maintainer's file from Apple do.  Each packet of a silent intro can be
+/// the same, so the header lowers the chance about 8 times.  Symphonia 0.6.1 finds that data too
 /// (`aac/mod.rs`, line 194), but does not show it, and decodes the AAC-LC
 /// core at half the band.
 fn first_packets_of_lc(
@@ -1263,6 +1268,7 @@ fn first_packets_of_lc(
     let mut queued = VecDeque::new();
     let mut audio = 0;
     let mut with_sbr = 0;
+    let mut first_header = false;
     while audio < SBR_CHECK_PACKETS && queued.len() < MOST_CHECK_PACKETS {
         let packet = match end.next(format) {
             Ok(Some(packet)) => packet,
@@ -1271,6 +1277,9 @@ fn first_packets_of_lc(
             Err(e) => return Err(anyhow!("reading packet: {e}")),
         };
         if packet.track_id == track_id {
+            if audio == 0 {
+                first_header = crate::aac_config::has_sbr_header(&packet.data);
+            }
             audio += 1;
             if crate::aac_config::has_sbr_fill(&packet.data) {
                 with_sbr += 1;
@@ -1278,7 +1287,7 @@ fn first_packets_of_lc(
         }
         queued.push_back(packet);
     }
-    if audio > 0 && with_sbr == audio {
+    if audio > 0 && with_sbr == audio && first_header {
         return Err(anyhow!(HE_AAC_TEXT));
     }
     Ok(queued)
@@ -2969,6 +2978,83 @@ mod tests {
             let enca = with_entry(aac, b"enca");
             assert_eq!(refusal(enca, "m4a"), PROTECTED_TEXT, "{order:?}");
         }
+    }
+
+    /// Item 1 of the intent review of M2: AAC-LC streams whose first 8
+    /// packets are alike decode, as M4A and as ADTS, mono and stereo, at
+    /// 44.1 and 48 kHz: silence from oxideav-aac, and one packet of a tone
+    /// 10 times over.  Packet 15 of a quiet tone of 110 Hz ends in bits that
+    /// look like a fill element of SBR data, with no SBR header: 10 of it
+    /// gave `HE_AAC_TEXT`.  Packet 40 of a tone of 110 Hz at 48 kHz made the
+    /// check read past its end, and panic.
+    #[test]
+    fn an_aac_lc_stream_of_like_packets_decodes() {
+        use crate::test_m4a::{aac_m4a_of, adts, adts_of, adts_packets, config};
+        let tone = |rate: u32, hz: f32, amp: f32| -> Vec<f32> {
+            (0..rate as usize * 2)
+                .map(|i| amp * (std::f32::consts::TAU * hz * i as f32 / rate as f32).sin())
+                .collect()
+        };
+        let decodes = |packets: &[&[u8]], channels: u8, rate: u32, case: &str| {
+            let stream = adts_of(packets, rate, channels, 0);
+            let got = std::panic::catch_unwind(|| decode_bytes(stream, Some("aac")));
+            assert!(
+                got.as_ref().is_ok_and(|got| got.is_ok()),
+                "{case}, ADTS: {:?}",
+                got.map(|got| got.err())
+            );
+            let asc = config(2, rate, channels);
+            let file = aac_m4a_of(
+                packets,
+                u16::from(channels),
+                &asc,
+                rate,
+                None,
+                None,
+                m4a::Order::FastStart,
+            );
+            let got = std::panic::catch_unwind(|| decode_bytes(file, Some("m4a")));
+            assert!(
+                got.as_ref().is_ok_and(|got| got.is_ok()),
+                "{case}, M4A: {:?}",
+                got.map(|got| got.err())
+            );
+        };
+        for channels in [1_u8, 2] {
+            for rate in [44_100, 48_000] {
+                let silence = adts(&vec![vec![0.0; rate as usize]; usize::from(channels)], rate);
+                let packets = adts_packets(&silence);
+                assert!(packets.len() >= 8);
+                decodes(
+                    &packets,
+                    channels,
+                    rate,
+                    &format!("silence, {channels} channels at {rate}"),
+                );
+                let sound = adts(&vec![tone(rate, 441.0, 0.5); usize::from(channels)], rate);
+                let middle = adts_packets(&sound)[20];
+                decodes(
+                    &[middle; 10],
+                    channels,
+                    rate,
+                    &format!("a tone, {channels} channels at {rate}"),
+                );
+            }
+        }
+        let quiet = adts(&[tone(44_100, 110.0, 0.001)], 44_100);
+        decodes(
+            &[adts_packets(&quiet)[15]; 10],
+            1,
+            44_100,
+            "a packet that looks like SBR",
+        );
+        let loud = adts(&[tone(48_000, 110.0, 0.05)], 48_000);
+        decodes(
+            &[adts_packets(&loud)[40]; 10],
+            1,
+            48_000,
+            "a packet that ends near a field",
+        );
     }
 
     /// An AAC M4A of `config` with 3 packets of zeros, in an `mp4a` entry

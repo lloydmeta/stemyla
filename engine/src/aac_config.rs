@@ -218,43 +218,75 @@ const OTHER_FILLS: [u32; 5] = [0x0, 0x1, 0x2, 0xB, 0xC];
 /// [`MOST_TRAILING_FILLS`] fill elements, each of a length that ends where
 /// the next one starts, and of a known extension type.
 pub(crate) fn has_sbr_fill(packet: &[u8]) -> bool {
-    let bit = |at: usize| u32::from((packet[at / 8] >> (7 - at % 8)) & 1);
-    let read = |at: usize, count: usize| (0..count).fold(0, |value, k| (value << 1) | bit(at + k));
-    let Some(end) = (0..packet.len() * 8)
-        .rev()
-        .find(|at| bit(*at) == 1)
-        .and_then(|last| last.checked_sub(2))
-    else {
-        return false;
-    };
-    read(end, 3) == 7 && sbr_in_fills(&read, end, MOST_TRAILING_FILLS)
+    sbr_fill(packet).is_some()
 }
 
-/// Whether a chain of at most `depth` fill elements that ends at the bit
-/// `end` holds SBR data.  Each fill element is ID_FIL (3 bits), a count of
-/// 4 bits (15 and an escape of 8 bits: 15 + escape - 1), then the count in
-/// bytes, of which the first 4 bits are the extension type.
-fn sbr_in_fills(read: &dyn Fn(usize, usize) -> u32, end: usize, depth: usize) -> bool {
-    if depth == 0 {
+/// Whether the first SBR fill of `packet`, as [`has_sbr_fill`] finds it,
+/// starts with an SBR header: `bs_header_flag` 1, and its `bs_reserved`
+/// bits 0 (ISO/IEC 14496-3, tables 4.62 and 4.63).  The first SBR frame of
+/// an HE-AAC stream has one, since a decoder needs it.  A fill that only
+/// looks like SBR data by chance has one in 1 of 8 packets.
+pub(crate) fn has_sbr_header(packet: &[u8]) -> bool {
+    let Some((extension, at)) = sbr_fill(packet) else {
         return false;
+    };
+    // The extension type, then a CRC of 10 bits for EXT_SBR_DATA_CRC.
+    let flag = at + 4 + if extension == 0xE { 10 } else { 0 };
+    // bs_amp_res (1), bs_start_freq (4), bs_stop_freq (4) and
+    // bs_xover_band (3), then bs_reserved (2).
+    read_bits(packet, flag, 1) == Some(1) && read_bits(packet, flag + 13, 2) == Some(0)
+}
+
+/// The `count` bits of `packet` from the bit `at`, or `None` past its end.
+fn read_bits(packet: &[u8], at: usize, count: usize) -> Option<u32> {
+    (0..count).try_fold(0, |value, k| {
+        let byte = packet.get((at + k) / 8)?;
+        Some((value << 1) | u32::from((byte >> (7 - (at + k) % 8)) & 1))
+    })
+}
+
+/// The extension type of the SBR fill that [`has_sbr_fill`] finds, and the
+/// bit where that type starts.
+fn sbr_fill(packet: &[u8]) -> Option<(u32, usize)> {
+    let read = |at: usize, count: usize| read_bits(packet, at, count).unwrap_or(u32::MAX);
+    let end = (0..packet.len() * 8)
+        .rev()
+        .find(|at| read(*at, 1) == 1)
+        .and_then(|last| last.checked_sub(2))?;
+    if read(end, 3) != 7 {
+        return None;
     }
-    (0..=269_usize).any(|count| {
+    sbr_in_fills(&read, end, MOST_TRAILING_FILLS)
+}
+
+/// The SBR fill of a chain of at most `depth` fill elements that ends at
+/// the bit `end`.  Each fill element is ID_FIL (3 bits), a count of 4 bits
+/// (15 and an escape of 8 bits: 15 + escape - 1), then the count in bytes,
+/// of which the first 4 bits are the extension type.  A read past the end
+/// of the packet matches no field.
+fn sbr_in_fills(
+    read: &dyn Fn(usize, usize) -> u32,
+    end: usize,
+    depth: usize,
+) -> Option<(u32, usize)> {
+    if depth == 0 {
+        return None;
+    }
+    (0..=269_usize).find_map(|count| {
         let head = if count < 15 { 3 + 4 } else { 3 + 4 + 8 };
-        let Some(start) = end.checked_sub(head + count * 8) else {
-            return false;
-        };
+        let start = end.checked_sub(head + count * 8)?;
         let field = read(start + 3, 4) as usize;
         let stated = match field {
-            15 => 15 + read(start + 7, 8) as usize - 1,
+            15 => (15 + read(start + 7, 8) as usize).checked_sub(1)?,
             field => field,
         };
         if read(start, 3) != 6 || stated != count {
-            return false;
+            return None;
         }
         let extension = (count > 0).then(|| read(start + head, 4));
         match extension {
-            Some(0xD | 0xE) => true,
-            Some(other) if !OTHER_FILLS.contains(&other) => false,
+            Some(kind @ (0xD | 0xE)) => Some((kind, start + head)),
+            Some(other) if !OTHER_FILLS.contains(&other) => None,
             _ => sbr_in_fills(read, start, depth - 1),
         }
     })
@@ -337,6 +369,41 @@ mod tests {
         assert!(!has_sbr_fill(&packet(4, 0xD, false)), "no ID_END");
         assert!(!has_sbr_fill(&[]), "no bits");
         assert!(!has_sbr_fill(&[0xE0]), "ID_END only");
+    }
+
+    /// Item 1 of the intent review of M2: an SBR fill starts with a header
+    /// when its `bs_header_flag` is 1 and its `bs_reserved` bits are 0,
+    /// after the CRC of 10 bits of `EXT_SBR_DATA_CRC`.  A read past the end
+    /// of the packet finds no header.
+    #[test]
+    fn the_header_of_an_sbr_fill_is_read() {
+        use crate::test_m4a::BitWriter;
+        let packet = |extension: u32, header: u32| {
+            let mut bits = BitWriter::default();
+            bits.put(9, 0x15A);
+            bits.put(3, 6);
+            bits.put(4, 4);
+            bits.put(4, extension);
+            if extension == 0xE {
+                bits.put(10, 0x2AA);
+                bits.put(18, header << 3);
+            } else {
+                bits.put(28, header << 13);
+            }
+            bits.put(3, 7);
+            bits.bytes
+        };
+        // bs_header_flag, then 12 bits of fields, then bs_reserved.
+        let with = (1 << 14) | (5 << 9) | (5 << 5);
+        assert!(has_sbr_header(&packet(0xD, with)), "a header");
+        assert!(has_sbr_header(&packet(0xE, with)), "a header after a CRC");
+        assert!(!has_sbr_header(&packet(0xD, with & !(1 << 14))), "no flag");
+        assert!(!has_sbr_header(&packet(0xD, with | 0b10)), "a reserved bit");
+        assert!(
+            !has_sbr_header(&packet(0xD, with | 0b01)),
+            "the other reserved bit"
+        );
+        assert!(!has_sbr_header(&packet(0x1, with)), "no SBR");
     }
 
     /// Findings 8-4 and 8-9 of review round 8: SBR data in a fill element
