@@ -1180,7 +1180,14 @@ pub const KNOWN_MISSED: &[Known] = &[
     Known {
         debt: "TD-39",
         file: "xtask/src/e2e/save.rs",
-        mutation: "replace restore -> Result<()> with Ok(())",
+        mutation: "replace restore -> Result<usize> with Ok(0)",
+        code: "let id = session_id(seconds);",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e/save.rs",
+        mutation: "replace restore -> Result<usize> with Ok(1)",
         code: "let id = session_id(seconds);",
         offset: 1,
     },
@@ -1189,7 +1196,7 @@ pub const KNOWN_MISSED: &[Known] = &[
         debt: "TD-39",
         file: "xtask/src/e2e/save.rs",
         mutation: "replace save_once -> Result<Save> with Ok(Default::default())",
-        code: "restore(p, seconds)?;",
+        code: "let page = restore(p, seconds)?;",
         offset: 1,
     },
     // M8, round speed 2, finding 2-16.
@@ -4310,6 +4317,13 @@ exit 2
     const SAVE_LINES: &[(&str, usize, &str)] =
         &[(SAVE_RS, 503, CODE_503), (SAVE_RS, 427, CODE_427)];
 
+    /// The lines of [`SAVE_LINES`], with the line of `save_once` as the real
+    /// file has it since M4 of `docs/plans/active/m4a.md`.
+    const REAL_SAVE_LINES: &[(&str, usize, &str)] = &[
+        (SAVE_RS, 503, "    let page = restore(p, seconds)?;"),
+        (SAVE_RS, 427, CODE_427),
+    ];
+
     #[test]
     fn the_mutant_of_2_17_is_known() {
         let missed = format!("{LINE_2_17}\n");
@@ -4786,7 +4800,7 @@ pub(super) fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     fn the_real_list_knows_2_17_and_not_1_41_or_1_54() {
         let missed = format!("{LINE_1_41}\n{LINE_2_17}\n{LINE_1_54}\n");
         assert_eq!(
-            split(&missed, KNOWN_MISSED, lines_of(SAVE_LINES)),
+            split(&missed, KNOWN_MISSED, lines_of(REAL_SAVE_LINES)),
             Split {
                 to_validate: vec![LINE_1_41, LINE_1_54],
                 known: vec![(LINE_2_17, "TD-39")],

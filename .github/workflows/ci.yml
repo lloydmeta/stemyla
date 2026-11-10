@@ -178,13 +178,14 @@ jobs:
     # steps, with `web-test` 5.9, and 2.8 for `e2e save`.  M3 adds about
     # 19 s to a local `web-test` of 279 s, so about 30 s on CI.  The two
     # runs differ by about 5 minutes on the same steps, as the runners
-    # vary.  The limit is those steps, the limit of `e2e save` of 50, and
-    # about 9 to 14 minutes to spare.  So a run of `e2e save` that waits in
+    # vary.  M4 adds two AAC saves to `e2e save`, and its limit grows from 50
+    # to 60 minutes.  The limit is those steps, the limit of `e2e save` of
+    # 60, and about 9 to 14 minutes to spare.  So a run of `e2e save` that waits in
     # vain ends on its own check.  Each test binary of `web-test`
     # may take 10 minutes (xtask/src/web_test.rs), so a slow `web-test` uses
     # the spare minutes first.  A hung browser must not hold the runner for
     # GitHub's 6 h default.
-    timeout-minutes: 75
+    timeout-minutes: 85
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -223,12 +224,13 @@ jobs:
       - run: cargo run --locked -p xtask -- e2e save --browser chrome
         # It took 3.3 minutes in run 40894815433, with the save during
         # playback of review round speed 4 of M8.  M3 of
-        # docs/plans/active/m4a.md adds two M4A saves.  The limit is the longest
+        # docs/plans/active/m4a.md adds two M4A saves, and M4 two AAC saves.
+        # The limit is the longest
         # that all the waits of a run can take
         # (`STEP_LIMIT_S` in xtask/src/e2e/save.rs, which a test keeps equal
         # to it).  A stopped step writes no save.log, but its output has
         # every note of the run.
-        timeout-minutes: 50
+        timeout-minutes: 60
       # Logs and screenshots of the scenarios, to see why one failed or
       # why the job ran out of time.
       - if: failure() || cancelled()
