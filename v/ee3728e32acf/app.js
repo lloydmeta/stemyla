@@ -1,18 +1,19 @@
-import { save_blob, save_file, st_exists, st_file, st_list, st_move, st_offer, st_open, st_remove, st_remove_older, st_size, st_sleep, st_slice, st_write } from './snippets/app-0cd1cead3f0174fd/inline0.js';
-import { ls_read } from './snippets/app-0cd1cead3f0174fd/inline1.js';
-import { pb_read, pb_sleep } from './snippets/app-0cd1cead3f0174fd/inline2.js';
-import { absolute, fresh_page, page_url, wipe_opfs } from './snippets/app-0cd1cead3f0174fd/inline3.js';
-import { st_query_cfg, st_run } from './snippets/app-0cd1cead3f0174fd/inline5.js';
-import * as import1 from "./snippets/app-0cd1cead3f0174fd/inline4.js"
-import * as import2 from "./snippets/app-0cd1cead3f0174fd/inline4.js"
-import * as import3 from "./snippets/app-0cd1cead3f0174fd/inline0.js"
-import * as import4 from "./snippets/app-0cd1cead3f0174fd/inline2.js"
-import * as import5 from "./snippets/app-0cd1cead3f0174fd/inline3.js"
-import * as import6 from "./snippets/app-0cd1cead3f0174fd/inline0.js"
-import * as import7 from "./snippets/app-0cd1cead3f0174fd/inline0.js"
-import * as import8 from "./snippets/app-0cd1cead3f0174fd/inline0.js"
-import * as import9 from "./snippets/app-0cd1cead3f0174fd/inline0.js"
-import * as import10 from "./snippets/app-0cd1cead3f0174fd/inline5.js"
+import { pb_read, pb_sleep } from './snippets/app-0cd1cead3f0174fd/inline0.js';
+import { save_blob, save_file, st_exists, st_file, st_list, st_move, st_offer, st_open, st_remove, st_remove_older, st_size, st_sleep, st_slice, st_write } from './snippets/app-0cd1cead3f0174fd/inline1.js';
+import { st_query_cfg, st_run } from './snippets/app-0cd1cead3f0174fd/inline3.js';
+import { aac_probe } from './snippets/app-0cd1cead3f0174fd/inline4.js';
+import { ls_read } from './snippets/app-0cd1cead3f0174fd/inline5.js';
+import { absolute, fresh_page, page_url, wipe_opfs } from './snippets/app-0cd1cead3f0174fd/inline6.js';
+import * as import1 from "./snippets/app-0cd1cead3f0174fd/inline2.js"
+import * as import2 from "./snippets/app-0cd1cead3f0174fd/inline1.js"
+import * as import3 from "./snippets/app-0cd1cead3f0174fd/inline3.js"
+import * as import4 from "./snippets/app-0cd1cead3f0174fd/inline0.js"
+import * as import5 from "./snippets/app-0cd1cead3f0174fd/inline2.js"
+import * as import6 from "./snippets/app-0cd1cead3f0174fd/inline6.js"
+import * as import7 from "./snippets/app-0cd1cead3f0174fd/inline1.js"
+import * as import8 from "./snippets/app-0cd1cead3f0174fd/inline1.js"
+import * as import9 from "./snippets/app-0cd1cead3f0174fd/inline1.js"
+import * as import10 from "./snippets/app-0cd1cead3f0174fd/inline1.js"
 
 
 /**
@@ -218,6 +219,10 @@ function __wbg_get_imports() {
         },
         __wbg__wbg_cb_unref_dcc1a90847f04c41: function(arg0) {
             arg0._wbg_cb_unref();
+        },
+        __wbg_aac_probe_d11ed775d97431cb: function(arg0, arg1) {
+            const ret = aac_probe(arg0, arg1 >>> 0);
+            return ret;
         },
         __wbg_absolute_4667b7c7e94ad4bb: function(arg0, arg1, arg2, arg3, arg4) {
             const ret = absolute(getStringFromWasm0(arg1, arg2), getStringFromWasm0(arg3, arg4));
@@ -1750,37 +1755,37 @@ function __wbg_get_imports() {
             return ret;
         },
         __wbindgen_generic_0000000000000001: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1395, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [Externref], shim_idx: 1825, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___wasm_bindgen_9c5824b669557ef0___JsValue__core_608f92abc48d28da___result__Result_____wasm_bindgen_9c5824b669557ef0___JsError___true_);
             return ret;
         },
         __wbindgen_generic_0000000000000002: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Array<any>")], shim_idx: 1028, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Array<any>")], shim_idx: 1458, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___js_sys_da03470312feedbf___Array______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000003: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 1028, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("Event")], shim_idx: 1458, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___js_sys_da03470312feedbf___Array______true__9);
             return ret;
         },
         __wbindgen_generic_0000000000000004: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 122, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [NamedExternref("MessageEvent")], shim_idx: 195, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___web_sys_4db2ad57e5c17411___features__gen_MessageEvent__MessageEvent______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000005: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [String], shim_idx: 120, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [String], shim_idx: 193, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___alloc_cb2b8d99256f33df___string__String______true_);
             return ret;
         },
         __wbindgen_generic_0000000000000006: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1030, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 1460, ret: Result(Unit), inner_ret: Some(Result(Unit)) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke___core_608f92abc48d28da___result__Result_____wasm_bindgen_9c5824b669557ef0___JsValue___true_);
             return ret;
         },
         __wbindgen_generic_0000000000000007: function(arg0, arg1) {
-            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 542, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
+            // Cast intrinsic for `Closure(Closure { owned: true, function: Function { arguments: [], shim_idx: 677, ret: Unit, inner_ret: Some(Unit) }, mutable: true }) -> Externref`.
             const ret = makeMutClosure(arg0, arg1, wasm_bindgen_9c5824b669557ef0___convert__closures_____invoke_______true_);
             return ret;
         },
@@ -1842,16 +1847,16 @@ function __wbg_get_imports() {
     return {
         __proto__: null,
         "./app_bg.js": import0,
-        "./snippets/app-0cd1cead3f0174fd/inline4.js": import1,
-        "./snippets/app-0cd1cead3f0174fd/inline4.js": import2,
-        "./snippets/app-0cd1cead3f0174fd/inline0.js": import3,
-        "./snippets/app-0cd1cead3f0174fd/inline2.js": import4,
-        "./snippets/app-0cd1cead3f0174fd/inline3.js": import5,
-        "./snippets/app-0cd1cead3f0174fd/inline0.js": import6,
-        "./snippets/app-0cd1cead3f0174fd/inline0.js": import7,
-        "./snippets/app-0cd1cead3f0174fd/inline0.js": import8,
-        "./snippets/app-0cd1cead3f0174fd/inline0.js": import9,
-        "./snippets/app-0cd1cead3f0174fd/inline5.js": import10,
+        "./snippets/app-0cd1cead3f0174fd/inline2.js": import1,
+        "./snippets/app-0cd1cead3f0174fd/inline1.js": import2,
+        "./snippets/app-0cd1cead3f0174fd/inline3.js": import3,
+        "./snippets/app-0cd1cead3f0174fd/inline0.js": import4,
+        "./snippets/app-0cd1cead3f0174fd/inline2.js": import5,
+        "./snippets/app-0cd1cead3f0174fd/inline6.js": import6,
+        "./snippets/app-0cd1cead3f0174fd/inline1.js": import7,
+        "./snippets/app-0cd1cead3f0174fd/inline1.js": import8,
+        "./snippets/app-0cd1cead3f0174fd/inline1.js": import9,
+        "./snippets/app-0cd1cead3f0174fd/inline1.js": import10,
     };
 }
 
