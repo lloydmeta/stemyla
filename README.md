@@ -36,26 +36,25 @@ Everything is built and served with Rust tools.  What each task needs, beyond a 
 | To | You need |
 | - | - |
 | Anything | A C compiler, since some dependencies build C code (zstd in xtask, ring in Trunk): Xcode Command Line Tools on macOS (`xcode-select --install`), `build-essential` on Debian or Ubuntu. |
-| Build and serve the web app | Rust stable, 1.99 or newer (CI pins 1.99.0), with the `wasm32-unknown-unknown` target; [Trunk](https://trunkrs.dev/) 0.21.14, the version CI uses.  On its first build Trunk downloads `wasm-bindgen` and `wasm-opt` into its own cache, so that build needs the network. |
+| Build and serve the web app | Rust stable, 1.99 or newer (CI pins 1.99.0), with the `wasm32-unknown-unknown` target, and [Trunk](https://trunkrs.dev/).  `cargo run -p xtask -- setup` installs both at the pins of `xtask/src/setup.rs`.  On its first build Trunk downloads `wasm-bindgen` and `wasm-opt` into its own cache, so that build needs the network. |
 | Separate songs in it | A browser with WebGPU (see "Using it") and the model: **Download model** in the page, or a local `.safetensors` file (see "The model"). |
 | Build the native app, `cargo test`, `cargo clippy` | git 2.42 or newer, for the checks of the git index (`xtask/tests/rules.rs`).  The `wasm32` clippy command also needs `rustup target add wasm32-unknown-unknown`.  On Debian or Ubuntu, `pkg-config libasound2-dev` (the audio output links ALSA).  `jq`, for the hook tests `the_rustfmt_hook_formats_rust_files`, `the_bash_guard_refuses_writes` and `the_bash_guard_explains_each_refusal`.  macOS 26 has `/usr/bin/jq`, and on Debian or Ubuntu run `apt install jq`.  The `rustfmt` component (`rustup component add rustfmt`), for `the_rustfmt_hook_formats_rust_files`. |
 | The UI snapshot tests (`app/tests/ui.rs`) | A GPU, or a software Vulkan driver (`mesa-vulkan-drivers libvulkan1` on Debian or Ubuntu, with `WGPU_BACKEND=vulkan`).  The snapshot PNGs match lavapipe, and Metal on an Intel Mac (AMD Radeon Pro 5500M), at egui_kittest's default threshold.  Other GPUs may differ; with lavapipe installed, egui_kittest picks it.  To change a snapshot on purpose, run `UPDATE_SNAPSHOTS=1 cargo test -p app --test ui`.  Look at each changed `<name>.png`; the old image is in `<name>.old.png`.  Commit only the PNGs of the views that you changed.  Restore the others with `git checkout`.  Name each changed PNG in the PR.  If a snapshot fails on your machine and you did not change the UI, do not update it.  Ask the maintainer; CI compares the snapshots on lavapipe. |
 | The GPU kernel tests (`roformer-gpu`) | A Vulkan, Metal or DX12 GPU, or SwiftShader (see "Checks").  Kernel changes are judged on a real GPU, never SwiftShader alone. |
-| The browser tests | `wasm-bindgen-cli` at the `wasm-bindgen` version in `Cargo.lock`, and a browser's WebDriver (see "Browser tests").  CI runs them anyway; locally they are optional. |
+| The browser tests | `wasm-bindgen-cli` at the `wasm-bindgen` version in `Cargo.lock` (`xtask setup` installs it), and a browser's WebDriver (see "Browser tests").  CI runs them anyway; locally they are optional. |
 | `?bench`, and the `bench` scenario | A browser with WebGPU; no model. |
 | `?streamtest` | A browser with OPFS; no model.  With the defaults it writes about 2.9 GB of scratch files, and removes them at the end. |
 | `?selftest`, and the `selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems` and `weights` scenarios | A GPU, the model file, and for `selftest` the reference files made from it (below). |
 | The comparisons with PyTorch (`roformer`, `roformer-gpu`, `worker-check --reference`) | Fixtures from `tools/roformer_export.py`: Python 3 with `torch`, `numpy`, `pyyaml`, `ml_collections`, `safetensors` and [bs-roformer-infer](https://github.com/openmirlab/bs-roformer-infer) (module `bs_roformer`), plus the PyTorch checkpoint.  Without them those tests skip, and `STEMYLA_REQUIRE=fixtures` makes the `roformer` and `roformer-gpu` tests fail.  This is the only Python in the project, and it never builds or serves the app. |
 | MP3 files from `xtask gen-song` | `ffmpeg` on `PATH` (optional; WAV files are always written). |
 | `xtask publish` | Push access to the repository's `gh-pages` branch (see "Publishing"). |
-| `xtask review mutants` | cargo-mutants 27.1.0: `cargo install --locked cargo-mutants@27.1.0`.  A run copies the tree and builds the copy cold: for the `xtask` tests, about 140 s and 1.4 GB. |
+| `xtask review mutants` | cargo-mutants, at its pin: `cargo run -p xtask -- setup cargo-mutants`.  A run copies the tree and builds the copy cold: for the `xtask` tests, about 140 s and 1.4 GB. |
 | `xtask clean` | `ps` and `lsof`, and `gh` signed in, to read the open and merged PRs.  Without one, `xtask clean` keeps each item that needs it.  Its tests use `ps`, `lsof`, `sleep` and a fake `gh`. |
 
 From a fresh clone, the web app:
 
 ```bash
-rustup target add wasm32-unknown-unknown
-cargo install --locked trunk --version 0.21.14                 # --locked matters: without it the build of Trunk itself fails
+cargo run -p xtask -- setup                                    # each dev tool at its pin; --check only reports
 (cd app && trunk build --release)                              # into app/dist
 cargo run -p xtask --release -- serve app/dist --port 8080     # http://localhost:8080/
 ```
@@ -117,10 +116,10 @@ cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-wor
 
 ### Browser tests
 
-The browser-only behaviour is tested in a real browser.  CI runs these in headless Chrome; locally they are optional and need one install, the test runner at the `wasm-bindgen` version in `Cargo.lock` (`xtask web-test` prints the exact line when the two differ, for example after a `wasm-bindgen` update):
+The browser-only behaviour is tested in a real browser.  CI runs these in headless Chrome; locally they are optional and need one install, the test runner at the `wasm-bindgen` version in `Cargo.lock`.  `xtask web-test` stops when the two differ, for example after a `wasm-bindgen` update:
 
 ```bash
-cargo install wasm-bindgen-cli --version 0.2.129 --locked
+cargo run -p xtask -- setup wasm-bindgen-cli
 ```
 
 and a browser's WebDriver: on macOS, Safari's, turned on once with `safaridriver --enable` and Develop > "Allow Remote Automation" in Safari; otherwise, or with `--browser chrome`, a ChromeDriver matching Chrome's major version ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)) in `CHROMEDRIVER` or on `PATH`.  Safari 27.0's safaridriver may fail with "timed out while connecting to a Safari instance"; use `--browser chrome` meanwhile.

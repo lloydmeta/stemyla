@@ -16,6 +16,7 @@ pub mod roformer_cli;
 pub mod rules;
 pub mod separate;
 pub mod serve;
+pub mod setup;
 pub mod web_test;
 pub mod webdriver;
 /// The workspace's root folder (xtask's parent).

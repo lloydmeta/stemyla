@@ -37,6 +37,7 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 ## Commands
 
 ```bash
+cargo run -p xtask -- setup                     # once, and after a pin changes: each dev tool at its pin (--check only reports)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p synth --all-targets -- -D warnings  # synth without its files feature

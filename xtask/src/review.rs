@@ -1637,7 +1637,8 @@ pub fn parse_limit(minutes: Option<&str>) -> Result<Duration> {
     }
 }
 
-const INSTALL: &str = "cargo-mutants is not installed: cargo install --locked cargo-mutants@27.1.0";
+const INSTALL: &str =
+    "cargo-mutants is not installed: install it with `cargo run -p xtask -- setup cargo-mutants`";
 
 /// The arguments of `cargo` for a round's run.
 pub fn mutants_args(diff: &Path, round_folder: &Path, config: &Path) -> Vec<OsString> {

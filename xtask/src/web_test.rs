@@ -138,7 +138,8 @@ pub fn locked_version(lock: &str, name: &str) -> Option<String> {
 }
 
 fn check_runner(wanted: &str) -> Result<()> {
-    let install = format!("cargo install wasm-bindgen-cli --version {wanted} --locked");
+    let install =
+        format!("cargo run -p xtask -- setup wasm-bindgen-cli (wasm-bindgen-cli {wanted})");
     let out = Command::new("wasm-bindgen-test-runner")
         .arg("--version")
         .output()

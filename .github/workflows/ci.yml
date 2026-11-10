@@ -194,17 +194,11 @@ jobs:
           targets: wasm32-unknown-unknown
       # Also caches ~/.cargo/bin, so wasm-bindgen-cli is built once per version.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # wasm-bindgen-test-runner must equal the wasm-bindgen in Cargo.lock,
-      # so the version comes from there and cannot drift.
+      # wasm-bindgen-test-runner must equal the wasm-bindgen in Cargo.lock.
+      # xtask setup takes the version from there, and installs it only when
+      # the cached one differs.
       - name: Install wasm-bindgen-test-runner at the lockfile's wasm-bindgen version
-        run: |
-          set -euo pipefail
-          v=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
-          test -n "$v"
-          if [ "$(wasm-bindgen-test-runner --version 2>/dev/null | awk '{ print $2 }')" != "$v" ]; then
-            cargo install wasm-bindgen-cli --version "$v" --locked --force
-          fi
-          wasm-bindgen-test-runner --version
+        run: cargo run --locked -p xtask -- setup wasm-bindgen-cli
       - uses: ./.github/actions/setup-trunk
         with:
           version: ${{ env.TRUNK_VERSION }}

@@ -167,6 +167,10 @@ pub fn never_run() -> Vec<(Check, &'static str)> {
         "CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026)";
     vec![
         (
+            Check::root("cargo run -p xtask -- setup"),
+            "it installs the dev tools; run it once, and after a pin changes",
+        ),
+        (
             Check::root("cargo run -p xtask --release -- serve app/dist --port 8080"),
             BROWSER,
         ),
@@ -1105,6 +1109,7 @@ mod tests {
     const GPU_DOC: &str = "cargo test -p roformer-gpu --doc";
     const GPU: &str = "STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release";
     const TRUNK: &str = "(cd app && trunk build --release)";
+    const SETUP: &str = "cargo run -p xtask -- setup";
     const SERVE: &str = "cargo run -p xtask --release -- serve app/dist --port 8080";
     const WEB_TEST: &str = "cargo run -p xtask -- web-test";
     const E2E: &str = "cargo run -p xtask -- e2e <scenario>";
@@ -1178,14 +1183,23 @@ mod tests {
 
     /// The skips at the end of each plan of tier `commit`.
     fn commit_tail() -> Vec<String> {
-        [GPU, TRUNK, SERVE, WEB_TEST, E2E, NIGHTLY_DOC, PUBLISH]
-            .map(skip)
-            .to_vec()
+        [
+            GPU,
+            TRUNK,
+            SETUP,
+            SERVE,
+            WEB_TEST,
+            E2E,
+            NIGHTLY_DOC,
+            PUBLISH,
+        ]
+        .map(skip)
+        .to_vec()
     }
 
     /// The skips at the end of each plan of tier `push`.
     fn push_tail() -> Vec<String> {
-        [SERVE, WEB_TEST, E2E, NIGHTLY_DOC, PUBLISH]
+        [SETUP, SERVE, WEB_TEST, E2E, NIGHTLY_DOC, PUBLISH]
             .map(skip)
             .to_vec()
     }
