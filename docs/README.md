@@ -18,6 +18,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
 * `plans/active/m4a.md`: open M4A (AAC-LC and ALAC) and AIFF songs, and save a stem or the mix as an ALAC M4A.
+* `plans/active/m4a-m3.md`: M3 of `plans/active/m4a.md`: the Save menu offers an ALAC M4A, which the stem worker encodes in blocks on both save paths.
 * `plans/active/tech-debt-rungs.md`: the open entries of `tech-debt.md`, sorted by impact and effort, and closed in three PRs.
 * `plans/completed/m4a-m2.md`: M2 of `plans/active/m4a.md`, done on 2026-11-10: the app opens M4A, audio-only `.mp4`, raw `.aac` and AIFF, and trims the AAC encoder delay.  Its retrospective gives the cost of 19 review rounds and the lesson on scope.
 * `plans/completed/m4a-m1.md`: M1 of `plans/active/m4a.md`, done on 2026-11-08: the `m4a` crate makes an M4A file of 16-bit stereo ALAC, with a safe port of the `alac-encoder` encoder.
