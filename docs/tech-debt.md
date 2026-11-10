@@ -484,6 +484,14 @@ The worker's probe measures the encoder's delay through `AudioDecoder`, so it as
 
 * Fix: a CI runner with an AAC encoder, such as `macos-latest`, that runs the real-encode test and `e2e save`.
 
+### TD-93: two GPU tests fail in a Safari 27.2 `web-test`
+
+This entry concerns VERIFY-1.
+
+`an_f16_variant_the_browser_rejects_keeps_f32_weights` and `a_read_back_is_copied_into_wasm_memory_once` (`worker/src/web/tests.rs`) fail in `web-test --browser safari` on Safari 27.2.  wgpu reads `GPUAdapterInfo.subgroupMinSize`, and Safari 27.2 gives `undefined`.  The debug build of wasm-bindgen then asserts a number, and the test fails.  Both fail the same way at `69e63db`, before M4 of `plans/active/m4a.md`.  Chrome passes both.  The release build of the page has no such assert, so this text does not show that a user sees a failure.
+
+* Fix: a wgpu release that reads `subgroupMinSize` as optional, or a test build that does not assert it.  Then run both tests in Safari again.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits

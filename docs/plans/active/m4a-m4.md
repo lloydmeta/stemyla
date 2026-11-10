@@ -382,6 +382,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  A failed
 * 2026-11-10, agent (implementer, Step 2): until Step 5, the page test of an encoder failure posts an M4A (ALAC) save and replies with `aac`.  Step 5 posts an AAC save.
 * 2026-11-11, agent (implementer, Step 6): `FORMATS` has the form `(kind, extension, row)`.  The checks of the JS heap are a function of their own, `heap_checks`, so that a run in Safari prints each as not measured.  Reason: Safari gives no `performance.memory` (TD-11).
 * 2026-11-11, agent (implementer, Step 6): `e2e save` uses the normalised cross-correlation, over 10 s from frame 1024.  Reason: the raw cross-correlation of the slow planted sines peaked at lag 1 for an exact copy of a 2-second mix, since the energy of the shifted window differs.  The window keeps 1024 frames from each end, so each lag reads whole frames.
+* 2026-11-11, agent (team leader): the two GPU tests that fail in Safari 27.2 do not block review round 1.  Reason: they fail the same way at `69e63db`, and M4 does not touch the GPU.  TD-93 records them.
 
 ## Outcomes and retrospective
 
