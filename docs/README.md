@@ -18,6 +18,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
 * `plans/active/tech-debt-rungs.md`: the open entries of `tech-debt.md`, sorted by impact and effort, and closed in three PRs.
+* `plans/active/tech-debt-rungs-m2.md`: M2 of `plans/active/tech-debt-rungs.md`, rung 2: the dev tools at their new pins, Safari in `web-test` and CI, TD-8 (the wasm GPU tests), TD-51, TD-92, TD-93 and TD-95.
 * `plans/completed/m4a.md`: done on 2026-11-11 in PR #43: the app opens M4A (AAC-LC and ALAC) and AIFF songs.  It saves a stem or the mix as an ALAC M4A, or an AAC M4A where the browser can encode it at 256 kbit/s.
 * `plans/completed/m4a-m4.md`: M4 of `plans/completed/m4a.md`, done on 2026-11-11: the Save menu offers an AAC M4A where the page's probe of an AAC encoder at 256 kbit/s passes.  The stem worker encodes the file through WebCodecs.
 * `plans/completed/m4a-m3.md`: M3 of `plans/completed/m4a.md`, done on 2026-11-10: the Save menu offers an ALAC M4A, which the stem worker encodes in blocks on both save paths.
