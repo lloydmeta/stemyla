@@ -76,6 +76,49 @@ Each step is one commit.  Each step adds a test that fails on the gap first, the
 
 Acceptance of M1: `cargo run -p xtask -- check --tier push` passes; CI passes, the nightly step included; `docs/tech-debt.md` lists TD-22, TD-40, TD-42 and TD-69 under `## Closed`, and TD-41 if step 5 closes it.
 
+### How the work runs (M2)
+
+#### Mode
+
+Orchestrated mode (decision 0023), with the `orchestrate` skill.  The maintainer is away for the run, and asked for the mode on 2026-11-11.  One team leader runs M2.  The orchestrator did step 1 before the mode started (`808aa66`).
+
+#### Branch and PR
+
+The branch is `tech-debt/2026-11-11`, from `main` at `ee3728e`.  This differs from the skill: there is no push and no PR during the run (GIT-1).  The maintainer pushes and opens the PR.  The orchestrator writes the PR body in its scratchpad folder `m2/pr-body.md`, and checks it with `xtask pr-body`.  So no CI run checks M2 before the close-out, and the report says so.
+
+#### Maintainer steps
+
+* None that blocks the run.  Safari has Develop > Allow Remote Automation on.  The weights for `e2e selftest` are on this Mac, outside the repo (ASSET-1).
+* After the run: push the branch, open the PR, and watch the first run of the macOS job (step 10).  File the draft wgpu issue of step 6, if it is still wanted.
+
+#### Preflight
+
+The skill's preflight, and:
+
+* `caffeinate -dimsu` runs for the length of the run, so the Mac does not sleep and macOS does not report the user idle.
+* `cargo run -p xtask -- setup --check` passes.
+
+#### Decision points
+
+See "Decisions for the maintainer", questions 5 to 8.
+
+#### Review rule
+
+Decision 0024, through the `review-rounds` skill.
+
+#### Kick-off prompt
+
+```text
+/orchestrate docs/plans/active/tech-debt-rungs.md, milestone M2
+```
+
+#### Extra stop conditions
+
+* None beyond the skill's.  The orchestrator decides these cases, records them in the Decision log, and goes on:
+  * A Safari failure whose cause is outside the repo, such as WebKit or `safaridriver`.  Give a clear error, a line in `references/local-browser-testing.md` or `references/browser-quirks.md`, and a TD.
+  * `safaridriver` refuses every session after the stale sessions end.  Do the steps that need no Safari, and list the Safari checks under "Not verified".
+  * A new release of a tool breaks a check, and the cause is the tool.  Keep the old pin, record why, and go on.
+
 ### M2: rung 2, Safari and verification (one PR)
 
 Branch `tech-debt/2026-11-11`, from `main` at `ee3728e`.  Each step is one commit, with a test that fails on the gap first.  The Safari runs need the maintainer's Mac, with Develop > Allow Remote Automation on.  Never quit the maintainer's Safari.
@@ -153,6 +196,9 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 
 * 2026-11-06: TD-73 and TD-75 wait on a choice that the maintainer made on 2026-11-02 (P1 and P3 of `plans/active/harness-engineering.md`).  The work is the next harness PR's.  So this plan does not take them.
 
+* 2026-11-11: the session of the M2 run is `claude-opus-5-5` (the system prompt; `~/.claude/settings.json` has `model: opus[1m]`).  Its effort is `high`, from `modelSettings.claude-opus-5-5.effortLevel` in `~/.claude/settings.json`, which overrides the top-level `effortLevel: xhigh`.  No `--model`, `--effort` or `ANTHROPIC_MODEL` was given.
+* 2026-11-11: wasm-bindgen-test 0.3.80 no longer takes `async-trait`, so its row leaves the dev-dependency table of `THIRD-PARTY.md`.
+
 ## Decision log
 
 * 2026-11-06, agent: no answer came to question 1, so step 1 applied the recommendation, a pinned nightly.  `nightly-2026-10-30` ran the doctests in this container.
@@ -171,6 +217,9 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 
 * 2026-11-11, maintainer: M2 takes Safari and the tools.  TD-7, TD-53, TD-57, TD-64 and TD-66 wait for a later rung.  The maintainer asked for an easy setup of the tools, such as a Makefile target.
 * 2026-11-11, agent: the setup of the tools is the command `xtask setup`, not a Makefile.  Reason: BUILD-1 allows only Rust for the build.
+* 2026-11-11, maintainer: run M2 in orchestrated mode, since the maintainer is away (questions 5 to 8 hold the answers).
+* 2026-11-11, agent: no message of "Start".  Reason: the maintainer asked for the mode, questions 5 to 8 have answers, and no new choice is open.
+* 2026-11-11, agent: step 4 goes before step 2, so the Safari baseline of every crate comes before the new wasm-bindgen.  Step 2 waits as a patch in the orchestrator's scratchpad, `m2/step2-wasm-bindgen-0.2.130.patch`.
 * 2026-11-11, agent: the branch `tech-debt/2026-11-11` moved by fast-forward from `ff633a3` to `ee3728e`, so that M2 starts with TD-92 to TD-95 in the register.
 
 ## Outcomes and retrospective
