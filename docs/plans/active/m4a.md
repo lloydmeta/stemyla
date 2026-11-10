@@ -285,6 +285,8 @@ Each milestone is its own commits, and each commit passes `check --tier commit`.
 * 2026-11-09, orchestrator (rounds 12 to 16 of M2): a source that cannot seek gets its own readers.  `tag_stream` and `mp4_stream` hide tags as the bytes pass.  A stream steps over leading ID3v2 tags.  `held` holds a `moov`-last M4A up to 1 GiB.  Only a native FIFO through `decode_path` reaches them.  Reason: the orchestrator judged these gaps against the plan's promise.  The maintainer later limited that rule (see the next line).
 * 2026-11-10, orchestrator: from round 17 of M2, a round adds no new behaviour.  It fixes only what it finds.  A gap only on a source that cannot seek goes to a TD with a clear text.  Fix it only if it puts memory at risk or makes a panic.  Reason: the maintainer asked how many late findings were real blockers.  Rounds 12 to 16 closed gaps that only `decode_path` of a FIFO reaches, and each closure brought new findings.  The app's sources all seek.  Round 16's hold of a `moov`-last stream (`547bf74`) stays, since it is done and tested.
 * 2026-11-10, maintainer: the hold of a `moov`-last stream (`547bf74`) is fine, since the browser cannot reach it.  It holds up to 1 GiB, only on a native FIFO.
+* 2026-11-10, orchestrator: the rules of 2026-11-09 (measure a gap against the plan) and of round 17 of M2 (a late round adds no new behaviour) apply to M3 and M4.  The first applies from round 1, the second from round 4.  A gap that no user of the app can reach goes to a TD with a clear text, unless it puts memory at risk or makes a panic.
+* 2026-11-10, maintainer: M3 starts on another computer, from `08b7b5b`.  No M3 work exists before that.  Start it with the kick-off prompt.
 
 ## Outcomes and retrospective
 
