@@ -581,6 +581,7 @@ Each step is one commit, and each commit passes `check --tier commit`.  The Symp
   * [x] 2026-11-10: review round 21 fixes, part 1: tests of the read-on and of the bounds of the HE-AAC check (21-1, 21-3, 21-10), and a test doc (21-2).
     * `an_he_aac_stream_cut_after_its_header_gives_the_he_aac_text` now holds the stream with no packet 0 and 8, whose first header is at packet 14: it gets `HE_AAC_TEXT` as ADTS and as M4A, so the check reads on past 8 packets.  It also holds a stream of 70 packets of SBR data with no header, then the rest: it opens, since the check stops at 64.  Its doc now says which case reads on.  The loop of 8 packets only, and a bound of 128, each fail the test.
     * `the_header_of_an_sbr_fill_is_read` now holds an EXT_SBR_DATA_CRC fill of 3 bytes, with no room for a header after the CRC, and one of 4 bytes with a header.  The bounds `< 4 + 17` and `< 4 + crc + 5` each fail it.  It also holds an empty fill just before ID_END, which is no SBR fill; with no arm for a count of 0, the test fails (21-10).
+  * [x] 2026-11-10: review round 22 fixes, part 1: the bound of 64 packets on both sides (22-1).  `an_he_aac_stream_cut_after_its_header_gives_the_he_aac_text` now has a stream whose first header is at index 63, which gets `HE_AAC_TEXT`, and one whose first header is at index 64, which opens.  They take the place of the stream with its first header at 70, which pinned the bound only from 15 to 70.  `MOST_CHECK_PACKETS` at 63, 65 and 15 each fail the test.
 
 ## Surprises and discoveries
 
