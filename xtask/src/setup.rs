@@ -189,12 +189,28 @@ fn parse_args(args: &[String]) -> Result<(bool, Vec<String>)> {
     Ok((check_only, names))
 }
 
+/// `xtask setup`: [`run_with`] with the real probe and install.  No test
+/// calls it, since a test of it could install a tool.  So cargo-mutants
+/// makes no mutant of it.
+#[cfg_attr(mutants, mutants::skip)]
 pub fn run(args: &[String]) -> Result<()> {
-    let (check_only, names) = parse_args(args)?;
     let root = crate::workspace_root();
+    run_with(args, &root, have, |tool| install(tool, &root))
+}
+
+/// Runs `setup` with `args` for the checkout in `root`.  `have` reads the
+/// installed version of a tool, and `install` installs a tool (see
+/// [`set_up`]).
+fn run_with(
+    args: &[String],
+    root: &std::path::Path,
+    have: impl FnMut(&Tool) -> Option<String>,
+    install: impl FnMut(&Tool) -> Result<bool>,
+) -> Result<()> {
+    let (check_only, names) = parse_args(args)?;
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).context("reading Cargo.lock")?;
     let tools = chosen(tools(&lock)?, &names)?;
-    set_up(&tools, check_only, have, |tool| install(tool, &root))
+    set_up(&tools, check_only, have, install)
 }
 
 /// Keeps each of `tools` that is at its pin, and installs each other one
@@ -495,6 +511,78 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.starts_with("unknown option --lloyd;"), "{error}");
+    }
+
+    /// An install that a test must not reach.
+    fn no_install(tool: &Tool) -> Result<bool> {
+        panic!("{} installed", tool.name)
+    }
+
+    /// Review round 3 of M2 (3-1): `run` gives its work to `run_with`.
+    #[test]
+    fn setup_with_an_unknown_option_fails_and_installs_nothing() {
+        let root = crate::workspace_root();
+        let result = run_with(&args(&["--lloyd"]), &root, |_| None, no_install);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().starts_with("unknown option --lloyd;")),
+            "{result:?}"
+        );
+        let result = run_with(&args(&["--check", "lloyd"]), &root, |_| None, no_install);
+        assert!(
+            result
+                .as_ref()
+                .is_err_and(|error| error.to_string().starts_with("unknown tool lloyd;")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn setup_check_with_a_tool_not_at_its_pin_fails_and_installs_nothing() {
+        let root = crate::workspace_root();
+        let result = run_with(
+            &args(&["--check", "trunk", "nightly"]),
+            &root,
+            |tool| (tool.name == "nightly").then(|| tool.pin.clone()),
+            no_install,
+        );
+        assert_eq!(
+            result.map_err(|error| error.to_string()),
+            Err("1 tool(s) not at the pin: trunk; run `cargo run -p xtask -- setup`".to_string())
+        );
+    }
+
+    #[test]
+    fn setup_with_each_tool_at_its_pin_passes() {
+        let root = crate::workspace_root();
+        let result = run_with(&[], &root, |tool| Some(tool.pin.clone()), no_install);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn setup_installs_the_named_tool_with_the_locked_pin() {
+        let root = crate::workspace_root();
+        let lock = std::fs::read_to_string(root.join("Cargo.lock")).unwrap();
+        let bindgen = locked_version(&lock, "wasm-bindgen").unwrap();
+        let installed = std::cell::RefCell::new(Vec::new());
+        let result = run_with(
+            &args(&["wasm-bindgen-cli"]),
+            &root,
+            |tool| {
+                installed
+                    .borrow()
+                    .iter()
+                    .any(|(name, _)| *name == tool.name)
+                    .then(|| tool.pin.clone())
+            },
+            |tool| {
+                installed.borrow_mut().push((tool.name, tool.pin.clone()));
+                Ok(true)
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(installed.into_inner(), [("wasm-bindgen-cli", bindgen)]);
     }
 
     #[test]

@@ -182,9 +182,12 @@ jobs:
     # 19 s to a local `web-test` of 279 s, so about 30 s on CI.  The two
     # runs differ by about 5 minutes on the same steps, as the runners
     # vary.  M4 adds two AAC saves to `e2e save`, and its limit grows from 50
-    # to 60 minutes.  The limit is those steps, the limit of `e2e save` of
-    # 60, and about 9 to 14 minutes to spare.  So a run of `e2e save` that waits in
-    # vain ends on its own check.  Each test binary of `web-test`
+    # to 60 minutes.  Run 42952206488 (2026-11-11, M2 of
+    # docs/plans/active/tech-debt-rungs.md) took 19.7 minutes for the steps
+    # other than `e2e save`, with `web-test` 12.0, and 3.6 for `e2e save`.
+    # The limit is the limit of `e2e save` of 60, 20 for the other steps,
+    # and 5 to spare.  So a run of `e2e save` that waits in vain ends on its
+    # own check.  Each test binary of `web-test`
     # may take 10 minutes (xtask/src/web_test.rs), so a slow `web-test` uses
     # the spare minutes first.  A hung browser must not hold the runner for
     # GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`
@@ -255,10 +258,13 @@ jobs:
     # On the maintainer's Mac (2026-11-11), the Safari `web-test` took
     # 5 minutes, and the Safari scenarios 8.  The setup builds Trunk and
     # wasm-bindgen-cli with `cargo install`, and the crates for wasm32,
-    # which took about 15 minutes on the Linux jobs with no cache.  Each of
-    # the two `e2e save` steps, in Safari and in Chrome, may take its limit
-    # of 60 minutes.  So the limit is 30 for the setup and the other steps,
-    # 60 for each save, and 30 to spare.  A hung browser must not hold the
+    # which took about 15 minutes on the Linux jobs with no cache.  In run
+    # 42952206488 (2026-11-11), with no cache, the job took 46 minutes.  The
+    # setup took 13.8, the Safari `web-test` 14.2, and the two `e2e save`
+    # steps 4.3 and 4.8.  So the steps other than `e2e save` took 37.0.
+    # Each of the two `e2e save` steps, in Safari and in Chrome, may take
+    # its limit of 60 minutes.  So the limit is 40 for the setup and the
+    # other steps, 60 for each save, and 20 to spare.  A hung browser must not hold the
     # runner for GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`
     # (xtask/src/e2e/save.rs) checks that the limit holds the save steps.
     timeout-minutes: 180

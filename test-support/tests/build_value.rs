@@ -50,8 +50,8 @@ fn mir(target: Option<&str>, marker: &str) -> String {
 }
 
 /// The MIR body whose first line starts with `head`, to its closing
-/// `}` at the start of a line, or an empty text when no line starts with
-/// `head`.
+/// `}` at the start of a line, or to the end of the text when it has no
+/// closing brace.  It is an empty text when no line starts with `head`.
 fn body<'a>(mir: &'a str, head: &str) -> &'a str {
     let start = if mir.starts_with(head) {
         Some(0)
