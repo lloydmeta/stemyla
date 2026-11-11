@@ -57,7 +57,7 @@ The Safari failures that the repo records (`references/local-browser-testing.md`
 * `safaridriver` sessions that time out while they connect, and a stale session that is "already paired".
 * Audio that Safari keeps suspended while macOS reports the user idle, which fails `e2e smoke` and `audio-resume`.
 * In `e2e storage`, WebKit's "AbortError: Fetch is aborted" in place of the abort reason, and a `?model_url=` download that sometimes times out.
-* In `web-test`, `an_output_left_behind_by_a_busy_page_is_replaced` skips after the test before it, and `a_stored_file_removed_after_it_was_opened_is_a_read_error` is flaky.
+* In `web-test`, `an_output_left_behind_by_a_busy_page_is_replaced` skips (intent review I1-3 found that every test of the audio clock skips in Safari, alone too: TD-96), and `a_stored_file_removed_after_it_was_opened_is_a_read_error` is flaky.
 * `lastModified` in whole seconds, and a `setTimeout` that races a `MessageChannel` in another order.
 * TD-93 and TD-95.  `xtask web-test` stops at the first crate that fails, so TD-93 hid TD-95.
 
