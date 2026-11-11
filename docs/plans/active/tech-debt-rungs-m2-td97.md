@@ -189,7 +189,21 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
     * `the_wasm_check_bounds_the_growth_of_the_long_save` became `the_heap_check_bounds_the_peak_of_the_long_save`.  It also asserts that a large memory growth alone passes.
   * [x] 2026-11-11: one Chrome run of the new build passed (`m2/td97/accept/chrome-pre.log`).  The peaks were 7,647,356 to 7,647,369 bytes, the same for 1 and 10 minutes to 0 bytes in each format.  Each heap line's start plus its peak is the absolute peak of step A's `chrome-2` (25,973,059 for WAV).  The live bytes at the save's start are about 1.7 MB above those at the item's click, so the step A peak above the click is 1.7 MB higher.
   * [x] 2026-11-11, after the maintainer's answer: the counting allocator, its line, its parser and their tests are removed; `app/` is as before `af135fb`.  D11 keeps the memory's growth, and `WASM_BOUND_BYTES` is 3 MiB.  TD-97 is closed, and the TD of the menu's buffer is dropped.  Decision 0030 is kept as `rejected`.  The new test `the_two_level_pairs_of_safari_pass_and_one_byte_more_fails` failed first on the bound of 1 MiB, at its first `assert!`: the CI pair, set on the ALAC saves, gave the failure "alac: the 10-minute save grows the page's WebAssembly memory by at most 1048576 bytes more than the 1-minute save (Some(5636096.0) and Some(7536640.0) bytes)".
-* [ ] Step C: 6 Safari runs in a row and one Chrome run pass, with the bound of 3 MiB.
+* [x] Step C: 6 Safari runs in a row and one Chrome run pass, with the bound of 3 MiB.
+  * [x] 2026-11-11, at `7dc0388`: 6 runs of `e2e save --browser safari` in a row passed each check, with the lock read before each (`m2/td97/accept2/safari-1.log` to `safari-6.log`).  None hung.  `e2e save --browser chrome` passed (`m2/td97/accept2/chrome-1.log`).  The growth of each save, in bytes, as 60 s / 600 s, and the 10-minute less the 1-minute growth:
+
+| Run | WAV | FLAC | ALAC | MP3 | AAC |
+| - | - | - | - | - | - |
+| Safari 1 | 7,340,032 / 7,274,496 (-65,536) | 7,340,032 / 7,340,032 (0) | 7,208,960 / 7,471,104 (+262,144) | 7,274,496 / 5,701,632 (-1,572,864) | 7,405,568 / 7,405,568 (0) |
+| Safari 2 | 7,405,568 / 7,405,568 (0) | 7,274,496 / 7,405,568 (+131,072) | 7,274,496 / 7,274,496 (0) | 7,340,032 / 7,340,032 (0) | 7,340,032 / 7,340,032 (0) |
+| Safari 3 | 7,405,568 / 7,340,032 (-65,536) | 7,274,496 / 7,274,496 (0) | 7,405,568 / 7,340,032 (-65,536) | 7,405,568 / 7,274,496 (-131,072) | 5,636,096 / 7,340,032 (+1,703,936) |
+| Safari 4 | 7,274,496 / 7,274,496 (0) | 7,536,640 / 7,536,640 (0) | 7,471,104 / 7,471,104 (0) | 7,274,496 / 7,340,032 (+65,536) | 7,405,568 / 7,274,496 (-131,072) |
+| Safari 5 | 7,208,960 / 7,340,032 (+131,072) | 7,405,568 / 7,340,032 (-65,536) | 7,536,640 / 5,636,096 (-1,900,544) | 7,340,032 / 7,471,104 (+131,072) | 7,340,032 / 7,536,640 (+196,608) |
+| Safari 6 | 7,340,032 / 7,471,104 (+131,072) | 7,471,104 / 7,405,568 (-65,536) | 6,160,384 / 7,340,032 (+1,179,648) | 7,274,496 / 5,832,704 (-1,441,792) | 7,405,568 / 7,274,496 (-131,072) |
+| Chrome | 7,274,496 / 7,274,496 (0) | 7,405,568 / 7,274,496 (-131,072) | 7,405,568 / 7,274,496 (-131,072) | 7,274,496 / 7,471,104 (+196,608) | 7,471,104 / 7,143,424 (-327,680) |
+
+  * The largest 10-minute less 1-minute growth in Safari is +1,703,936 bytes (AAC, run 3), under the bound of 3,145,728.  The bound of 1 MiB would have failed runs 3 and 6 (+1,703,936 and +1,179,648).  Unlike step A, 6 saves came at the low level (5,636,096 to 6,160,384).  So the low level is still there; the bound holds over it.  With these runs, 150 Safari pairs give a largest difference of 1,900,544 bytes, and single growths from 5,505,024 to 7,602,176, the same as before.  The Chrome run's largest difference is 327,680 in absolute value.
+  * [x] 2026-11-11: `cargo run -p xtask -- check --tier push` (13 lines) and `cargo build -p xtask` passed (`m2/td97/check-push-2.log`).
 * [x] Step C, replaced (the heap's peak, at `af135fb`): 6 Safari runs in a row and one Chrome run passed.
   * [x] 2026-11-11, at `af135fb`: 6 runs of `e2e save --browser safari` in a row passed each check, with the lock read before each (`m2/td97/accept/safari-1.log` to `safari-6.log`).  None hung.  `e2e save --browser chrome` passed (`m2/td97/accept/chrome-1.log`).  The 12 Safari values of the new measure of each format, the heap's peak above its live bytes at the save's start, in bytes:
 
