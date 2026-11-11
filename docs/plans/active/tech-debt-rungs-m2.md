@@ -176,7 +176,7 @@ The orchestrator committed it in `808aa66`.  No work.
 
 * [x] 2026-11-11: step 1, `xtask setup`, in `808aa66` (the orchestrator).
 * [x] 2026-11-11: step 4, `web-test` runs each crate and lists the failed crates.  The new test `a_failure_before_the_last_crate_names_that_crate` first failed on its `assert_eq!` against a `summary` that kept only the last result: it gave `Ok` with no line of failed crates.
-* [x] 2026-11-11: the baseline at wasm-bindgen 0.2.129 in Chrome, at `34f7f6c`: each crate passed (Surprises).  The Safari baseline is owed.
+* [x] 2026-11-11: the baseline at wasm-bindgen 0.2.129 in Chrome, at `34f7f6c`: each crate passed (Surprises).  The Safari baseline is at 0.2.130, at `95f5351`: the known failures of TD-93 and TD-95, and one known flake (Surprises).
 * [x] 2026-11-11: step 2, wasm-bindgen 0.2.130.  Chrome gives the same results as the baseline (Surprises).  The Safari comparison is owed.  The step changes no behaviour of the repo's code, so it adds no test.
 * [x] 2026-11-11: step 3, Trunk 0.22.1.  The new test `trunk_s_lock_file_never_reaches_the_site` (`xtask/tests/publish.rs`) first failed on its first assert: `check_build` gave `Ok(())` for a build with `.trunk-lock`.  With the refusal and no removal, it failed on the assert "the lock file stays in the site tree".  It passes with both.
 * [ ] Step 5: TD-95.
@@ -187,10 +187,7 @@ The orchestrator committed it in `808aa66`.  No work.
 * [ ] Step 10: the macOS job (TD-92).
 * [ ] Review rounds.
 
-Safari runs owed (each waits until the screen of the Mac is unlocked):
-
-* The Safari baseline at wasm-bindgen 0.2.129: at `34f7f6c`, with wasm-bindgen-cli 0.2.129 from `xtask setup wasm-bindgen-cli`.
-* The Safari `web-test` of step 2 at wasm-bindgen 0.2.130, to compare with that baseline.
+Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises).  The Safari baseline at 0.2.130 replaces both owed runs.
 
 ## Surprises and discoveries
 
@@ -225,6 +222,18 @@ Safari runs owed (each waits until the screen of the Mac is unlocked):
 * 2026-11-11, step 8: with no wasm test in `engine`, a full Chrome `web-test` gave "web-test: engine: a test binary has no wasm test", passed the 4 other crates, and failed with "failed crates: engine" (`m2/step8-engine-no-wasm-test-full.log`).
 * 2026-11-11, step 8: the plan's rate pair, 384 kHz to 44.1 kHz, made `a_long_input_converts_with_a_32_bit_usize` take 43.6 s natively at opt-level 0.  Its cost is `2^32 / step` outputs times the taps, so the test takes 383,990 Hz to 8,379 Hz: gcd 19, 441 phases (`MAX_PHASES`), step 20,210, 512 taps.  9.74 million frames give 212,000 outputs.  It takes 2.8 s natively, and 2.3 s on wasm32 in Chrome 157 (`m2/step8-long-chrome.log`).  The engine crate run takes 14.9 s in Chrome.
 * 2026-11-11, step 8, the plant: `let planted = i * self.step as usize; std::hint::black_box(planted);` in the output loop of `Filter::apply`.  Natively the test passed.  In Chrome it failed: "panicked at engine/src/resample.rs:322:27: attempt to multiply with overflow" (`m2/step8-planted-chrome.log`).  The plant is not committed.
+* 2026-11-11, the Safari baseline at `95f5351` (after step 8), wasm-bindgen 0.2.130, Safari 27.2, with the screen unlocked (`m2/baseline-0.2.130-safari.log`).  The Safari baseline at 0.2.129 is missing: the screen was locked.  The M4 records at `69e63db` and `fc99e38` (TD-93, TD-95) serve as the old baseline.  Each failure below is one that the repo records already:
+
+  | Crate run | Test binary | Result | Failed tests |
+  | - | - | - | - |
+  | `app` | `--lib` | 197 passed (202 s) | none |
+  | `app` | `--test web` | 14 passed | none |
+  | `app` | `--test web_close` | 1 passed | none |
+  | `app` | `--test web_output` | 4 passed | none |
+  | `stem-worker` | `--lib` | 105 passed, 3 failed | `a_read_back_is_copied_into_wasm_memory_once` and `an_f16_variant_the_browser_rejects_keeps_f32_weights` (TD-93); `a_stored_file_removed_after_it_was_opened_is_a_read_error` (the known Safari flake, `references/local-browser-testing.md`) |
+  | `decode-worker` | `--lib` | 6 passed, 6 failed | the 6 tests of TD-95, the same names |
+  | `stem-protocol` | `--test web` | 31 passed | none |
+  | `engine` | `--lib` | 18 passed (13 s) | none |
 
 ## Decision log
 
