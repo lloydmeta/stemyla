@@ -191,6 +191,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-11: the milestone plan, `f18a690`, after 2 rounds of a `Plan` agent.
   * [x] 2026-11-11: the 10 steps: `808aa66` step 1, `34f7f6c` step 4, `5057fc4` step 2, `99b23eb` step 3, `cccfcfe` step 7 (TD-8), `95f5351` step 8 (TD-51 closed), `f6f1aa7` step 5 (TD-95 closed), `de7ffa3` step 6 (TD-93 narrowed), `707010d` step 9 (TD-96 and TD-97 new), `e7e11c5` step 10 (TD-92 narrowed).
   * [x] 2026-11-11: CI run 42952206488 on `e7e11c5` passed each job, the `macos` job included (46 minutes).
+  * [x] 2026-11-11: CI run 42991255256 on `c156c4a`, the code of intent review I1-3, passed each job, the `macos` job included.  Its Safari `web-test` passed 197, 14, 1, 4, 108, 13, 31 and 18 tests, with no failure.  The 4 audio-clock tests that the log names report `ok`.  The log shows no skip line: the runner prints the console of a test only when the test fails.  So this run shows that the new check of a suspended context does not fail on the runner.  It does not show which test skipped (review round 6, 6-1; TD-96).
   * [x] 2026-11-11: 5 review rounds, logged in `reviews/tech-debt-2026-11-11-m2.md`: 41 agents, 2,590,093 tokens, 61.4 wall minutes and 1 intervention.  The late rounds fixed one Decision log line (round 4, 4-1); round 5 found nothing.  Debt: TD-51 and TD-95 closed; TD-8, TD-92 and TD-93 narrowed; TD-96 and TD-97 new.
   * [ ] The intent review.
 * [ ] M3: rung 3.
@@ -230,6 +231,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-11, agent: M2's agent decisions are in the Decision log of `plans/completed/tech-debt-rungs-m2.md`.  Among them: the Safari timeouts came from the locked screen; step 2 keeps caret requirements (`SETTLED_CRATES`); step 10 adds the need `aac` to `STEMYLA_REQUIRE`; the `macos` job installs Trunk with `xtask setup`.
 * 2026-11-11, agent: the branch `tech-debt/2026-11-11` moved by fast-forward from `ff633a3` to `ee3728e`, so that M2 starts with TD-92 to TD-95 in the register.
 * 2026-11-11, agent: the intent review of M2, round 1, found 3 significant should-fix findings.  I1-1: the PR body now holds the draft wgpu issue, as TD-93 says.  I1-2: the CI result of the code head goes in Progress.  I1-3: the Safari skip of `an_output_left_behind_by_a_busy_page_is_replaced` goes to the team, with review round 6.  The nits I1-4 and I1-6 are fixed in the PR body and the triage.
+* 2026-11-11, agent: review round 6 (6-1) takes the CI run on `c156c4a` as the fix, with no count of skips that `xtask` prints.  Reason: the finding was a code head with no CI result, and the run passed.  A count is new behaviour, which a late round does not add.  TD-96 records that a CI log shows no skip line.
 
 ## Outcomes and retrospective
 
