@@ -18,6 +18,8 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
 * `plans/active/tech-debt-rungs.md`: the open entries of `tech-debt.md`, sorted by impact and effort, and closed in three PRs.
+* `plans/completed/tech-debt-rungs-m2.md`: M2 of `plans/active/tech-debt-rungs.md`, rung 2, done on 2026-11-11: the dev tools at their new pins, Safari in `web-test` and CI, TD-8 (the wasm GPU tests), the resampler on wasm32, the decode worker's tests in Safari, TD-92 and TD-93.
+* `plans/completed/tech-debt-rungs-m2-td97.md`: step 11 of M2 of `plans/active/tech-debt-rungs.md`, done on 2026-11-12: the page's memory check of `e2e save` in Safari, now a bound of 3 MiB from the measured spread.
 * `plans/completed/m4a.md`: done on 2026-11-11 in PR #43: the app opens M4A (AAC-LC and ALAC) and AIFF songs.  It saves a stem or the mix as an ALAC M4A, or an AAC M4A where the browser can encode it at 256 kbit/s.
 * `plans/completed/m4a-m4.md`: M4 of `plans/completed/m4a.md`, done on 2026-11-11: the Save menu offers an AAC M4A where the page's probe of an AAC encoder at 256 kbit/s passes.  The stem worker encodes the file through WebCodecs.
 * `plans/completed/m4a-m3.md`: M3 of `plans/completed/m4a.md`, done on 2026-11-10: the Save menu offers an ALAC M4A, which the stem worker encodes in blocks on both save paths.
@@ -81,6 +83,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0027-pr-body-and-attention-comments.md`: a PR body with a summary for people and a section for agents, and inline comments where a person must look (accepted).
 * `decisions/0028-m4a-with-alac-as-the-save-format.md`: the app saves 16-bit stereo ALAC M4A, written by the Pure crate `m4a` with a safe port of `alac-encoder` 0.3.0 (accepted, amended 2026-11-08 and 2026-11-10).
 * `decisions/0029-m4a-is-apache-2-only.md`: the crate `m4a` is Apache-2.0 only, since its ALAC encoder is a port of Apple's Apache-2.0 reference (accepted).
+* `decisions/0030-the-save-check-counts-the-heap.md`: a count of the page's Rust heap for the memory check of `e2e save` (rejected; the check keeps the memory's growth, with a bound of 3 MiB).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References

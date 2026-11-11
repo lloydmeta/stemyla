@@ -3,13 +3,20 @@
 //!
 //! Stable libtest has no run-time skip: a test that returns early reports
 //! `ok`, and `cargo test` hides its stderr.  So a test that has no GPU
-//! adapter, no adapter feature or no fixture calls [`skip`] before it
-//! returns.  [`VAR`] lists what the run claims to have
-//! (`STEMYLA_REQUIRE=gpu,timestamps,f16,fixtures`); a skip of a listed need
-//! panics instead.  An unknown word panics too, so a typo cannot turn the
+//! adapter, no adapter feature, no fixture or no AAC encoder calls
+//! [`skip`] before it returns.  [`VAR`] lists what the run claims to have
+//! (`STEMYLA_REQUIRE=gpu,timestamps,f16,fixtures,aac`); a skip of a listed
+//! need panics instead.  An unknown word panics too, so a typo cannot turn the
 //! check off.
+//!
+//! A native test reads the list from the value of [`VAR`] at run time.  A
+//! wasm test has no environment at run time, so it also reads the value of
+//! the build of this crate for wasm32.  Cargo builds this crate again when
+//! that value changes.  A native build ignores the value of the build, so
+//! the value of an earlier build cannot fail a native test.  stderr of a
+//! wasm test goes nowhere, so a wasm test logs [`skip_line`] on the console.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 
 /// The environment variable that lists the needs a run requires.
@@ -27,12 +34,20 @@ pub enum Need {
     F16,
     /// The PyTorch fixtures that `tools/roformer_export.py` writes.
     Fixtures,
+    /// A browser with an AAC encoder for WebCodecs (TD-92).
+    Aac,
 }
 
-const NEEDS: [Need; 4] = [Need::Gpu, Need::Timestamps, Need::F16, Need::Fixtures];
+const NEEDS: [Need; 5] = [
+    Need::Gpu,
+    Need::Timestamps,
+    Need::F16,
+    Need::Fixtures,
+    Need::Aac,
+];
 
 const ONLY_THE_WORDS: &str =
-    "Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.";
+    "Fix: use only gpu, timestamps, f16, fixtures and aac, separated by commas.";
 
 impl Need {
     /// The word for this need in [`VAR`].
@@ -42,6 +57,7 @@ impl Need {
             Need::Timestamps => "timestamps",
             Need::F16 => "f16",
             Need::Fixtures => "fixtures",
+            Need::Aac => "aac",
         }
     }
 
@@ -51,6 +67,9 @@ impl Need {
             Need::Timestamps => "run it on an adapter with timestamp-query",
             Need::F16 => "run it on an adapter with the downlevel flag SHADER_F16_IN_F32",
             Need::Fixtures => "write the fixtures with tools/roformer_export.py",
+            Need::Aac => {
+                "run it in a browser with an AAC encoder, such as Chrome or Safari on macOS"
+            }
         }
     }
 }
@@ -110,16 +129,50 @@ pub fn verdict(list: Option<&OsStr>, need: Need, why: &str) -> Result<String, St
     }
 }
 
-/// Reports that a test cannot run because it lacks `need`: prints the skip
-/// line, or panics when [`VAR`] requires `need`.  The caller then returns.
-/// The panic is in this body, not in a closure, so `#[track_caller]` names
-/// the caller's line.
+/// The list that a run claims: the words of [`VAR`] at build time
+/// (`built`) and at run time (`run`).  `None` when neither is set.
+pub fn claimed(built: Option<&str>, run: Option<&OsStr>) -> Option<OsString> {
+    match (built, run) {
+        (None, None) => None,
+        (Some(built), None) => Some(OsString::from(built)),
+        (None, Some(run)) => Some(run.to_os_string()),
+        (Some(built), Some(run)) => {
+            let mut both = OsString::from(built);
+            both.push(",");
+            both.push(run);
+            Some(both)
+        }
+    }
+}
+
+/// The value of [`VAR`] when this crate was built for wasm32, where a test
+/// has no environment at run time.
+#[cfg(target_arch = "wasm32")]
+const BUILT: Option<&str> = option_env!("STEMYLA_REQUIRE");
+
+/// A native test reads only the value of its run.
+#[cfg(not(target_arch = "wasm32"))]
+const BUILT: Option<&str> = None;
+
+/// The skip line of a test that cannot run because it lacks `need`, or a
+/// panic when the run requires `need`.  The caller prints or logs the
+/// line, then returns.  The panic is in this body, not in a closure, so
+/// `#[track_caller]` names the caller's line.
 #[track_caller]
-pub fn skip(need: Need, why: impl Display) {
-    match verdict(std::env::var_os(VAR).as_deref(), need, &why.to_string()) {
-        Ok(line) => eprintln!("{line}"),
+pub fn skip_line(need: Need, why: impl Display) -> String {
+    let list = claimed(BUILT, std::env::var_os(VAR).as_deref());
+    match verdict(list.as_deref(), need, &why.to_string()) {
+        Ok(line) => line,
         Err(message) => panic!("{message}"),
     }
+}
+
+/// Reports that a test cannot run because it lacks `need`: prints the skip
+/// line on stderr, or panics when the run requires `need`.  The caller
+/// then returns.
+#[track_caller]
+pub fn skip(need: Need, why: impl Display) {
+    eprintln!("{}", skip_line(need, why));
 }
 
 #[cfg(test)]
@@ -136,7 +189,7 @@ mod tests {
         ))
     }
 
-    const UNKNOWN_GPUS: &str = "VERIFY-1: STEMYLA_REQUIRE has the unknown word \"gpus\".  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.";
+    const UNKNOWN_GPUS: &str = "VERIFY-1: STEMYLA_REQUIRE has the unknown word \"gpus\".  Fix: use only gpu, timestamps, f16, fixtures and aac, separated by commas.";
 
     #[test]
     fn a_required_need_that_cannot_run_fails() {
@@ -151,6 +204,37 @@ mod tests {
         assert_eq!(
             verdict(list("fixtures"), Need::Fixtures, "x not found"),
             Err("VERIFY-1: STEMYLA_REQUIRE has fixtures, but this test cannot run: x not found.  Fix: write the fixtures with tools/roformer_export.py, or remove fixtures from STEMYLA_REQUIRE.".into())
+        );
+    }
+
+    #[test]
+    fn a_word_of_the_build_is_required_with_no_run_time_value() {
+        let built = claimed(Some("gpu"), None);
+        assert_eq!(
+            verdict(built.as_deref(), Need::Gpu, "no GPU adapter: none"),
+            Err("VERIFY-1: STEMYLA_REQUIRE has gpu, but this test cannot run: no GPU adapter: none.  Fix: run it where a GPU adapter opens, or remove gpu from STEMYLA_REQUIRE.".into())
+        );
+        assert_eq!(claimed(None, None), None);
+        assert_eq!(claimed(None, list("gpu")), Some(OsString::from("gpu")));
+    }
+
+    #[test]
+    fn the_words_of_the_build_and_of_the_run_are_both_required() {
+        let both = claimed(Some("fixtures"), list("gpu"));
+        assert_eq!(both, Some(OsString::from("fixtures,gpu")));
+        assert!(verdict(both.as_deref(), Need::Gpu, "none").is_err());
+        assert!(verdict(both.as_deref(), Need::Fixtures, "none").is_err());
+        assert_eq!(
+            verdict(both.as_deref(), Need::Timestamps, "none"),
+            skip_line("timestamps", "none")
+        );
+        assert_eq!(
+            verdict(
+                claimed(Some("gpus"), None).as_deref(),
+                Need::Fixtures,
+                "x not found"
+            ),
+            Err(UNKNOWN_GPUS.into())
         );
     }
 
@@ -196,7 +280,7 @@ mod tests {
         assert_eq!(parse("gpu"), Ok(vec![Need::Gpu]));
         assert_eq!(
             parse("GPU"),
-            Err("VERIFY-1: STEMYLA_REQUIRE has the unknown word \"GPU\".  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.".into())
+            Err("VERIFY-1: STEMYLA_REQUIRE has the unknown word \"GPU\".  Fix: use only gpu, timestamps, f16, fixtures and aac, separated by commas.".into())
         );
         assert!(parse("Fixtures").is_err());
     }
@@ -230,7 +314,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         assert_eq!(
             verdict(Some(OsStr::from_bytes(b"gpu\xff")), Need::Fixtures, "x not found"),
-            Err("VERIFY-1: STEMYLA_REQUIRE is not Unicode.  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.".into())
+            Err("VERIFY-1: STEMYLA_REQUIRE is not Unicode.  Fix: use only gpu, timestamps, f16, fixtures and aac, separated by commas.".into())
         );
     }
 
@@ -248,6 +332,19 @@ mod tests {
         assert_eq!(
             verdict(list("f16"), Need::Gpu, "no GPU adapter: none"),
             Err("VERIFY-1: STEMYLA_REQUIRE has f16, which needs gpu, but this test cannot run: no GPU adapter: none.  Fix: run it on an adapter with the downlevel flag SHADER_F16_IN_F32, or remove f16 from STEMYLA_REQUIRE.".into())
+        );
+    }
+
+    #[test]
+    fn aac_is_the_need_of_an_aac_encoder() {
+        assert_eq!(parse("gpu,aac"), Ok(vec![Need::Gpu, Need::Aac]));
+        assert_eq!(
+            verdict(list("aac"), Need::Aac, "this browser has no AAC encoder"),
+            Err("VERIFY-1: STEMYLA_REQUIRE has aac, but this test cannot run: this browser has no AAC encoder.  Fix: run it in a browser with an AAC encoder, such as Chrome or Safari on macOS, or remove aac from STEMYLA_REQUIRE.".into())
+        );
+        assert_eq!(
+            verdict(list("gpu"), Need::Aac, "this browser has no AAC encoder"),
+            skip_line("aac", "this browser has no AAC encoder")
         );
     }
 

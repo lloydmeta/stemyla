@@ -48,15 +48,15 @@
 //!
 //! Checks of D11 (a save that does not wait for the UI frame): for each
 //! format, a 10-minute save grows the page's WebAssembly memory by at most
-//! [`WASM_BOUND_BYTES`] more than a 1-minute save.  The 10-minute WAV save
-//! takes fewer animation frames than a quarter of its blocks, with the
-//! animation frames throttled to about 4 a second.  Each save's longest
+//! [`WASM_BOUND_BYTES`] (3 MiB) more than a 1-minute save.  The 10-minute
+//! WAV save takes fewer animation frames than a quarter of its blocks, with
+//! the animation frames throttled to about 4 a second.  Each save's longest
 //! slice, and its longest end of a read, which the page logs, are at most
-//! [`SLICE_LIMIT_MS`].  The last save saves the 10-minute mix as a WAV
-//! while the song plays, with animation frames of [`LONG_FRAME_MS`], as
-//! CI's paints in software.  It fails on an underrun, on frames of another
-//! time, and when the save takes more than [`PLAYING_SAVE_MS`].  The main
-//! thread's long tasks are logged, not checked.
+//! [`SLICE_LIMIT_MS`].  The last save saves the 10-minute mix as a WAV while
+//! the song plays, with animation frames of [`LONG_FRAME_MS`], as CI's
+//! paints in software.  It fails on an underrun, on frames of another time,
+//! and when the save takes more than [`PLAYING_SAVE_MS`].  The main thread's
+//! long tasks are logged, not checked.
 //!
 //! At the end, `saves/` holds only the offered files.  It prints every
 //! measure, and runs every check also after one failed, so a run of an
@@ -101,8 +101,20 @@ const ONE_MIB: f64 = 1_048_576.0;
 /// D11: how much more a 10-minute save may grow the page's WebAssembly
 /// memory than a 1-minute save, in bytes.  The save's reader holds 3 spans
 /// of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the song's
-/// length.  So the two saves need the same memory.
-pub(super) const WASM_BOUND_BYTES: f64 = ONE_MIB;
+/// length.  So the two saves need the same memory.  But in Safari the
+/// growth has two levels, whatever the length (TD-97).  Step A of
+/// `plans/completed/tech-debt-rungs-m2-td97.md` saw the same requests in each
+/// measured save, all at the high level.  So the allocator's layout is the
+/// likely cause; the bound does not depend on the cause.  The largest pair
+/// seen is +1,900,544 bytes (MP3 of CI run 43008561411).  The extremes of
+/// single growths seen, 5,505,024 (step 9) and 7,602,176, are 2,097,152
+/// bytes apart; 3 MiB is 1 MiB above that.  A minute of 16-bit stereo at
+/// 44.1 kHz is 10,584,000 bytes.  At one level, the 9 minutes more fail
+/// above 3,145,728 / 9 = 349,525 bytes a minute: a save that keeps about
+/// 1/30 of the song's 16-bit audio.  In the worst layout of those extremes
+/// (1-minute high, 10-minute low), they fail above (3,145,728 + 2,097,152)
+/// / 9 = 582,542 bytes a minute: about 1/18 of it.
+pub(super) const WASM_BOUND_BYTES: f64 = 3.0 * ONE_MIB;
 /// The limit of the `e2e save` step in CI's `browser-tests` job
 /// (`timeout-minutes`), in seconds.  It is the longest that every wait of a
 /// run can take (finding 3-1 of review round 3 of M8).  So a run that
@@ -1759,6 +1771,68 @@ mod tests {
         assert_eq!(failing(&growing).len(), 1);
     }
 
+    /// TD-97: in Safari, the growth of a save has two levels, about 1.9 MB
+    /// apart, whatever the song's length.  The pairs of 1 and 10 minutes
+    /// that failed the bound of 1 MiB pass: MP3 of CI run 43008561411, and
+    /// AAC of step 9 of `plans/completed/tech-debt-rungs-m2.md`.  So does
+    /// the pair of the extremes of single growths: 5,505,024 (the ALAC save
+    /// of 10 minutes of step 9) and 7,602,176.  The Decision log of
+    /// `plans/completed/tech-debt-rungs-m2-td97.md` lists their logs.  One
+    /// byte more than the bound above the 1-minute save fails.
+    #[test]
+    fn the_two_level_pairs_of_safari_pass_and_one_byte_more_fails() {
+        let pairs = [
+            (5_636_096.0, 7_536_640.0),
+            (5_767_168.0, 7_274_496.0),
+            (5_505_024.0, 7_602_176.0),
+        ];
+        for (short, long) in pairs {
+            let mut saves = good();
+            saves[6].wasm = Some(short);
+            saves[7].wasm = Some(long);
+            assert!(
+                failing(&saves).is_empty(),
+                "{short} and {long}: {:?}",
+                failing(&saves)
+            );
+            saves[7].wasm = Some(short + WASM_BOUND_BYTES + 1.0);
+            let failed = failing(&saves);
+            assert_eq!(failed.len(), 1, "{failed:?}");
+            assert!(
+                failed[0].starts_with("alac: the 10-minute save grows"),
+                "{failed:?}"
+            );
+        }
+    }
+
+    /// MEM-4, with literal values: a 10-minute save that keeps a part of
+    /// the song's 16-bit audio fails.  The first pair (1/30 kept at one
+    /// level) pins the bound from above: a bound wide enough to pass it
+    /// fails this test.  The second pair (1/18 kept in the worst layout of
+    /// the extremes) documents that case.  It catches no bound that the
+    /// first pair passes.  A minute of 16-bit stereo at 44.1 kHz is
+    /// 10,584,000 bytes.  At one level (5,636,096 for both lengths), keeping
+    /// 1/30 of the 9 minutes more adds 3,175,200 bytes.  The worst layout of
+    /// the extremes of single growths seen has the 1-minute save high
+    /// (7,602,176) and the 10-minute save low (5,505,024).  There, keeping
+    /// 1/18 adds 5,292,000 bytes.  So the 10-minute save grows by 3,194,848
+    /// bytes more.
+    #[test]
+    fn a_save_that_keeps_a_part_of_the_song_fails() {
+        let pairs = [(5_636_096.0, 8_811_296.0), (7_602_176.0, 10_797_024.0)];
+        for (short, long) in pairs {
+            let mut saves = good();
+            saves[6].wasm = Some(short);
+            saves[7].wasm = Some(long);
+            let failed = failing(&saves);
+            assert_eq!(failed.len(), 1, "{short} and {long}: {failed:?}");
+            assert!(
+                failed[0].starts_with("alac: the 10-minute save grows"),
+                "{failed:?}"
+            );
+        }
+    }
+
     fn playing(underruns: &[u64], line_after_offer: bool) -> Playing {
         let line = |u| {
             playback_line(&format!("playback: lanes from storage 3 of 3, read-ahead 6.0 MiB, underruns {u} (callbacks), missed lane frames 0, held 0 frames, failed lanes 0, lanes read 3, reads 9, read p50 1.0 ms, p99 2.0 ms")).expect("a line")
@@ -2446,22 +2520,215 @@ mod tests {
         );
     }
 
-    /// Finding 3-1 of review round 3 of M8: CI gives the `e2e save` step the
-    /// limit that the waits fit in.
+    /// The `timeout-minutes` of each `e2e save` step of a workflow, in
+    /// order, or `None` for a step that has none.
+    fn save_step_limits(ci: &str) -> Vec<Option<u64>> {
+        ci.split("e2e save --browser ")
+            .skip(1)
+            .map(|step| {
+                step.lines()
+                    .skip(1)
+                    .take_while(|l| !l.trim_start().starts_with("- "))
+                    .find_map(|l| l.trim().strip_prefix("timeout-minutes:"))
+                    .and_then(|m| m.trim().parse().ok())
+            })
+            .collect()
+    }
+
+    /// Finding 3-1 of review round 3 of M8: CI gives each `e2e save` step
+    /// the limit that the waits fit in.  The Linux job has one, and the
+    /// macOS job one for Safari and one for Chrome (TD-92).
     #[test]
     fn the_ci_step_limit_is_the_waits_limit() {
-        let ci = include_str!("../../../.github/workflows/ci.yml");
-        let step = ci
-            .split("e2e save --browser chrome")
-            .nth(1)
-            .expect("the e2e save step");
-        let minutes: u64 = step
-            .lines()
-            .take_while(|l| !l.trim_start().starts_with("- "))
-            .find_map(|l| l.trim().strip_prefix("timeout-minutes:"))
-            .and_then(|m| m.trim().parse().ok())
-            .expect("the step's timeout-minutes");
-        assert_eq!(minutes * 60, STEP_LIMIT_S);
+        let limits = save_step_limits(include_str!("../../../.github/workflows/ci.yml"));
+        assert_eq!(limits.len(), 3, "{limits:?}");
+        for limit in limits {
+            assert_eq!(limit.map(|m| m * 60), Some(STEP_LIMIT_S));
+        }
+    }
+
+    #[test]
+    fn a_save_step_with_no_limit_is_found() {
+        let ci = "      - run: cargo run --locked -p xtask -- e2e save --browser chrome\n\
+                  \x20       timeout-minutes: 60\n\
+                  \x20     - run: cargo run --locked -p xtask -- e2e save --browser safari\n\
+                  \x20     - run: cargo run --locked -p xtask -- e2e flac --browser safari\n\
+                  \x20       timeout-minutes: 60\n";
+        assert_eq!(save_step_limits(ci), [Some(60), None]);
+    }
+
+    /// The time, in minutes, that the limit of a job keeps for its steps
+    /// other than `e2e save`, by job key.  Each time is more than the
+    /// longest measured run of those steps.  In `browser-tests`, they took
+    /// 10.5, 15.3 and 19.7 minutes (runs 42777211457, 40894815433 and
+    /// 42952206488).  In `macos`, they took 37.0 minutes in run
+    /// 42952206488, with no cache.
+    const OTHER_STEPS_MINUTES: [(&str, u64); 2] = [("browser-tests", 20), ("macos", 40)];
+
+    /// A job of a workflow with `e2e save` steps: its key, its
+    /// `timeout-minutes`, and the limits of its save steps.
+    #[derive(Debug, PartialEq, Eq)]
+    struct SaveJob {
+        key: String,
+        limit: Option<u64>,
+        steps: Vec<Option<u64>>,
+    }
+
+    /// Each job of the workflow `ci` that has an `e2e save` step, in order.
+    fn save_jobs(ci: &str) -> Vec<SaveJob> {
+        let Some((_, jobs)) = ci.split_once("\njobs:\n") else {
+            return Vec::new();
+        };
+        let mut parts: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in jobs.lines() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            let key = line
+                .strip_prefix("  ")
+                .filter(|rest| !rest.starts_with(' '))
+                .and_then(|rest| rest.strip_suffix(':'));
+            match (key, parts.last_mut()) {
+                (Some(key), _) => parts.push((key, Vec::new())),
+                (None, Some((_, lines))) => lines.push(line),
+                (None, None) => {}
+            }
+        }
+        parts
+            .into_iter()
+            .map(|(key, lines)| SaveJob {
+                key: key.to_string(),
+                limit: lines
+                    .iter()
+                    .find_map(|l| l.strip_prefix("    timeout-minutes:"))
+                    .and_then(|m| m.trim().parse().ok()),
+                steps: save_step_limits(&lines.join("\n")),
+            })
+            .filter(|job| !job.steps.is_empty())
+            .collect()
+    }
+
+    /// Why the limit of `job` is too short, or `None`.  The job limit
+    /// must hold each save step at its limit, and the time of the job in
+    /// [`OTHER_STEPS_MINUTES`] for the other steps.
+    fn job_limit_problem(job: &SaveJob) -> Option<String> {
+        let Some(&(_, others)) = OTHER_STEPS_MINUTES.iter().find(|(key, _)| *key == job.key) else {
+            return Some(format!(
+                "job {}: OTHER_STEPS_MINUTES gives no time for its other steps",
+                job.key
+            ));
+        };
+        let steps: Option<u64> = job.steps.iter().copied().sum();
+        match (job.limit, steps) {
+            (Some(limit), Some(steps)) if limit >= steps + others => None,
+            _ => Some(format!(
+                "job {}: timeout-minutes {:?} does not hold the save steps {:?} and {others} minutes for the other steps",
+                job.key, job.limit, job.steps
+            )),
+        }
+    }
+
+    /// Review round 2 of M2 (2-5): each save step may take its whole
+    /// limit, so the job limit must hold all of them.
+    #[test]
+    fn the_ci_job_limit_holds_its_save_steps() {
+        let jobs = save_jobs(include_str!("../../../.github/workflows/ci.yml"));
+        let keys: Vec<&str> = jobs.iter().map(|job| job.key.as_str()).collect();
+        assert_eq!(keys, ["browser-tests", "macos"]);
+        for job in &jobs {
+            assert_eq!(job_limit_problem(job), None);
+        }
+    }
+
+    /// A workflow with one job `key` of `limit` minutes, and a save step of
+    /// `step` minutes for each of `steps`.  A comment line that ends with
+    /// `:` is in the job.
+    fn one_job(key: &str, limit: &str, steps: &[u64]) -> String {
+        let saves: String = steps
+            .iter()
+            .map(|minutes| {
+                format!(
+                    "      - run: cargo run --locked -p xtask -- e2e save --browser chrome\n\
+                     \x20       timeout-minutes: {minutes}\n"
+                )
+            })
+            .collect();
+        format!(
+            "name: CI\n\
+             jobs:\n\
+             \x20 lint:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   timeout-minutes: 5\n\
+             \x20   steps:\n\
+             \x20     - run: cargo fmt --all --check\n\
+             \x20 # lloyd's browser job:\n\
+             \x20 {key}:\n\
+             \x20   runs-on: macos-latest\n\
+             \x20 # the limit of beachape:\n\
+             {limit}\
+             \x20   steps:\n\
+             \x20     - run: cargo run --locked -p xtask -- e2e smoke --browser chrome\n\
+             {saves}"
+        )
+    }
+
+    fn the_job(key: &str, limit: &str, steps: &[u64]) -> SaveJob {
+        let jobs = save_jobs(&one_job(key, limit, steps));
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        jobs.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_job_reads_its_own_limit_and_its_save_steps() {
+        assert_eq!(
+            the_job("browser", "    timeout-minutes: 120\n", &[60, 60]),
+            SaveJob {
+                key: "browser".to_string(),
+                limit: Some(120),
+                steps: vec![Some(60), Some(60)],
+            }
+        );
+        assert_eq!(the_job("browser", "", &[60]).limit, None);
+    }
+
+    /// Review round 3 of M2 (3-4): each job keeps its own time for its
+    /// other steps.
+    #[test]
+    fn a_job_limit_that_the_save_steps_can_use_up_fails() {
+        let limit = |minutes: u64| format!("    timeout-minutes: {minutes}\n");
+        let problem = job_limit_problem(&the_job("macos", &limit(135), &[60, 60]));
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.starts_with("job macos: ")),
+            "{problem:?}"
+        );
+        assert!(job_limit_problem(&the_job("macos", &limit(159), &[60, 60])).is_some());
+        assert_eq!(
+            job_limit_problem(&the_job("macos", &limit(160), &[60, 60])),
+            None
+        );
+        assert!(job_limit_problem(&the_job("browser-tests", &limit(79), &[60])).is_some());
+        assert_eq!(
+            job_limit_problem(&the_job("browser-tests", &limit(80), &[60])),
+            None
+        );
+        assert!(job_limit_problem(&the_job("browser-tests", "", &[60])).is_some());
+        let no_step_limit = SaveJob {
+            key: "macos".to_string(),
+            limit: Some(180),
+            steps: vec![Some(60), None],
+        };
+        assert!(job_limit_problem(&no_step_limit).is_some());
+    }
+
+    #[test]
+    fn a_save_job_with_no_time_for_its_other_steps_fails() {
+        let problem = job_limit_problem(&the_job("lloyd", "    timeout-minutes: 500\n", &[60]));
+        assert_eq!(
+            problem.as_deref(),
+            Some("job lloyd: OTHER_STEPS_MINUTES gives no time for its other steps")
+        );
     }
 
     /// The CI run of 2026-10-28: a save that goes on is not stopped by a

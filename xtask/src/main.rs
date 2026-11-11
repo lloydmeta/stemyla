@@ -2,14 +2,14 @@ use anyhow::{Result, bail};
 use std::path::PathBuf;
 use xtask::{
     attention, bench, check, clean, docs, e2e, pr_body, publish, review, roformer_cli, separate,
-    serve, synth, web_test,
+    serve, setup, synth, web_test,
 };
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let Some(cmd) = args.first() else {
         bail!(
-            "usage: xtask <serve|web-test|e2e|docs-check|check|review|clean|pr-body|attention|publish|roformer-convert|roformer-selftest|roformer|gen-song|stretch-bench|hpss|sdr|classic|perf> [args]"
+            "usage: xtask <setup|serve|web-test|e2e|docs-check|check|review|clean|pr-body|attention|publish|roformer-convert|roformer-selftest|roformer|gen-song|stretch-bench|hpss|sdr|classic|perf> [args]"
         );
     };
     match cmd.as_str() {
@@ -39,6 +39,7 @@ fn main() -> Result<()> {
         "roformer" => roformer_cli::run(&args[1..])?,
         "roformer-convert" => roformer_cli::convert(&args[1..])?,
         "roformer-selftest" => roformer_cli::selftest_fixtures(&args[1..])?,
+        "setup" => setup::run(&args[1..])?,
         "serve" => serve::run(&args[1..])?,
         "web-test" => web_test::run(&args[1..])?,
         "e2e" => e2e::run(&args[1..])?,

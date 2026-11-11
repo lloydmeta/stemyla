@@ -97,7 +97,7 @@ Start a new `general-purpose` subagent with the brief of "The brief of a team le
 
 ### 2. The milestone plan and the work
 
-* The team leader writes the milestone plan and its index line.  A new `Plan` agent reviews it, at most 2 rounds.  The team leader fixes what it finds, and commits.
+* The team leader writes the milestone plan and its index line.  A new `Plan` agent reviews it, at most 2 rounds.  The reviewer also checks proportion (`docs/plans/PLANS.md`): a finding that rules out a simpler fix gives its proof.  The team leader fixes what it finds, and commits.
 * The team leader starts the implementer.  Each new test fails first, on an assert.
 * Before the commit of a step that needs a change of `CLAUDE.md` or `.claude/rules/**`, the team leader gives a step checkpoint ("Who edits what").  Then it waits.
 * Before round 1, the team leader gives a checkpoint: the diffs of `.claude/**` and `CLAUDE.md` that no step checkpoint carried, and the text for the plan.  Then it waits.
@@ -200,7 +200,7 @@ Read first: CLAUDE.md; the plan's Purpose, the <M<n>> section, "How the work run
 Decisions so far: <the maintainer's answers and the agent decisions that this milestone needs>.
 
 Your job:
-1. Write docs/plans/active/<plan>-m<n>.md by PLANS.md, and its line in docs/README.md.  Have a new Plan agent review it, at most 2 rounds.  Commit, signed.
+1. Write docs/plans/active/<plan>-m<n>.md by PLANS.md, and its line in docs/README.md.  Have a new Plan agent review it, at most 2 rounds.  The reviewer also checks proportion (docs/plans/PLANS.md).  Commit, signed.
 2. Start an implementer with that plan's path.  Each new test fails first, on an assert.
 3. Give the orchestrator each change of .claude/**, CLAUDE.md or the plan as a file or a unified diff in <scratchpad>/m<n>/.  `git apply --check` must pass on HEAD.  A change of CLAUDE.md or .claude/rules/** that a step or a review-round fix needs: give a step checkpoint before that commit, and wait until the orchestrator applies it.  Then that commit adds it by name.
 4. Give a checkpoint before review round 1, with each other diff.  Then wait.

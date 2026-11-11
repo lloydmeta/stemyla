@@ -5,9 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::publish::{
-    CopiedBuild, KEPT_BUILDS, Options, Prepared, build_id, check_build, check_build_id, check_id,
-    check_kept_builds, commit_dir, deploy, kept_ids, parse_versions, prepare_site, remote_head,
-    skip_reason,
+    CopiedBuild, KEPT_BUILDS, Options, Prepared, TRUNK_LOCK, build_id, check_build, check_build_id,
+    check_id, check_kept_builds, commit_dir, deploy, finish_build, kept_ids, main_with,
+    parse_versions, prepare_site, publish, refuse_dirty, remote_head, remove_trunk_lock, run_trunk,
+    skip_reason, trunk_command,
 };
 
 /// A committer identity, and no user or system git config (which may sign
@@ -100,7 +101,12 @@ fn versioned_site(root: &Path, id: &str, version: &str) -> PathBuf {
 fn versioned_site_for(root: &Path, public_url: &str, id: &str, version: &str) -> PathBuf {
     let site = root.join(format!("site-{id}-{version}"));
     let _ = std::fs::remove_dir_all(&site);
-    let build = site.join("v").join(id);
+    write_build(&site.join("v").join(id), public_url, id, version);
+    site
+}
+
+/// One Trunk build in `build`, built for `<public_url>v/<id>/`.
+fn write_build(build: &Path, public_url: &str, id: &str, version: &str) {
     std::fs::create_dir_all(build.join("snippets/x")).unwrap();
     std::fs::write(
         build.join("index.html"),
@@ -122,7 +128,6 @@ fn versioned_site_for(root: &Path, public_url: &str, id: &str, version: &str) ->
         std::fs::write(build.join(f), format!("{id} {version}")).unwrap();
     }
     std::fs::write(build.join("snippets/x/inline0.js"), version).unwrap();
-    site
 }
 
 fn ls(r: &Path, rev: &str, path: &str) -> Vec<String> {
@@ -836,6 +841,347 @@ fn checks_the_build() {
         ("/pages/", "up", true)
     );
     assert!(Options::parse(&["--bogus".into()]).is_err());
+}
+
+/// Review round 2 of M2 (2-4): a parse error stops the publish before its
+/// work.  The work here is a fake, so no test reaches a real publish
+/// (GIT-1).
+#[test]
+fn a_bad_option_stops_the_publish_before_its_work() {
+    let refused = main_with(&["--bogus".into()], |_| panic!("the publish ran"));
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|err| err.to_string().starts_with("unknown option --bogus")),
+        "{refused:?}"
+    );
+}
+
+#[test]
+fn the_work_gets_the_parsed_options_and_its_result_goes_back() {
+    let mut seen = None;
+    let failed = main_with(
+        &["--no-push".into(), "--remote".into(), "acme".into()],
+        |o| {
+            seen = Some((o.push, o.remote));
+            anyhow::bail!("lloyd stopped it")
+        },
+    );
+    assert_eq!(seen, Some((false, "acme".to_string())));
+    assert_eq!(
+        failed.map_err(|err| err.to_string()),
+        Err("lloyd stopped it".to_string())
+    );
+    assert!(
+        main_with(&[], |o| {
+            assert_eq!(o.public_url, "/stemyla/");
+            Ok(())
+        })
+        .is_ok()
+    );
+}
+
+/// Trunk 0.22 keeps its lock file in the dist folder, which is the site
+/// tree.  The build check refuses it, and the publish removes it first.
+#[test]
+fn trunk_s_lock_file_never_reaches_the_site() {
+    let root = scratch("trunk-lock");
+    let id = "aaaaaaaaaaaa";
+    let build = versioned_site(&root, id, "v1").join("v").join(id);
+    let url = format!("/stemyla/v/{id}/");
+    let lock = build.join(TRUNK_LOCK);
+    std::fs::write(&lock, "").unwrap();
+
+    let refused = check_build(&build, &url);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains(".trunk-lock")),
+        "{refused:?}"
+    );
+
+    let removed = remove_trunk_lock(&build);
+    assert!(removed.is_ok(), "{removed:?}");
+    assert!(!lock.exists(), "the lock file stays in the site tree");
+    let checked = check_build(&build, &url);
+    assert!(checked.is_ok(), "{checked:?}");
+
+    let again = remove_trunk_lock(&build);
+    assert!(again.is_ok(), "a build with no lock file: {again:?}");
+
+    std::fs::create_dir(&lock).unwrap();
+    let stuck = remove_trunk_lock(&build);
+    assert!(
+        stuck
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("removing")),
+        "a lock that cannot be removed: {stuck:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review round 3 of M2 (3-3): `publish` gives its build to
+/// `finish_build`, which removes the lock file before the checks.
+#[test]
+fn a_finished_build_has_no_lock_file() {
+    let root = scratch("finish-build");
+    let id = "aaaaaaaaaaaa";
+    let build = versioned_site(&root, id, "v1").join("v").join(id);
+    let url = format!("/stemyla/v/{id}/");
+    let lock = build.join(TRUNK_LOCK);
+    std::fs::write(&lock, "").unwrap();
+
+    let finished = finish_build(&build, &url, id);
+    assert!(finished.is_ok(), "{finished:?}");
+    assert!(!lock.exists(), "the lock file stays in the site tree");
+
+    let other_id = finish_build(&build, &url, "bbbbbbbbbbbb");
+    assert!(
+        other_id
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("does not name its build")),
+        "a build of another id: {other_id:?}"
+    );
+
+    std::fs::create_dir(&lock).unwrap();
+    let stuck = finish_build(&build, &url, id);
+    assert!(
+        stuck
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("removing")),
+        "a lock that cannot be removed: {stuck:?}"
+    );
+    std::fs::remove_dir(&lock).unwrap();
+
+    std::fs::remove_file(build.join("app.js")).unwrap();
+    let missing = finish_build(&build, &url, id);
+    assert!(
+        missing
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("missing")),
+        "a build with no app.js: {missing:?}"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// Review round 3 of M2 (3-3): a site matches a commit, unless the person
+/// gives `--allow-dirty`.
+#[test]
+fn uncommitted_changes_stop_a_publish_unless_allowed() {
+    let dirty = " M lloyd.txt";
+    let refused = refuse_dirty(dirty, /* allow_dirty= */ false);
+    assert!(
+        refused.as_ref().is_err_and(|err| {
+            let text = err.to_string();
+            text.starts_with("uncommitted changes;") && text.ends_with(dirty)
+        }),
+        "{refused:?}"
+    );
+    let allowed = refuse_dirty(dirty, /* allow_dirty= */ true);
+    assert!(allowed.is_ok(), "{allowed:?}");
+    let clean = refuse_dirty("", /* allow_dirty= */ false);
+    assert!(clean.is_ok(), "{clean:?}");
+}
+
+/// A repository with one commit on `main` and no change, with a local bare
+/// remote that holds `main`.  The repository has no other remote.
+fn clean_repo_and_remote(root: &Path) -> (PathBuf, PathBuf) {
+    identity();
+    let remote = root.join("remote.git");
+    std::fs::create_dir_all(&remote).unwrap();
+    git(&remote, &["init", "-q", "--bare"]);
+    let r = root.join("repo");
+    std::fs::create_dir_all(&r).unwrap();
+    git(&r, &["init", "-q", "-b", "main"]);
+    std::fs::write(r.join("README.md"), "lloyd\n").unwrap();
+    git(&r, &["add", "."]);
+    git(&r, &["commit", "-q", "-m", "source"]);
+    git(&r, &["push", "-q", remote.to_str().unwrap(), "main"]);
+    (r, remote)
+}
+
+/// Options that push to the local bare `remote`.
+fn to_local_remote(remote: &Path) -> Options {
+    Options {
+        public_url: "/stemyla/".into(),
+        remote: remote.to_str().unwrap().into(),
+        branch: "gh-pages".into(),
+        push: true,
+        allow_dirty: false,
+        skip_if_behind: None,
+    }
+}
+
+/// A fake Trunk: it writes a build, with Trunk's lock file, into the
+/// folder of `--dist`, for the id of `STEMYLA_BUILD_ID`.
+fn fake_trunk(trunk: Command) -> anyhow::Result<()> {
+    let args: Vec<_> = trunk.get_args().map(|a| a.to_owned()).collect();
+    let at = args.iter().position(|a| a == "--dist").unwrap();
+    let dist = PathBuf::from(&args[at + 1]);
+    let id = trunk
+        .get_envs()
+        .find(|(k, _)| *k == "STEMYLA_BUILD_ID")
+        .and_then(|(_, v)| v)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    write_build(&dist, "/stemyla/", &id, "beachape");
+    std::fs::write(dist.join(TRUNK_LOCK), "").unwrap();
+    Ok(())
+}
+
+/// A Trunk that a test must not reach.
+fn no_trunk(_: Command) -> anyhow::Result<()> {
+    panic!("trunk ran")
+}
+
+/// Review round 3 of M2 (3-3): the whole publish, with a fake Trunk, to a
+/// local bare remote.  The lock file and an old site tree never reach the
+/// branch.
+#[test]
+fn publish_builds_finishes_commits_and_pushes() {
+    let root = scratch("publish-all");
+    let (r, remote) = clean_repo_and_remote(&root);
+    let old = r.join("target/pages/old.txt");
+    std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+    std::fs::write(&old, "acme").unwrap();
+    let id = git(&r, &["rev-parse", "HEAD"])[..12].to_string();
+
+    let published = publish(to_local_remote(&remote), &r, fake_trunk);
+    assert!(published.is_ok(), "{published:?}");
+    assert_eq!(git(&remote, &["show", "gh-pages:v/VERSIONS"]), id);
+    let files = ls(&remote, "gh-pages", &format!("v/{id}/"));
+    assert!(
+        files.contains(&format!("v/{id}/app.js")),
+        "the build is on the branch: {files:?}"
+    );
+    assert!(
+        !files.contains(&format!("v/{id}/{TRUNK_LOCK}")),
+        "the lock file reached the branch: {files:?}"
+    );
+    assert_eq!(ls(&remote, "gh-pages", "old.txt"), Vec::<String>::new());
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn publish_refuses_uncommitted_changes_before_the_build() {
+    let root = scratch("publish-dirty");
+    let (r, remote) = clean_repo_and_remote(&root);
+    std::fs::write(r.join("README.md"), "beachape\n").unwrap();
+
+    let refused = publish(to_local_remote(&remote), &r, no_trunk);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|err| err.to_string().starts_with("uncommitted changes;")),
+        "{refused:?}"
+    );
+
+    let allowed = Options {
+        allow_dirty: true,
+        ..to_local_remote(&remote)
+    };
+    let published = publish(allowed, &r, fake_trunk);
+    assert!(published.is_ok(), "{published:?}");
+    let versions = git(&remote, &["show", "gh-pages:v/VERSIONS"]);
+    assert!(versions.contains("-dirty-"), "{versions}");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn publish_skips_a_commit_that_is_not_on_the_source_branch() {
+    let root = scratch("publish-behind");
+    let (r, remote) = clean_repo_and_remote(&root);
+    git(&r, &["commit", "-q", "--allow-empty", "-m", "not pushed"]);
+    let behind = Options {
+        skip_if_behind: Some("main".into()),
+        ..to_local_remote(&remote)
+    };
+
+    let skipped = publish(behind, &r, no_trunk);
+    assert!(skipped.is_ok(), "{skipped:?}");
+    assert_eq!(
+        git(&remote, &["branch", "--list", "gh-pages"]),
+        "",
+        "nothing is published"
+    );
+
+    git(&r, &["push", "-q", remote.to_str().unwrap(), "main"]);
+    let tip = Options {
+        skip_if_behind: Some("main".into()),
+        ..to_local_remote(&remote)
+    };
+    let published = publish(tip, &r, fake_trunk);
+    assert!(published.is_ok(), "{published:?}");
+    let id = git(&r, &["rev-parse", "HEAD"])[..12].to_string();
+    assert_eq!(git(&remote, &["show", "gh-pages:v/VERSIONS"]), id);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_failed_build_publishes_nothing() {
+    let root = scratch("publish-failed");
+    let (r, remote) = clean_repo_and_remote(&root);
+    let failed = publish(to_local_remote(&remote), &r, |_| {
+        anyhow::bail!("lloyd's trunk failed")
+    });
+    assert!(
+        failed
+            .as_ref()
+            .is_err_and(|err| err.to_string() == "lloyd's trunk failed"),
+        "{failed:?}"
+    );
+    assert_eq!(git(&remote, &["branch", "--list", "gh-pages"]), "");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_trunk_command_builds_the_app_into_the_build_folder() {
+    let repo = Path::new("/lloyd/stemyla");
+    let dist = Path::new("/lloyd/stemyla/target/pages/v/aaaaaaaaaaaa");
+    let trunk = trunk_command(repo, "/stemyla/v/aaaaaaaaaaaa/", dist, "aaaaaaaaaaaa");
+    assert_eq!(trunk.get_program(), "trunk");
+    let args: Vec<_> = trunk.get_args().collect();
+    assert_eq!(
+        args,
+        [
+            "build",
+            "--release",
+            "--public-url",
+            "/stemyla/v/aaaaaaaaaaaa/",
+            "--dist",
+            dist.to_str().unwrap()
+        ]
+    );
+    assert_eq!(trunk.get_current_dir(), Some(repo.join("app").as_path()));
+    let envs: Vec<_> = trunk.get_envs().collect();
+    assert_eq!(
+        envs,
+        [(
+            std::ffi::OsStr::new("STEMYLA_BUILD_ID"),
+            Some(std::ffi::OsStr::new("aaaaaaaaaaaa"))
+        )]
+    );
+}
+
+#[test]
+fn a_trunk_run_fails_when_its_command_fails() {
+    assert!(run_trunk(Command::new("true")).is_ok());
+    let failed = run_trunk(Command::new("false"));
+    assert!(
+        failed
+            .as_ref()
+            .is_err_and(|err| err.to_string().starts_with("trunk build failed")),
+        "{failed:?}"
+    );
+    let missing = run_trunk(Command::new("/lloyd/no-such-trunk"));
+    assert!(
+        missing
+            .as_ref()
+            .is_err_and(|err| err.to_string().starts_with("could not run trunk")),
+        "{missing:?}"
+    );
 }
 
 /// An unreachable remote fails with a hint, and `--remote .` publishes

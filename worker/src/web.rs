@@ -152,7 +152,11 @@ export async function download_to_opfs(url, name, progress, follow) {
     idle = setTimeout(() => ctl.abort(new Error("no data from the server for 60 s")), 60000);
   };
   arm();
+  // Safari 27 rejects an aborted fetch and its body with its own
+  // "AbortError: Fetch is aborted", not the abort reason (WebKit bug
+  // 246069).  So give the reason, as Chrome does.
   try { return await download_with(url, name, progress, ctl.signal, arm, follow); }
+  catch (e) { throw ctl.signal.aborted ? ctl.signal.reason : e; }
   finally { clearTimeout(idle); }
 }
 async function download_with(url, name, progress, signal, arm, follow) {

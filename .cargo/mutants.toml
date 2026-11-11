@@ -35,3 +35,11 @@ exclude_globs = [
 # `mapped_floats` in roformer-gpu/src/lib.rs.  The validator decides their
 # wasm32 mutants.  A wasm32 block inside a shared function stays in too
 # (TD-33).
+#
+# `publish::main` in xtask/src/publish.rs has the attribute too.  It only
+# gives the real publish to `main_with`, which the tests call with a fake.
+# A test of `main` could push to the remote, so no test may call it (GIT-1).
+#
+# `setup::run` in xtask/src/setup.rs has the attribute too.  It only gives
+# the real probe and install to `run_with`, which the tests call with
+# fakes.  A test of `run` could install a tool, so no test may call it.

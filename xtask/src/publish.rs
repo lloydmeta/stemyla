@@ -33,9 +33,10 @@
 //!    cannot roll the site back (see [`skip_reason`]).
 //! 2. `trunk build --release --public-url <url>v/<id>/` into
 //!    `target/pages/v/<id>`, with `STEMYLA_BUILD_ID=<id>` so the About menu
-//!    shows the id and links to its commit, and checks the result: the
-//!    page, both wasm modules, the worker loader, the base and asset paths
-//!    under the build's URL, and the id in the app's wasm.
+//!    shows the id and links to its commit.  It removes Trunk's lock file
+//!    ([`TRUNK_LOCK`]) from the build, and checks the result: the page,
+//!    both wasm modules, the worker loader, no lock file, the base and
+//!    asset paths under the build's URL, and the id in the app's wasm.
 //! 3. Fetches the branch from the remote if it exists there.  Then adds the
 //!    newest [`KEPT_BUILDS`] builds: the new one, and the older ones from
 //!    the branch, byte for byte.  A build id the branch has ever published
@@ -140,15 +141,29 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     run(repo, "git", args, &[])
 }
 
+/// `xtask publish`: [`main_with`] with the real publish of the current
+/// folder's repo, and the real Trunk.  No test calls it, since a test of it
+/// could push to the remote (GIT-1).  So cargo-mutants makes no mutant of
+/// it.
+#[cfg_attr(mutants, mutants::skip)]
 pub fn main(args: &[String]) -> Result<()> {
-    let o = Options::parse(args)?;
-    let repo = PathBuf::from(git(Path::new("."), &["rev-parse", "--show-toplevel"])?);
+    main_with(args, |o| publish(o, Path::new("."), run_trunk))
+}
+
+/// Parses `args`, and gives the options to `work`.  It gives the parse
+/// error back, and then does not call `work`.
+pub fn main_with(args: &[String], work: impl FnOnce(Options) -> Result<()>) -> Result<()> {
+    work(Options::parse(args)?)
+}
+
+/// Builds the web app of the git repo that holds the folder `start`,
+/// commits it to the branch, and pushes it.  `build` runs the Trunk
+/// command of [`trunk_command`].  The tests give a temporary repo, a local
+/// bare remote and a fake `build`.
+pub fn publish(o: Options, start: &Path, build: impl FnOnce(Command) -> Result<()>) -> Result<()> {
+    let repo = PathBuf::from(git(start, &["rev-parse", "--show-toplevel"])?);
     let dirty = git(&repo, &["status", "--porcelain", "--untracked-files=no"])?;
-    if !dirty.is_empty() && !o.allow_dirty {
-        bail!(
-            "uncommitted changes; commit them first so the site matches a commit (or pass --allow-dirty):\n{dirty}"
-        );
-    }
+    refuse_dirty(&dirty, o.allow_dirty)?;
     let head = git(&repo, &["rev-parse", "HEAD"])?;
     // Before the build, so an unreachable remote fails in seconds, not
     // minutes; `deploy` fetches again, in case another clone published since.
@@ -171,33 +186,39 @@ pub fn main(args: &[String]) -> Result<()> {
     if site.exists() {
         std::fs::remove_dir_all(&site).with_context(|| format!("removing {}", site.display()))?;
     }
-    let build = site.join("v").join(&id);
+    let build_dir = site.join("v").join(&id);
     println!("building the web app for {build_url} …");
-    let build_s = build.to_string_lossy().to_string();
-    // Trunk's own output is shown: the build takes a few minutes.
-    let status = Command::new("trunk")
-        .args([
-            "build",
-            "--release",
-            "--public-url",
-            &build_url,
-            "--dist",
-            &build_s,
-        ])
+    build(trunk_command(&repo, &build_url, &build_dir, &id))?;
+    finish_build(&build_dir, &build_url, &id)?;
+
+    let message = format!("Publish {id} at {}", o.public_url);
+    deploy(&repo, &site, &o, &id, &message)?;
+    Ok(())
+}
+
+/// The Trunk command that builds the app of `repo` for the build URL
+/// `build_url` into `dist`, with `STEMYLA_BUILD_ID` set to `id`.
+pub fn trunk_command(repo: &Path, build_url: &str, dist: &Path, id: &str) -> Command {
+    let mut trunk = Command::new("trunk");
+    trunk
+        .args(["build", "--release", "--public-url", build_url, "--dist"])
+        .arg(dist)
         .current_dir(repo.join("app"))
-        .env("STEMYLA_BUILD_ID", &id)
+        .env("STEMYLA_BUILD_ID", id);
+    trunk
+}
+
+/// Runs the Trunk command `trunk`, and fails when it fails.  Trunk's own
+/// output is shown: the build takes a few minutes.
+pub fn run_trunk(mut trunk: Command) -> Result<()> {
+    let status = trunk
         .status()
-        .context("could not run trunk (install it with `cargo install --locked trunk`)")?;
+        .context("could not run trunk (install it with `cargo run -p xtask -- setup trunk`)")?;
     if !status.success() {
         bail!(
             "trunk build failed (the wasm target is added with `rustup target add wasm32-unknown-unknown`)"
         );
     }
-    check_build(&build, &build_url)?;
-    check_build_id(&build, &id)?;
-
-    let message = format!("Publish {id} at {}", o.public_url);
-    deploy(&repo, &site, &o, &id, &message)?;
     Ok(())
 }
 
@@ -324,6 +345,18 @@ fn require_full_history(repo: &Path) -> Result<()> {
     if git(repo, &["rev-parse", "--is-shallow-repository"])? == "true" {
         bail!(
             "this clone is shallow, so earlier publishes cannot be found in its history; fetch it in full (`git fetch --unshallow`, or `fetch-depth: 0` in actions/checkout)"
+        );
+    }
+    Ok(())
+}
+
+/// Refuses the uncommitted changes `dirty`, as `git status --porcelain`
+/// gives them, unless `allow_dirty` is set.  So each published site
+/// matches a commit.
+pub fn refuse_dirty(dirty: &str, allow_dirty: bool) -> Result<()> {
+    if !dirty.is_empty() && !allow_dirty {
+        bail!(
+            "uncommitted changes; commit them first so the site matches a commit (or pass --allow-dirty):\n{dirty}"
         );
     }
     Ok(())
@@ -646,6 +679,28 @@ pub fn deploy(
     Ok(commit)
 }
 
+/// The lock file that Trunk 0.22 keeps in its dist folder.  `publish`
+/// builds into the site tree, so the lock file would go to the site.
+pub const TRUNK_LOCK: &str = ".trunk-lock";
+
+/// Removes Trunk's lock file from the build in `dir`, if it is there.
+pub fn remove_trunk_lock(dir: &Path) -> Result<()> {
+    let lock = dir.join(TRUNK_LOCK);
+    match std::fs::remove_file(&lock) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", lock.display())),
+    }
+}
+
+/// Makes the Trunk build in `dir` ready for the site: removes Trunk's lock
+/// file, then checks the build for the build URL `url` and the build `id`.
+pub fn finish_build(dir: &Path, url: &str, id: &str) -> Result<()> {
+    remove_trunk_lock(dir)?;
+    check_build(dir, url)?;
+    check_build_id(dir, id)
+}
+
 /// Checks one Trunk build, in `dir`, before it is published: the files the
 /// page needs exist, and the page's base and assets are under `url`, the
 /// build's own folder on the site.  The base matters as much as the
@@ -669,6 +724,13 @@ pub fn check_build(dir: &Path, url: &str) -> Result<()> {
         if len == 0 {
             bail!("the build is missing {} (or it is empty)", p.display());
         }
+    }
+    let lock = dir.join(TRUNK_LOCK);
+    if lock.exists() {
+        bail!(
+            "the build holds Trunk's lock file {}; publish would copy it to the site",
+            lock.display()
+        );
     }
     let html = std::fs::read_to_string(dir.join("index.html"))?;
     if !html.contains(&format!("<base href=\"{url}\"")) {

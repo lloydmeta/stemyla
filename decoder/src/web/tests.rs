@@ -81,10 +81,15 @@ export async function wipe() {
   for await (const name of root.keys()) await root.removeEntry(name, { recursive: true });
 }
 export async function plant_folder(path) { await folder_at(path, true); }
+// Safari 27 writes a typed array view's whole buffer, not just the view
+// (MEM-5), and `bytes` is a view into the wasm memory.  So write a copy.
+// Copy before the first await: a growth of the wasm memory during an
+// await detaches the view.
 export async function plant_at(path, bytes) {
+  const copy = bytes.slice();
   const [d, n] = split_at(path);
   const w = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createWritable();
-  await w.write(bytes);
+  await w.write(copy);
   await w.close();
 }
 // The bytes of the file at `path`, or null if there is none.
@@ -335,6 +340,22 @@ fn mem1_lint_is_on_for_js_arrays() {
     )]
     let floats = js_sys::Float32Array::from(&[3.0_f32][..]).to_vec();
     assert_eq!((slice, bytes, floats), (vec![1.0], vec![2], vec![3.0]));
+}
+
+/// Safari writes the whole buffer of a view (MEM-5,
+/// `references/browser-quirks.md`).  A `&[u8]` reaches JavaScript as a
+/// view into the wasm memory, so `plant_at` must write a whole copy.
+#[wasm_bindgen_test]
+async fn a_planted_file_reads_back_as_written() {
+    fresh().await;
+    let bytes = wav(1_000, 44_100);
+    plant_at(&format!("{SESSION}/src/0.wav"), &bytes).await;
+    let back = file("src/0.wav").await.unwrap_or_default();
+    assert_eq!(
+        (back.len(), back.starts_with(b"RIFF")),
+        (bytes.len(), true),
+        "the planted file holds the bytes given, and no more"
+    );
 }
 
 #[wasm_bindgen_test]

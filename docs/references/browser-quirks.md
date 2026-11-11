@@ -7,6 +7,7 @@ Behaviour of browsers and libraries that the code works around.  Each entry says
 Safari 27.0 on macOS 26.7.1 (checked 2026-10-19): `FileSystemWritableFileStream.write(new Uint8Array(16).subarray(4, 8))` writes 16 bytes, not 4; Chrome writes 4.  No matching WebKit bug was found.  A sliced model write once grew a 9 MB write to 18 MB, silently corrupting the file.
 
 * The code: the JavaScript `whole()` helpers in `worker/src/web.rs`, and the one that `st_write` calls in `app/src/store.rs`, copy a partial view before writing; a `Uint8Array::from` made in Rust is already whole.  The tests spy on `write`, since Chrome writes a view correctly.
+* A `&[u8]` that Rust gives to JavaScript is a view into the wasm memory.  On 2026-11-11, in Safari 27.2, the test helper `plant_at` of `decoder/src/web/tests.rs` wrote such a view.  Each planted file then held the whole wasm memory, and 6 tests decoded nothing.  A test helper that plants a file writes a copy too.
 * Rule: MEM-5.
 
 ## Safari does not count WebGPU memory when collecting garbage
@@ -49,7 +50,7 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-10, with WebCodecs 
 
 Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  `GPUAdapterInfo.subgroupMinSize` is `undefined`, and wgpu reads it as a number.
 
-* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in a Safari `web-test` (TD-93).  With `WASM_BINDGEN_NO_DEBUG=1`, both pass.  The f16 test then needs the text of the next entry.
+* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in Safari.  So `web-test` sets `WASM_BINDGEN_NO_DEBUG=1` for the crate run of `stem-worker` in Safari (TD-93), and both pass.  The f16 test then needs the text of the next entry.  The release build has no such assert: `e2e selftest --browser safari` passed on 2026-11-11.
 * Rule: VERIFY-1.
 
 ## WebKit words a WGSL compile error in its own way
@@ -58,3 +59,18 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  A planted WGSL
 
 * The code: `an_f16_variant_the_browser_rejects_keeps_f32_weights` takes the text of each browser, and still checks that the text names the compile failure (TD-93).
 * Rule: VERIFY-1.
+
+## Safari rejects an aborted fetch with its own error
+
+Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  `AbortController.abort(reason)` rejects the `fetch` and the reads of its body with "AbortError: Fetch is aborted", not with `reason`.  Chrome gives `reason`.  This is [WebKit bug 246069](https://bugs.webkit.org/show_bug.cgi?id=246069) (NEW).
+
+* The code: `download_to_opfs` in `worker/src/web.rs` gives the signal's reason when the signal is aborted.  So a stalled download says "no data from the server for 60 s" in each browser (TD-96).
+* Rule: none.  `e2e storage` checks the text in each browser.
+
+## Safari gives the size of a stored `File` at its first read
+
+Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  A `File` from `getFile()` of an OPFS file gives its `size` at the first read of `size`, not at `getFile()`.  If the file is removed before that first read, `size` can be 0.  In 3 of 4 runs of the stem worker's tests, it was 0, and the test failed.  When the test read `size` before the removal, the test passed in 5 of 5 runs.  The read of the bytes of a removed file fails with NotFoundError.
+
+* The code: the worker reads the size of the stored model just after `getFile()`, before any other message can remove the file (`init` in `worker/src/web.rs`).  `a_stored_file_removed_after_it_was_opened_is_a_read_error` reads it there too.
+* Rule: VERIFY-1.
+

@@ -46,13 +46,22 @@ fn callbacks(app: &StemApp) -> u64 {
 #[wasm_bindgen(
     inline_js = "export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
 export function busy(ms) { const t = performance.now(); while (performance.now() - t < ms) {} }
-export function in_chrome() { return navigator.userAgent.includes('Chrome/'); }"
+export function in_chrome() { return navigator.userAgent.includes('Chrome/'); }
+export async function plain_context_state(rate, ms) {
+  const ctx = new AudioContext({ sampleRate: rate });
+  await new Promise((r) => setTimeout(r, ms));
+  const state = ctx.state;
+  await ctx.close();
+  return state;
+}"
 )]
 extern "C" {
     async fn sleep(ms: u32);
     /// Holds the page's thread for `ms`, as decoding a song does.
     fn busy(ms: u32);
     fn in_chrome() -> bool;
+    /// The state of a new `AudioContext` of the page after `ms`.
+    async fn plain_context_state(rate: u32, ms: u32) -> JsValue;
 }
 
 fn clock(app: &StemApp) -> std::time::Duration {
@@ -60,6 +69,26 @@ fn clock(app: &StemApp) -> std::time::Duration {
         Some(Output::Live(live)) => live.clock(),
         _ => panic!("no live output: {}", app.status),
     }
+}
+
+/// Whether the browser holds back each audio context of the page, so the
+/// output's clock stands still.  Safari does this in `web-test`: the
+/// runner gives `safaridriver` no capabilities, so the page gets Safari's
+/// autoplay rule (TD-96).  A clock that stands still while a new context
+/// of the page runs is a fault of the output, and fails the test.
+async fn held_back_by_the_browser(app: &StemApp) -> bool {
+    if !clock(app).is_zero() {
+        return false;
+    }
+    assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
+    let plain = plain_context_state(44_100, 300).await.as_string();
+    assert_eq!(
+        plain.as_deref(),
+        Some("suspended"),
+        "the output's clock stands still, but a new audio context runs"
+    );
+    console_log!("skipped: the audio context is suspended");
+    true
 }
 
 #[wasm_bindgen_test]
@@ -99,16 +128,15 @@ async fn opening_a_song_frees_the_one_it_replaces_on_the_same_output() {
 }
 
 /// Needs a running audio context: `xtask web-test` lets Chrome play without
-/// a click.  Elsewhere the context stays suspended, its clock stands still
-/// and nothing can fall behind, so the test says so and stops.
+/// a click.  Safari holds the context back (see
+/// [`held_back_by_the_browser`]), so its clock stands still and nothing can
+/// fall behind.  Then the test says so and stops.
 #[wasm_bindgen_test]
 async fn an_output_left_behind_by_a_busy_page_is_replaced() {
     let mut app = StemApp::default();
     app.open_memory_song(song(44_100));
     sleep(300).await;
-    if clock(&app).is_zero() {
-        assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
-        console_log!("skipped: the audio context is suspended");
+    if held_back_by_the_browser(&app).await {
         return;
     }
     let opened = engine::live::opened();
@@ -144,9 +172,7 @@ async fn buffers_left_late_by_a_busy_page_play_once_not_doubled() {
     let mut app = StemApp::default();
     app.open_memory_song(song(44_100));
     sleep(300).await;
-    if clock(&app).is_zero() {
-        assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
-        console_log!("skipped: the audio context is suspended");
+    if held_back_by_the_browser(&app).await {
         return;
     }
     busy(1_000);
@@ -171,9 +197,7 @@ async fn a_page_too_busy_for_the_schedule_to_catch_up_still_plays() {
     let mut app = StemApp::default();
     app.open_memory_song(song(44_100));
     sleep(300).await;
-    if clock(&app).is_zero() {
-        assert!(!in_chrome(), "web-test runs Chrome with audio allowed");
-        console_log!("skipped: the audio context is suspended");
+    if held_back_by_the_browser(&app).await {
         return;
     }
     let frames = |n| async move {

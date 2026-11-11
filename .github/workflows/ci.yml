@@ -24,8 +24,8 @@ env:
   # Pinned so CI matches the local toolchain and clippy/rustfmt results do
   # not drift when a new stable is released.  Bump deliberately.
   RUST_VERSION: "1.99.0"
-  TRUNK_VERSION: "0.21.14"
-  TRUNK_SHA256: "f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b"
+  TRUNK_VERSION: "0.22.1"
+  TRUNK_SHA256: "2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1"
 
 jobs:
   fmt:
@@ -102,6 +102,9 @@ jobs:
           # .claude/settings.json, which needs rustfmt (and jq, which the
           # runner has).
           components: rustfmt
+          # a_wasm_build_reads_the_build_value in test-support compiles its
+          # lib for wasm32 (VERIFY-1).
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install ALSA headers and software Vulkan (lavapipe)
         run: |
@@ -179,12 +182,16 @@ jobs:
     # 19 s to a local `web-test` of 279 s, so about 30 s on CI.  The two
     # runs differ by about 5 minutes on the same steps, as the runners
     # vary.  M4 adds two AAC saves to `e2e save`, and its limit grows from 50
-    # to 60 minutes.  The limit is those steps, the limit of `e2e save` of
-    # 60, and about 9 to 14 minutes to spare.  So a run of `e2e save` that waits in
-    # vain ends on its own check.  Each test binary of `web-test`
+    # to 60 minutes.  Run 42952206488 (2026-11-11, M2 of
+    # docs/plans/active/tech-debt-rungs.md) took 19.7 minutes for the steps
+    # other than `e2e save`, with `web-test` 12.0, and 3.6 for `e2e save`.
+    # The limit is the limit of `e2e save` of 60, 20 for the other steps,
+    # and 5 to spare.  So a run of `e2e save` that waits in vain ends on its
+    # own check.  Each test binary of `web-test`
     # may take 10 minutes (xtask/src/web_test.rs), so a slow `web-test` uses
     # the spare minutes first.  A hung browser must not hold the runner for
-    # GitHub's 6 h default.
+    # GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`
+    # (xtask/src/e2e/save.rs) checks that the limit holds the save step.
     timeout-minutes: 85
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -194,17 +201,11 @@ jobs:
           targets: wasm32-unknown-unknown
       # Also caches ~/.cargo/bin, so wasm-bindgen-cli is built once per version.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # wasm-bindgen-test-runner must equal the wasm-bindgen in Cargo.lock,
-      # so the version comes from there and cannot drift.
+      # wasm-bindgen-test-runner must equal the wasm-bindgen in Cargo.lock.
+      # xtask setup takes the version from there, and installs it only when
+      # the cached one differs.
       - name: Install wasm-bindgen-test-runner at the lockfile's wasm-bindgen version
-        run: |
-          set -euo pipefail
-          v=$(awk '/^name = "wasm-bindgen"$/ { getline; gsub(/version = |"/, ""); print; exit }' Cargo.lock)
-          test -n "$v"
-          if [ "$(wasm-bindgen-test-runner --version 2>/dev/null | awk '{ print $2 }')" != "$v" ]; then
-            cargo install wasm-bindgen-cli --version "$v" --locked --force
-          fi
-          wasm-bindgen-test-runner --version
+        run: cargo run --locked -p xtask -- setup wasm-bindgen-cli
       - uses: ./.github/actions/setup-trunk
         with:
           version: ${{ env.TRUNK_VERSION }}
@@ -237,6 +238,78 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: e2e
+          # Not the generated audio (tens of MB).
+          path: |
+            target/e2e/**/*.log
+            target/e2e/**/*.png
+          if-no-files-found: ignore
+
+  # Safari, and the real AAC encode, on a Mac (TD-92, TD-93, TD-96).
+  # macos-latest is macOS 26 on arm64, with Safari 27.2, Chrome and a
+  # matching ChromeDriver in $CHROMEWEBDRIVER (actions/runner-images,
+  # images/macos/macos-26-arm64-Readme.md, 2026-11-02).  It is not in
+  # `needs` of publish, and not a required check at first (Q6 of
+  # docs/plans/active/tech-debt-rungs.md).  The GPU tests may skip here:
+  # GitHub states nothing about the runner's GPU, so the job does not set
+  # gpu in STEMYLA_REQUIRE.
+  macos:
+    name: browser tests (macOS)
+    runs-on: macos-latest
+    # On the maintainer's Mac (2026-11-11), the Safari `web-test` took
+    # 5 minutes, and the Safari scenarios 8.  The setup builds Trunk and
+    # wasm-bindgen-cli with `cargo install`, and the crates for wasm32,
+    # which took about 15 minutes on the Linux jobs with no cache.  In run
+    # 42952206488 (2026-11-11), with no cache, the job took 46 minutes.  The
+    # setup took 13.8, the Safari `web-test` 14.2, and the two `e2e save`
+    # steps 4.3 and 4.8.  So the steps other than `e2e save` took 37.0.
+    # Each of the two `e2e save` steps, in Safari and in Chrome, may take
+    # its limit of 60 minutes.  So the limit is 40 for the setup and the
+    # other steps, 60 for each save, and 20 to spare.  A hung browser must not hold the
+    # runner for GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`
+    # (xtask/src/e2e/save.rs) checks that the limit holds the save steps.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+      # Also caches ~/.cargo/bin, so Trunk and wasm-bindgen-cli are built
+      # once per version.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The action setup-trunk takes the Linux release tarball only, so
+      # Trunk comes from `cargo install --locked` at its pin (BUILD-1).
+      - name: Install the wasm32 target, Trunk and wasm-bindgen-test-runner at their pins
+        run: cargo run --locked -p xtask -- setup wasm32 trunk wasm-bindgen-cli
+      - name: Turn on Safari's WebDriver
+        run: sudo safaridriver --enable
+      - run: cargo run --locked -p xtask -- web-test --browser safari
+      - run: trunk build --release
+        working-directory: app
+      - run: cargo run --locked -p xtask -- e2e smoke --browser safari
+      - run: cargo run --locked -p xtask -- e2e decode --browser safari
+      - run: cargo run --locked -p xtask -- e2e playback --browser safari
+      - run: cargo run --locked -p xtask -- e2e old-session --browser safari
+      - run: cargo run --locked -p xtask -- e2e audio-resume --browser safari
+      - run: cargo run --locked -p xtask -- e2e storage --browser safari
+      - run: cargo run --locked -p xtask -- e2e flac --browser safari
+      - run: cargo run --locked -p xtask -- e2e save --browser safari
+        # The same limit as the Linux step, for the same waits.
+        timeout-minutes: 60
+      # Chrome on macOS has an AAC encoder, and Chrome on Linux has none
+      # (TD-92).  STEMYLA_REQUIRE=aac makes the test fail, not skip, with
+      # no encoder.  Only this step sets it.
+      - name: The real AAC encode, in Chrome
+        run: cargo run --locked -p xtask -- web-test --browser chrome a_real_aac_decodes_to_the_source
+        env:
+          STEMYLA_REQUIRE: aac
+      - run: cargo run --locked -p xtask -- e2e save --browser chrome
+        # The same limit as the Linux step, for the same waits.
+        timeout-minutes: 60
+      - if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-macos
           # Not the generated audio (tens of MB).
           path: |
             target/e2e/**/*.log

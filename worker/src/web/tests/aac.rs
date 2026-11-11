@@ -1059,12 +1059,15 @@ const MOST_ERROR: f64 = 0.05;
 /// decodes the file.  Trimmed by its `elst` skip, the decode has the
 /// source's frames, lines up with it at lag 0, and keeps its start.  CI's
 /// Chrome on Linux has no AAC encoder (TD-92), so there the test logs a
-/// skip and passes.
+/// skip and passes.  The macOS job of CI builds it with
+/// `STEMYLA_REQUIRE=aac`, so there a browser with no encoder fails it.
 #[wasm_bindgen_test]
 async fn a_real_aac_decodes_to_the_source() {
     fake_aac_restore();
     if !crate::web::aac::aac_encoder_here(TONE_RATE).await {
-        web_sys::console::log_1(&"skipped: this browser has no AAC encoder".into());
+        let line =
+            test_support::skip_line(test_support::Need::Aac, "this browser has no AAC encoder");
+        web_sys::console::log_1(&line.into());
         return;
     }
     let delay = crate::web::aac::aac_delay(TONE_RATE).await;

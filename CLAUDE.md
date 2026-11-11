@@ -37,6 +37,7 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 ## Commands
 
 ```bash
+cargo run -p xtask -- setup                     # once, and after a pin changes: each dev tool at its pin (--check only reports)
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p synth --all-targets -- -D warnings  # synth without its files feature
@@ -89,6 +90,7 @@ Each rule has a stable ID; `docs/invariants.md` states it in full, says why it h
 
 * Writing: write docs, comments, commit messages and PR descriptions in [ASD-STE100 Simplified Technical English](https://www.asd-ste100.org).  Keep an instruction to 20 words or fewer, and a description to 25 or fewer.  Write one instruction per sentence, in the active voice.  Use the same word for the same thing.  You need not use STE's American English spelling.
 * Plans: work of more than a few steps gets an execution plan in `docs/plans/active/` that follows `docs/plans/PLANS.md`, kept current at every stopping point and moved to `docs/plans/completed/` when done.  A big task runs in orchestrated mode, with the `orchestrate` skill (decision 0023).  A task is big with one of four signals.  Two signals are a plan of more than 3 milestones and a decision point in more than one milestone.  The others are work longer than one session and the maintainer away for the run.  Before any work, send one message with the mode and each choice that hinges on the maintainer (`docs/plans/PLANS.md`, "Decisions for the maintainer").  Give each choice's options and a recommendation, then run hands-off.  Send none if the maintainer asked for the mode, no choice is open and the effort is known.
+* Proportion: try the simplest fix that the data supports first, such as a tolerance with a proof.  A new module, allocator, crate or change of the product, to fix a test or a check, needs the maintainer's choice first.  A plan or a review that rules out the simple fix proves why it fails.
 * Decisions: a choice with lasting effect gets a record in `docs/decisions/`; agents write it as `proposed`, and only a person accepts it.
 * Review: after implementing, run `cargo run -p xtask -- check --tier push` and `cargo build -p xtask`, then `/review-rounds` from round 1 until the stop rule of decision 0024 holds.  The skill verifies each blocker and should-fix before a fix.  Rounds 1 to 3 fix each confirmed finding, with tests, and fix each pre-existing finding or send it to a TD or its own PR.  From round 4, a round fixes blockers, significant should-fix and every confirmed finding on a strict rule.
 * Debt: a workaround, a skipped check or a known breach of a rule gets an entry in `docs/tech-debt.md` in the same commit.
