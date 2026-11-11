@@ -97,7 +97,7 @@ Start a new `general-purpose` subagent with the brief of "The brief of a team le
 
 ### 2. The milestone plan and the work
 
-* The team leader writes the milestone plan and its index line.  A new `Plan` agent reviews it, at most 2 rounds.  The team leader fixes what it finds, and commits.
+* The team leader writes the milestone plan and its index line.  A new `Plan` agent reviews it, at most 2 rounds.  The reviewer also checks proportion (`docs/plans/PLANS.md`): a finding that rules out a simpler fix gives its proof.  The team leader fixes what it finds, and commits.
 * The team leader starts the implementer.  Each new test fails first, on an assert.
 * Before the commit of a step that needs a change of `CLAUDE.md` or `.claude/rules/**`, the team leader gives a step checkpoint ("Who edits what").  Then it waits.
 * Before round 1, the team leader gives a checkpoint: the diffs of `.claude/**` and `CLAUDE.md` that no step checkpoint carried, and the text for the plan.  Then it waits.

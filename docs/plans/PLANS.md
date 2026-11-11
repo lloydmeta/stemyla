@@ -7,6 +7,7 @@ A plan is written for a reader with no other context: a new session, a backgroun
 ## Rules
 
 * Self-contained: state what is needed to do the work, define terms, and name files, functions and commands.  Link to `invariants.md` by rule ID rather than restating rules.
+* Proportionate: the plan of work names the simplest fix first, with the cost of each larger one.  It does not rule out a simple fix, such as a wider tolerance, without a proof that the fix fails.  A change of the product to fix a test is a choice for the maintainer.
 * Acceptance is observable: each milestone says which command shows it works, and what output proves it (a test that fails before the change and passes after it).  "It compiles" is not acceptance (VERIFY-1).
 * Milestones are small and each one is verifiable and committable on its own (GIT-2).
 * The living sections are updated at every stopping point, with dates: before a session ends, before compaction, and when a milestone completes.  A session picking up a plan reads them first.
