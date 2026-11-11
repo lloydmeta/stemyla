@@ -176,8 +176,8 @@ The orchestrator committed it in `808aa66`.  No work.
 
 * [x] 2026-11-11: step 1, `xtask setup`, in `808aa66` (the orchestrator).
 * [x] 2026-11-11: step 4, `web-test` runs each crate and lists the failed crates.  The new test `a_failure_before_the_last_crate_names_that_crate` first failed on its `assert_eq!` against a `summary` that kept only the last result: it gave `Ok` with no line of failed crates.
-* [ ] The baseline at wasm-bindgen 0.2.129, in Safari and Chrome.
-* [ ] Step 2: wasm-bindgen 0.2.130.
+* [x] 2026-11-11: the baseline at wasm-bindgen 0.2.129 in Chrome, at `34f7f6c`: each crate passed (Surprises).  The Safari baseline is owed.
+* [x] 2026-11-11: step 2, wasm-bindgen 0.2.130.  Chrome gives the same results as the baseline (Surprises).  The Safari comparison is owed.  The step changes no behaviour of the repo's code, so it adds no test.
 * [ ] Step 3: Trunk 0.22.1.
 * [ ] Step 5: TD-95.
 * [ ] Step 6: TD-93.
@@ -187,9 +187,27 @@ The orchestrator committed it in `808aa66`.  No work.
 * [ ] Step 10: the macOS job (TD-92).
 * [ ] Review rounds.
 
+Safari runs owed (each waits until the screen of the Mac is unlocked):
+
+* The Safari baseline at wasm-bindgen 0.2.129: at `34f7f6c`, with wasm-bindgen-cli 0.2.129 from `xtask setup wasm-bindgen-cli`.
+* The Safari `web-test` of step 2 at wasm-bindgen 0.2.130, to compare with that baseline.
+
 ## Surprises and discoveries
 
-* None yet.
+* 2026-11-11, the Safari baseline at `34f7f6c`: each of the 4 crate runs failed at the session start, before a test ran.  `safaridriver` gave HTTP 500, "session not created: The session timed out while connecting to a Safari instance".  No `safaridriver` was left from an earlier run.  A direct probe of `safaridriver -p 4445` gave the same error.  The cause is the locked screen: at 08:53 JST, `ioreg -n Root -d1 -a` gave `CGSSessionScreenIsLocked` = true, while Safari ran (the orchestrator).  The log is `m2/baseline-0.2.129-safari.log`.  Step 4's summary listed the 4 failed crates.
+* 2026-11-11, the Chrome baseline at `34f7f6c`, wasm-bindgen 0.2.129, Chrome 157 (`m2/baseline-0.2.129-chrome.log`), and step 2 at wasm-bindgen 0.2.130 (`m2/step2-0.2.130-chrome.log`).  No test failed, and no test was ignored:
+
+  | Crate run | Test binary | 0.2.129 | 0.2.130 |
+  | - | - | - | - |
+  | `app` | `--lib` | 197 passed (192 s) | 197 passed (190 s) |
+  | `app` | `--test web` | 14 passed | 14 passed |
+  | `app` | `--test web_close` | 1 passed | 1 passed |
+  | `app` | `--test web_output` | 4 passed | 4 passed |
+  | `stem-worker` | `--lib` | 108 passed | 108 passed |
+  | `decode-worker` | `--lib` | 12 passed | 12 passed |
+  | `stem-protocol` | `--test web` | 31 passed | 31 passed |
+
+* 2026-11-11, step 2: crates.io gives 2026-10-30 as the release date of `wasm-bindgen` 0.2.130, `js-sys` and `web-sys` 0.3.107, `wasm-bindgen-futures` 0.4.80 and `wasm-bindgen-test` 0.3.80.  None is yanked.
 
 ## Decision log
 
@@ -201,6 +219,11 @@ The orchestrator committed it in `808aa66`.  No work.
 * 2026-11-11, agent: a crate run whose test binary has no wasm test fails `web-test`, on the runner's marker "no tests to run!".  A filtered run with 0 tests passes.  Reason: the runner passes a crate with no `wasm_bindgen_test`, so step 8 could pass with nothing tested.
 * 2026-11-11, agent: a new `Plan` agent reviewed this plan in 2 rounds: 10 findings in round 1 and 2 in round 2, each fixed in the plan before its first commit.
 * 2026-11-11, agent: the macOS job installs Trunk with `xtask setup`, not with the action.  Reason: the action takes the Linux release tarball only, and BUILD-1 allows `cargo install`.
+* 2026-11-11, agent (orchestrator): the cause of the Safari timeouts is the locked screen, not an open Safari.  Never quit Safari.  End each `safaridriver` probe that an agent starts.  Do not try Safari again while the lock holds.
+* 2026-11-11, agent (orchestrator): Progress keeps a list "Safari runs owed".  Before each Safari run, check the lock with `ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked`.  If the screen is locked, add the run to the list, and go on.
+* 2026-11-11, agent (orchestrator): step 9 gets one more fix.  `web-test` and `e2e` with Safari on macOS check the screen lock first, and fail at once with a clear message.  A pure parse of the `ioreg` output gets tests.  A line goes in `references/local-browser-testing.md`.
+* 2026-11-11, agent (orchestrator): the order while the lock holds is the Chrome baseline, step 2 (Chrome now, Safari owed), step 3, step 7, step 8 and step 10.  Steps 5, 6 and 9 wait for the lock to clear.  Step 6's pure function, its tests and the draft wgpu issue need no Safari, so they may go first.  After step 10, the implementer stops, so the orchestrator pushes and reads the CI run.
+* 2026-11-11, agent (orchestrator): step 2 applies its patch with `--exclude=docs/plans/active/tech-debt-rungs.md`.  The hunk of the parent plan is in `m2/step2-parent-plan.diff`, for the orchestrator.  Reason: only the orchestrator edits the parent plan.
 * 2026-11-11, agent: step 4 does not capture the output of a crate run.  Step 8 adds the capture, with its own tests.  Reason: step 4's acceptance is the summary only, and a small commit is easier to review.
 
 ## Outcomes and retrospective

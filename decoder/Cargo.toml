@@ -17,10 +17,10 @@ stem-protocol = { path = "../protocol" }
 # The same versions as `app` and `stem-worker` take (DEPS-1).
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 console_error_panic_hook = "0.1.7"
-js-sys = "0.3.106"
-wasm-bindgen = "0.2.129"
-wasm-bindgen-futures = "0.4.79"
-web-sys = { version = "0.3.106", features = ["DedicatedWorkerGlobalScope", "MessageEvent", "console"] }
+js-sys = "0.3.107"
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+web-sys = { version = "0.3.107", features = ["DedicatedWorkerGlobalScope", "MessageEvent", "console"] }
 
 # Makes the M4A files of the native tests (`cargo test -p decode-worker`)
 # and of the browser tests (`xtask web-test`): every test that needs an
@@ -30,7 +30,7 @@ m4a = { version = "0.1.0", path = "../m4a" }
 
 # Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test = "0.3.79"
+wasm-bindgen-test = "0.3.80"
 # Make FLAC and MP3 files for the browser tests, at the pins that
 # `stem-worker` ships (DEPS-1).
 flacenc = { version = "=0.5.1", default-features = false }

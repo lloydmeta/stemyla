@@ -28,10 +28,10 @@ eframe = { version = "0.36.2", default-features = false, features = ["glow", "de
 cpal = { version = "0.18.2", features = ["wasm-bindgen"] }
 stem-protocol = { path = "../protocol" }
 console_error_panic_hook = "0.1.7"
-wasm-bindgen = "0.2.129"
-wasm-bindgen-futures = "0.4.79"
-js-sys = "0.3.106"
-web-sys = { version = "0.3.106", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Performance", "Worker", "WorkerOptions", "WorkerType", "MessageEvent", "HtmlInputElement", "FileList", "File", "Blob", "Location", "Event", "Navigator", "StorageManager", "ErrorEvent"] }
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+js-sys = "0.3.107"
+web-sys = { version = "0.3.107", features = ["Window", "Document", "Element", "HtmlCanvasElement", "Performance", "Worker", "WorkerOptions", "WorkerType", "MessageEvent", "HtmlInputElement", "FileList", "File", "Blob", "Location", "Event", "Navigator", "StorageManager", "ErrorEvent"] }
 
 # Makes the M4A files of the tests of the head check: every test that
 # needs an M4A uses this writer (TD-52).
@@ -46,7 +46,7 @@ synth = { path = "../synth", features = ["files"] }
 
 # Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
-wasm-bindgen-test = "0.3.79"
+wasm-bindgen-test = "0.3.80"
 # Makes the FLAC source of a stored session.  Pinned: below 1.0, and its
 # API changes with each minor version (DEPS-1).
 flacenc = { version = "=0.5.1", default-features = false }
