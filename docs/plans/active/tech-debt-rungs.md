@@ -42,7 +42,7 @@ The triage of the entries that M4A (PR #43) added, on 2026-11-11, at `ee3728e`:
 | Upstream or design | TD-79, TD-80, TD-86, TD-90 | Each waits for a reference digest, a Symphonia change, or a design. |
 | Left for a later rung | TD-7, TD-53, TD-57, TD-64, TD-66 | The old rung 2 entries that are not Safari or tools (Decision log, 2026-11-11). |
 
-M2 added two entries (step 9).  Each is left for a later rung.  TD-96 has its causes outside the repo.  TD-97 waits for the cause of a growth of the page's memory.
+M2 added two entries (step 9).  Each is left for a later rung.  TD-96 has its causes outside the repo.  TD-97 was closed in step 11 of M2, with a bound of 3 MiB from the measured spread.
 
 The facts of the tools on 2026-11-11, from crates.io:
 
@@ -199,7 +199,10 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-11: the TD-96 command with `--nocapture` ran in Safari 27.2 on the maintainer's Mac (exit 0): `app --lib` passed 197 tests with 2 skip lines, and `web_output` passed 4 with 3 skip lines.
   * [x] 2026-11-11: intent review round 2 found that round 1 is resolved, and no significant finding.  I2-1, the PR body, goes into the body at close-out.  For I2-2, a full `xtask web-test --browser safari` passed on the maintainer's Mac at `4c23f79` (19:16 to 19:21 JST): app, stem-worker, decode-worker, stem-protocol and engine passed, with no failure.  The nits I2-3 and I2-4 are reported, not fixed.
   * [x] 2026-11-11: intent review round 3 found no significant finding, so the intent review ends (decision 0024).  For I3-1: `check --tier push` passed (13 checks) on the maintainer's Mac at `f5be16a`, and CI run 43003704558 on `f5be16a` passed each job, the `macos` job included.  The nit I3-2 is reported, not fixed.
-  * [ ] Step 11, TD-97, and step 12, the required `macos` check (CI run 43008561411 failed D11 in Safari).
+  * [ ] Step 11, TD-97, and step 12, the required `macos` check (CI run 43008561411 failed D11 in Safari).  Step 11's milestone plan is `plans/active/tech-debt-rungs-m2-td97.md`.
+    * [x] 2026-11-11: step 11's code, `7dc0388`.  Step A found the cause: the allocator's layout, with the same requests in each save.  The maintainer refused decision 0030, a counting allocator (`af135fb`, removed in `7dc0388`), and asked for a tolerance.  `WASM_BOUND_BYTES` is 3 MiB.  Safari's largest spread in 150 pairs is 1,900,544 bytes, and Chrome's 327,680.  TD-97 is closed.
+    * [x] 2026-11-11: 6 Safari runs of `e2e save` in a row and one Chrome run passed at `7dc0388` (`8ae0f2d`).
+    * [ ] Step 11's review rounds.
 * [ ] M3: rung 3.
 
 ## Surprises and discoveries
@@ -239,6 +242,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-11, agent: the intent review of M2, round 1, found 3 significant should-fix findings.  I1-1: the PR body now holds the draft wgpu issue, as TD-93 says.  I1-2: the CI result of the code head goes in Progress.  I1-3: the Safari skip of `an_output_left_behind_by_a_busy_page_is_replaced` goes to the team, with review round 6.  The nits I1-4 and I1-6 are fixed in the PR body and the triage.
 * 2026-11-11, agent: review round 6 (6-1) takes the CI run on `c156c4a` as the fix, with no count of skips that `xtask` prints.  Reason: the finding was a code head with no CI result, and the run passed.  A count is new behaviour, which a late round does not add.  TD-96 records that a CI log shows no skip line, and how a direct run with `--nocapture` shows them (review round 7, 7-1).
 * 2026-11-11, maintainer: after CI run 43008561411 failed D11 of `e2e save` for MP3 in Safari (TD-97), fix TD-97 now, and make the `macos` job a required check (steps 11 and 12 of M2).
+* 2026-11-11, maintainer: refused decision 0030, a counting allocator in the page ("writing a custom allocator is insane overengineering").  Step 11 then set a tolerance from the measured spread, with a proof that it still fails a save that grows with the song.  The rule of proportion went into `CLAUDE.md`, `plans/PLANS.md` and the `orchestrate` skill (`d47eac6`).
 
 ## Outcomes and retrospective
 
