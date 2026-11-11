@@ -6,8 +6,8 @@ use std::process::Command;
 
 use xtask::publish::{
     CopiedBuild, KEPT_BUILDS, Options, Prepared, TRUNK_LOCK, build_id, check_build, check_build_id,
-    check_id, check_kept_builds, commit_dir, deploy, kept_ids, parse_versions, prepare_site,
-    remote_head, remove_trunk_lock, skip_reason,
+    check_id, check_kept_builds, commit_dir, deploy, kept_ids, main_with, parse_versions,
+    prepare_site, remote_head, remove_trunk_lock, skip_reason,
 };
 
 /// A committer identity, and no user or system git config (which may sign
@@ -836,12 +836,43 @@ fn checks_the_build() {
         ("/pages/", "up", true)
     );
     assert!(Options::parse(&["--bogus".into()]).is_err());
-    let refused = xtask::publish::main(&["--bogus".into()]);
+}
+
+/// Review round 2 of M2 (2-4): a parse error stops the publish before its
+/// work.  The work here is a fake, so no test reaches a real publish
+/// (GIT-1).
+#[test]
+fn a_bad_option_stops_the_publish_before_its_work() {
+    let refused = main_with(&["--bogus".into()], |_| panic!("the publish ran"));
     assert!(
         refused
             .as_ref()
             .is_err_and(|err| err.to_string().starts_with("unknown option --bogus")),
         "{refused:?}"
+    );
+}
+
+#[test]
+fn the_work_gets_the_parsed_options_and_its_result_goes_back() {
+    let mut seen = None;
+    let failed = main_with(
+        &["--no-push".into(), "--remote".into(), "acme".into()],
+        |o| {
+            seen = Some((o.push, o.remote));
+            anyhow::bail!("lloyd stopped it")
+        },
+    );
+    assert_eq!(seen, Some((false, "acme".to_string())));
+    assert_eq!(
+        failed.map_err(|err| err.to_string()),
+        Err("lloyd stopped it".to_string())
+    );
+    assert!(
+        main_with(&[], |o| {
+            assert_eq!(o.public_url, "/stemyla/");
+            Ok(())
+        })
+        .is_ok()
     );
 }
 

@@ -2483,6 +2483,154 @@ mod tests {
         assert_eq!(save_step_limits(ci), [Some(60), None]);
     }
 
+    /// The least time, in minutes, that the other steps of a browser job
+    /// take.  In the Linux job, the steps before `e2e save` took 10.5 to
+    /// 15.3 minutes (runs 42777211457 and 40894815433).
+    const OTHER_STEPS_MINUTES: u64 = 15;
+
+    /// A job of a workflow with `e2e save` steps: its key, its
+    /// `timeout-minutes`, and the limits of its save steps.
+    #[derive(Debug, PartialEq, Eq)]
+    struct SaveJob {
+        key: String,
+        limit: Option<u64>,
+        steps: Vec<Option<u64>>,
+    }
+
+    /// Each job of the workflow `ci` that has an `e2e save` step, in order.
+    fn save_jobs(ci: &str) -> Vec<SaveJob> {
+        let Some((_, jobs)) = ci.split_once("\njobs:\n") else {
+            return Vec::new();
+        };
+        let mut parts: Vec<(&str, Vec<&str>)> = Vec::new();
+        for line in jobs.lines() {
+            let key = line
+                .strip_prefix("  ")
+                .filter(|rest| !rest.starts_with(' '))
+                .and_then(|rest| rest.strip_suffix(':'));
+            match (key, parts.last_mut()) {
+                (Some(key), _) => parts.push((key, Vec::new())),
+                (None, Some((_, lines))) => lines.push(line),
+                (None, None) => {}
+            }
+        }
+        parts
+            .into_iter()
+            .map(|(key, lines)| SaveJob {
+                key: key.to_string(),
+                limit: lines
+                    .iter()
+                    .find_map(|l| l.strip_prefix("    timeout-minutes:"))
+                    .and_then(|m| m.trim().parse().ok()),
+                steps: save_step_limits(&lines.join("\n")),
+            })
+            .filter(|job| !job.steps.is_empty())
+            .collect()
+    }
+
+    /// Why the limit of `job` is too short, or `None`.  The job limit
+    /// must hold each save step at its limit, and the other steps.
+    fn job_limit_problem(job: &SaveJob) -> Option<String> {
+        let steps: Option<u64> = job.steps.iter().copied().sum();
+        match (job.limit, steps) {
+            (Some(limit), Some(steps)) if limit >= steps + OTHER_STEPS_MINUTES => None,
+            _ => Some(format!(
+                "job {}: timeout-minutes {:?} does not hold the save steps {:?} and {OTHER_STEPS_MINUTES} minutes for the other steps",
+                job.key, job.limit, job.steps
+            )),
+        }
+    }
+
+    /// Review round 2 of M2 (2-5): each save step may take its whole
+    /// limit, so the job limit must hold all of them.
+    #[test]
+    fn the_ci_job_limit_holds_its_save_steps() {
+        let jobs = save_jobs(include_str!("../../../.github/workflows/ci.yml"));
+        let keys: Vec<&str> = jobs.iter().map(|job| job.key.as_str()).collect();
+        assert_eq!(keys, ["browser-tests", "macos"]);
+        for job in &jobs {
+            assert_eq!(job_limit_problem(job), None);
+        }
+    }
+
+    /// A workflow with one job of `limit` minutes, and a save step of
+    /// `step` minutes for each of `steps`.
+    fn one_job(limit: &str, steps: &[u64]) -> String {
+        let saves: String = steps
+            .iter()
+            .map(|minutes| {
+                format!(
+                    "      - run: cargo run --locked -p xtask -- e2e save --browser chrome\n\
+                     \x20       timeout-minutes: {minutes}\n"
+                )
+            })
+            .collect();
+        format!(
+            "name: CI\n\
+             jobs:\n\
+             \x20 lint:\n\
+             \x20   runs-on: ubuntu-latest\n\
+             \x20   timeout-minutes: 5\n\
+             \x20   steps:\n\
+             \x20     - run: cargo fmt --all --check\n\
+             \x20 # lloyd's browser job:\n\
+             \x20 browser:\n\
+             \x20   runs-on: macos-latest\n\
+             {limit}\
+             \x20   steps:\n\
+             \x20     - run: cargo run --locked -p xtask -- e2e smoke --browser chrome\n\
+             {saves}"
+        )
+    }
+
+    fn the_job(limit: &str, steps: &[u64]) -> SaveJob {
+        let jobs = save_jobs(&one_job(limit, steps));
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        jobs.into_iter().next().unwrap()
+    }
+
+    #[test]
+    fn a_job_reads_its_own_limit_and_its_save_steps() {
+        assert_eq!(
+            the_job("    timeout-minutes: 120\n", &[60, 60]),
+            SaveJob {
+                key: "browser".to_string(),
+                limit: Some(120),
+                steps: vec![Some(60), Some(60)],
+            }
+        );
+        assert_eq!(the_job("", &[60]).limit, None);
+    }
+
+    #[test]
+    fn a_job_limit_that_the_save_steps_can_use_up_fails() {
+        let two_saves = the_job("    timeout-minutes: 120\n", &[60, 60]);
+        let problem = job_limit_problem(&two_saves);
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.starts_with("job browser: ")),
+            "{problem:?}"
+        );
+        assert!(job_limit_problem(&the_job("    timeout-minutes: 134\n", &[60, 60])).is_some());
+        assert_eq!(
+            job_limit_problem(&the_job("    timeout-minutes: 135\n", &[60, 60])),
+            None
+        );
+        assert!(job_limit_problem(&the_job("    timeout-minutes: 74\n", &[60])).is_some());
+        assert_eq!(
+            job_limit_problem(&the_job("    timeout-minutes: 75\n", &[60])),
+            None
+        );
+        assert!(job_limit_problem(&the_job("", &[60])).is_some());
+        let no_step_limit = SaveJob {
+            key: "browser".to_string(),
+            limit: Some(180),
+            steps: vec![Some(60), None],
+        };
+        assert!(job_limit_problem(&no_step_limit).is_some());
+    }
+
     /// The CI run of 2026-10-28: a save that goes on is not stopped by a
     /// fixed time, a save with no progress for the stall time is, and a
     /// save past its cap is.

@@ -6,9 +6,10 @@
 //!   GitHub's runners), else `chromedriver` on `PATH`.  It must match the
 //!   installed Chrome's major version.
 //!
-//! A Safari run on macOS checks the screen lock first, holds
-//! `caffeinate -u` while it runs, and ends each stale `safaridriver`
-//! before each session start (TD-96).
+//! A Safari run on macOS checks the screen lock first, and holds
+//! `caffeinate -u` while it runs.  It ends each stale `safaridriver`
+//! before each `e2e` session start, and before each `web-test` crate run
+//! (TD-96).
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};

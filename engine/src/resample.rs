@@ -570,9 +570,10 @@ mod tests {
     /// product of a frame and `phases`, or of an output and `step`,
     /// overflow on wasm32.  The rates give the most phases, 441, with the
     /// fewest outputs, so the test is short: about 9.8 million frames give
-    /// 214,000 outputs.  The input is a ramp, so an output whose position
-    /// wraps gets a wrong value, also with no overflow checks.  About 2,200
-    /// outputs come after the frame where a usize product wraps.
+    /// about 215,000 outputs.  The input is a ramp, so an output whose
+    /// position wraps gets a wrong value, also with no overflow checks.
+    /// About 2,200 outputs come after the frame where a usize product
+    /// wraps.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn a_long_input_converts_with_a_32_bit_usize() {

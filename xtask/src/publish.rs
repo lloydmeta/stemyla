@@ -141,8 +141,22 @@ fn git(repo: &Path, args: &[&str]) -> Result<String> {
     run(repo, "git", args, &[])
 }
 
+/// `xtask publish`: [`main_with`] with the real publish.  No test calls
+/// it, since a test of it could push to the remote (GIT-1).  So
+/// cargo-mutants makes no mutant of it.
+#[cfg_attr(mutants, mutants::skip)]
 pub fn main(args: &[String]) -> Result<()> {
-    let o = Options::parse(args)?;
+    main_with(args, publish)
+}
+
+/// Parses `args`, and gives the options to `work`.  It gives the parse
+/// error back, and then does not call `work`.
+pub fn main_with(args: &[String], work: impl FnOnce(Options) -> Result<()>) -> Result<()> {
+    work(Options::parse(args)?)
+}
+
+/// Builds the web app, commits it to the branch, and pushes it.
+fn publish(o: Options) -> Result<()> {
     let repo = PathBuf::from(git(Path::new("."), &["rev-parse", "--show-toplevel"])?);
     let dirty = git(&repo, &["status", "--porcelain", "--untracked-files=no"])?;
     if !dirty.is_empty() && !o.allow_dirty {

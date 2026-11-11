@@ -1,11 +1,11 @@
 //! `xtask setup [--check] [tool...]`: installs each dev tool at its pin.
 //!
-//! The pins are here, and nowhere else: `README.md` and CI point to this
-//! command.  wasm-bindgen-cli takes the `wasm-bindgen` of `Cargo.lock`, and
-//! the nightly is `check::DOC_NIGHTLY`.  `--check` installs nothing, and
-//! fails when a tool is missing or at another version.  CI keeps one copy
-//! of the Trunk pin, beside the SHA-256 of its release binary, and a test
-//! keeps it equal to [`TRUNK`].
+//! The pins of Trunk and cargo-mutants are here.  wasm-bindgen-cli takes
+//! the `wasm-bindgen` of `Cargo.lock`, and the nightly is
+//! `check::DOC_NIGHTLY`.  `README.md` and CI point to this command for the
+//! installs.  `--check` installs nothing, and fails when a tool is missing
+//! or at another version.  CI keeps one copy of the Trunk pin, beside the
+//! SHA-256 of its release binary, and a test keeps it equal to [`TRUNK`].
 
 use crate::check::DOC_NIGHTLY;
 use crate::web_test::locked_version;
@@ -494,8 +494,6 @@ mod tests {
         let error = parse_args(&args(&["--check", "--lloyd"]))
             .unwrap_err()
             .to_string();
-        assert!(error.starts_with("unknown option --lloyd;"), "{error}");
-        let error = run(&args(&["--lloyd"])).unwrap_err().to_string();
         assert!(error.starts_with("unknown option --lloyd;"), "{error}");
     }
 

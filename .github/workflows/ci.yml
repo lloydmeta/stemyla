@@ -187,7 +187,8 @@ jobs:
     # vain ends on its own check.  Each test binary of `web-test`
     # may take 10 minutes (xtask/src/web_test.rs), so a slow `web-test` uses
     # the spare minutes first.  A hung browser must not hold the runner for
-    # GitHub's 6 h default.
+    # GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`
+    # (xtask/src/e2e/save.rs) checks that the limit holds the save step.
     timeout-minutes: 85
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -258,7 +259,8 @@ jobs:
     # the two `e2e save` steps, in Safari and in Chrome, may take its limit
     # of 60 minutes.  So the limit is 30 for the setup and the other steps,
     # 60 for each save, and 30 to spare.  A hung browser must not hold the
-    # runner for GitHub's 6 h default.
+    # runner for GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`
+    # (xtask/src/e2e/save.rs) checks that the limit holds the save steps.
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

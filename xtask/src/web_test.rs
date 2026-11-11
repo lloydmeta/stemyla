@@ -120,9 +120,7 @@ pub fn run(args: &[String]) -> Result<()> {
     for (package, targets) in runs {
         let mut cmd = Command::new(env!("CARGO"));
         cmd.current_dir(&root);
-        cmd.args(["test", "--locked", "--target", "wasm32-unknown-unknown"])
-            .args(["-p", package])
-            .args(targets)
+        cmd.args(crate_run_args(package, targets, filter.as_deref()))
             .env(
                 "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER",
                 "wasm-bindgen-test-runner",
@@ -158,9 +156,6 @@ pub fn run(args: &[String]) -> Result<()> {
                 var.name, var.value, var.why
             );
             cmd.env(var.name, var.value);
-        }
-        if let Some(f) = &filter {
-            cmd.args(["--", f]);
         }
         let (success, output) = run_crate(
             browser,
@@ -325,6 +320,7 @@ const NO_SESSION: &str = "webdriver POST /session request failed";
 /// prints `running N tests` once its session started.  Cargo stops at the
 /// first test binary that fails, so a later binary did not run.
 fn session_did_not_start(output: &str) -> bool {
+    let output = plain(output);
     let binaries = output
         .lines()
         .filter(|line| {
@@ -339,6 +335,40 @@ fn session_did_not_start(output: &str) -> bool {
         })
         .count();
     output.contains(NO_SESSION) && started < binaries
+}
+
+/// `text` with no ANSI colour codes.  A code is `ESC [`, then parameters,
+/// then one final character from `@` to `~`.  A code with no end goes to
+/// the end of `text`.  An `ESC` with another next character removes both.
+fn plain(text: &str) -> String {
+    let mut kept = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            kept.push(c);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            chars.find(|c| ('@'..='~').contains(c));
+        }
+    }
+    kept
+}
+
+/// The arguments of the `cargo test` of one crate run.  `--color never`
+/// keeps Cargo's `Running` lines plain for [`session_did_not_start`], also
+/// with CI's `CARGO_TERM_COLOR: always`.
+fn crate_run_args(package: &str, targets: &[&str], filter: Option<&str>) -> Vec<String> {
+    let fixed = ["test", "--locked", "--color", "never"];
+    let target = ["--target", "wasm32-unknown-unknown", "-p", package];
+    let filtered = filter.map(|f| ["--", f]);
+    fixed
+        .into_iter()
+        .chain(target)
+        .chain(targets.iter().copied())
+        .chain(filtered.into_iter().flatten())
+        .map(str::to_string)
+        .collect()
 }
 
 /// The line that `wasm-bindgen-test-runner` prints, and exits 0, when a
@@ -602,6 +632,66 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         assert!(
             !session_did_not_start(no_session_text),
             "a binary with no running line, and no NO_SESSION text"
+        );
+    }
+
+    /// Review round 2 of M2 (2-1): CI sets `CARGO_TERM_COLOR: always`, so
+    /// Cargo's `Running` line starts with colour codes.
+    #[test]
+    fn a_coloured_running_line_is_a_test_binary() {
+        let coloured = "\u{1b}[1m\u{1b}[92m     Running\u{1b}[0m unittests src/lib.rs (target/wasm32-unknown-unknown/debug/deps/stem_worker-1.wasm)\n\
+                        Running headless tests in Safari on `http://127.0.0.1:65028/`\n\
+                        Error: webdriver POST /session request failed\n";
+        assert!(session_did_not_start(coloured));
+        let started = format!("{coloured}\u{1b}[0mrunning 108 tests\u{1b}[0m\n");
+        assert!(!session_did_not_start(&started));
+    }
+
+    #[test]
+    fn plain_text_keeps_the_text_around_the_colour_codes() {
+        assert_eq!(
+            plain("\u{1b}[1m\u{1b}[92m     Running\u{1b}[0m lloyd.wasm)"),
+            "     Running lloyd.wasm)"
+        );
+        assert_eq!(plain("beachape [acme]"), "beachape [acme]");
+        assert_eq!(plain("\u{1b}[38;5;208macme"), "acme");
+        assert_eq!(plain("lloyd\u{1b}"), "lloyd");
+        assert_eq!(plain("lloyd\u{1b}[31"), "lloyd");
+        assert_eq!(plain("lloyd\u{1b}7acme"), "lloydacme");
+    }
+
+    #[test]
+    fn a_crate_run_asks_cargo_for_no_colour() {
+        let args = crate_run_args("app", &["--lib"], Some("a_lloyd_test"));
+        assert_eq!(
+            args,
+            strings(&[
+                "test",
+                "--locked",
+                "--color",
+                "never",
+                "--target",
+                "wasm32-unknown-unknown",
+                "-p",
+                "app",
+                "--lib",
+                "--",
+                "a_lloyd_test",
+            ])
+        );
+        assert_eq!(
+            crate_run_args("engine", &["--lib"], None),
+            strings(&[
+                "test",
+                "--locked",
+                "--color",
+                "never",
+                "--target",
+                "wasm32-unknown-unknown",
+                "-p",
+                "engine",
+                "--lib",
+            ])
         );
     }
 
