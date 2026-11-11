@@ -2,7 +2,7 @@
 
 ## Purpose
 
-D11 of `xtask e2e save` checks that a save of a 10-minute song grows the page's WebAssembly memory by at most 1 MiB more than a save of a 1-minute song (MEM-4).  In Safari, the check fails at times with no change of the code: CI run 43008561411 failed it for MP3.  CI's `macos` job runs `e2e save --browser safari`, and step 12 of the parent plan makes that job a required check.  So a flaky check would block merges.
+D11 of `xtask e2e save` checks that a save of a 10-minute song grows the page's WebAssembly memory by at most 1 MiB more than a save of a 1-minute song (MEM-4; 3 MiB since the maintainer's decision of 2026-11-11, Decision log).  In Safari, the check fails at times with no change of the code: CI run 43008561411 failed it for MP3.  CI's `macos` job runs `e2e save --browser safari`, and step 12 of the parent plan makes that job a required check.  So a flaky check would block merges.
 
 This step finds the cause of the flake with measurements, then fixes the measure or the cause.  The check must stay sound: it must still fail when a save grows the page's memory with the length of the song.  It must not fail because of when the page's start-up growth lands.
 
@@ -13,7 +13,7 @@ This plan is step 11 of M2 of `plans/active/tech-debt-rungs.md`.
 ### The decisions that this step follows
 
 * The maintainer asked on 2026-11-11 to fix TD-97 now, and to make the `macos` job a required check (step 12).  The orchestrator changes the ruleset; no agent of this step changes it.
-* Do not widen `WASM_BOUND_BYTES` (step 11 of the parent plan, and the fix line of TD-97).
+* Replaced by the maintainer's decision of 2026-11-11 (Decision log): `WASM_BOUND_BYTES` is 3 MiB.  Before it, the rule was: do not widen `WASM_BOUND_BYTES` (step 11 of the parent plan, and the fix line of TD-97).
 * Decision 0024 is the review rule, through the `review-rounds` skill.  The review base is `b94f5bc`.
 * Question 8 of the parent plan: no retry of a test or a scenario.  Only a WebDriver session start may try once more.
 
@@ -24,7 +24,7 @@ This plan is step 11 of M2 of `plans/active/tech-debt-rungs.md`.
   * `restore` makes the session current with a script, then reloads the page (`p.reload()`).  It waits for the line `store: session <id> is current`, and gives the log mark of the new page.  So each save is on a new page.
   * `save_once` waits for the probe line of the new page, then `p.idle(3.0)`.  Then it calls `window.__e2e_heap()`, and then it reads `wasm_before` with the script `WASM_MEMORY` (`memory.buffer.byteLength` of `window.wasmBindings`).  It clicks the save (`click_save`), waits for the offer, and reads `wasm_after` with `AFTER_SAVE`.  `growth(wasm_before, wasm_after)` gives `Save::wasm`.
   * `save_checks` compares, for each format, the `wasm` of the 600 s save with the 60 s save: `l - s <= WASM_BOUND_BYTES`.  The test of the bound is in the `mod tests` of the file, near line 1740.
-  * `WASM_BOUND_BYTES` is 1 MiB.  Its doc says that the save's reader holds 3 spans of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the length of the song.
+  * `WASM_BOUND_BYTES` is 1 MiB (3 MiB since `7dc0388`).  Its doc says that the save's reader holds 3 spans of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the length of the song.
 * `xtask/e2e/save_spy.js`: `__e2e_heap` runs `gc()` 4 times, with a task of 20 ms after the first 3, in Chrome (`--js-flags=--expose-gc`).  A collection queues the finalizers of wasm-bindgen's JS objects, which free their Rust objects in a later task.  The spy also calls `__e2e_heap` at each write of a save (`__e2e_start_heap`, `__e2e_stop_heap`).  In Safari, `__e2e_heap` gives `null` at once and collects nothing.  So in Safari, those frees come only when Safari's own collector runs.
 * `app/src/lib.rs`, near line 707: the page logs `page wasm <n> MB <when>` at some stages, rounded to 1 MB.  That is too coarse for this step.
 * `xtask/src/e2e/old_session.rs` reads the page's memory twice, about 2 s apart, and keeps the larger value.  This is a known pattern for a late growth.
@@ -128,28 +128,29 @@ Choose the fix from the data of step A, and record the choice in the Decision lo
 
 Whatever the fix, these hold:
 
-* `WASM_BOUND_BYTES` stays 1 MiB.
-* The check still fails when a 10-minute save grows the page's memory by more than 1 MiB more than a 1-minute save (MEM-4).
+* `WASM_BOUND_BYTES` is 3 MiB (Replaced by the maintainer's decision of 2026-11-11 (Decision log); it was "stays 1 MiB").
+* The check still fails when a 10-minute save grows the page's memory by more than 3 MiB more than a 1-minute save (MEM-4).
 * The measure is a pure function with unit tests in `xtask/src/e2e/save.rs`.  The browser run gives it its inputs.
 * No retry of the scenario or of a save (question 8).
 * Update every doc that states the measure in the same commit (DOC-1): the module doc of `xtask/src/e2e/save.rs`, the doc of `WASM_BOUND_BYTES`, the root `README.md` if it names the measure, `docs/invariants.md` (the gaps of MEM-4 and of VERIFY-1), `docs/references/local-browser-testing.md` (the TD-97 line), and `docs/tech-debt.md` (TD-97 to `## Closed`, or narrowed).
 
 Acceptance:
 
+* Replaced by the maintainer's decision of 2026-11-11 (Decision log), with the next two items: the two-level pairs of TD-97 and of run 43008561411 pass the bound of 3 MiB, and one byte more fails (`the_two_level_pairs_of_safari_pass_and_one_byte_more_fails`).  Literal cases of a save that keeps 1/30 or 1/18 of the song's 16-bit audio fail, also with a wider bound (`a_save_that_keeps_a_part_of_the_song_fails`).  Before it:
 * No save at the low level came in step A, so no real samples of one exist.  So a unit test models the two layouts of Surprises, (a) and (b), from the measured values of step A.  In each, the page asks for the same heap in the 1-minute and the 10-minute save, and the memory's growth differs by about 1.9 MB.  The test asserts that the old measure gives a pair over the bound, and that the new measure passes.  It fails on the old measure, on an assert.  The two-level pairs of TD-97 and of run 43008561411 are in the test's doc, as the cases that the model stands for.
-* A unit test asserts that the check fails when the growth scales with the length: for example, a 10-minute save that grows the memory by 1 MiB and one 64 KiB page more than the 1-minute save, after the start-up growth has settled.
-* If the fix waits for a settled page, a unit test of the wait covers the stable case, the late growth case and the time limit.  Another test asserts that the check fails when a growth that scales with the length lands after the settled read and before the click.  So the wait does not hide it.
+* (Replaced, see above.)  A unit test asserts that the check fails when the growth scales with the length: for example, a 10-minute save that grows the memory by 1 MiB and one 64 KiB page more than the 1-minute save, after the start-up growth has settled.
+* (Replaced, see above.)  If the fix waits for a settled page, a unit test of the wait covers the stable case, the late growth case and the time limit.  Another test asserts that the check fails when a growth that scales with the length lands after the settled read and before the click.  So the wait does not hide it.
 
 ### Step C: acceptance runs
 
 1. Build the page: `(cd app && trunk build --release)`.
 2. Run `e2e save --browser safari` 6 times in a row on the Mac, with the rules of the Mac.  Each run passes every check.  A failure starts the count again after its cause is known and fixed.  A run that a hidden page hangs (TD-96, shown by the visibility log) does not count, and does not start the count again.  Any other hang starts the count again.
-3. Six passes alone are not proof: before the fix, about 1 run in 6 failed, so 6 passes in a row came about 1 time in 3 with no fix.  So, for each format, all 12 values of the new measure (6 runs, 2 lengths) span at most 1 MiB (one level, not two).  Give the 12 values of each format as a table in Progress.  Give the count of saves at each level before the fix (step A, the old measure) and after (the new measure).
+3. Replaced by the maintainer's decision of 2026-11-11 (Decision log): each 10-minute less 1-minute growth of the 6 runs is under 3 MiB, and the 10 pairs of each run are a table in Progress.  Before it: six passes alone are not proof: before the fix, about 1 run in 6 failed, so 6 passes in a row came about 1 time in 3 with no fix.  So, for each format, all 12 values of the new measure (6 runs, 2 lengths) span at most 1 MiB (one level, not two).  Give the 12 values of each format as a table in Progress.  Give the count of saves at each level before the fix (step A, the old measure) and after (the new measure).
 4. Run `e2e save --browser chrome` once.  It passes.
 5. Run `cargo run -p xtask -- check --tier push` and `cargo build -p xtask`.
 6. Record each run, its log path and its D11 numbers in Progress.
 
-Acceptance: 6 Safari runs in a row pass, the 12 values of each format span at most 1 MiB, the Chrome run passes, and `check --tier push` passes.  TD-97 is under `## Closed` in `docs/tech-debt.md`, or narrowed with a clear cause outside the repo.
+Acceptance (Replaced by the maintainer's decision of 2026-11-11 (Decision log)): 6 Safari runs in a row pass, each 10-minute less 1-minute growth is under 3 MiB, the Chrome run passes, and `check --tier push` passes.  Met on 2026-11-11 at `7dc0388` (Progress).  Before it: 6 Safari runs in a row pass, the 12 values of each format span at most 1 MiB, the Chrome run passes, and `check --tier push` passes.  TD-97 is under `## Closed` in `docs/tech-debt.md`, or narrowed with a clear cause outside the repo.
 
 ### Step D: review rounds
 
@@ -178,7 +179,7 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
   * [x] 2026-11-11: the measure tools, in a worktree outside the repo (`m2/td97/measure-tree`, patch `m2/td97/measure.patch`).  No part is committed, so no test is owed.  They are the sampler, the stamps, the events, the finalizer count, a count of the Rust heap, a log of the font atlas, and the two controls.
   * [x] 2026-11-11: 2 Chrome runs and the 2 Chrome controls, 9 Safari measure runs (6 full runs, 2 of them controls of a 15 s idle; 1 run under load that stopped; 2 runs with no late read), 2 Safari page controls, and 3 Safari runs of HEAD.  Each log is in `m2/td97/measure/`.  The table is in Surprises.
   * [x] 2026-11-11: no save at the low level in 114 Safari saves (step A item 8).  The plan says to stop and report.  Step A stops here, and steps B and C wait for the team leader.
-* [x] Step B: the fix, with its tests.  The team leader chose option 1 on 2026-11-11 (Decision log).
+* [x] Step B: the fix, with its tests.  The team leader chose option 1 on 2026-11-11 (Decision log); the maintainer replaced it with a bound of 3 MiB the same day.
   * [x] 2026-11-11 (replaced by the next item, reverted): `app/src/heap_count.rs` counted the page's Rust heap on wasm32.  The page logs the heap line at each offer of the storage path.  `save_checks` compares the peaks; the memory's growth is logged.  Decision 0030 (`proposed`), TD-97 narrowed, and a new TD for the menu's buffer.  Each new test failed first on an assert:
     * `the_count_follows_each_call_and_keeps_the_peak`: against a `restart_peak` that did not set the peak, `assert_eq!(heap.peak(), 200)` got 4000.
     * `a_refused_allocation_counts_nothing`: against an `alloc` that counted a null pointer, the counts were (64, 64), not (0, 0).
@@ -202,8 +203,9 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
 | Safari 6 | 7,340,032 / 7,471,104 (+131,072) | 7,471,104 / 7,405,568 (-65,536) | 6,160,384 / 7,340,032 (+1,179,648) | 7,274,496 / 5,832,704 (-1,441,792) | 7,405,568 / 7,274,496 (-131,072) |
 | Chrome | 7,274,496 / 7,274,496 (0) | 7,405,568 / 7,274,496 (-131,072) | 7,405,568 / 7,274,496 (-131,072) | 7,274,496 / 7,471,104 (+196,608) | 7,471,104 / 7,143,424 (-327,680) |
 
-  * The largest 10-minute less 1-minute growth in Safari is +1,703,936 bytes (AAC, run 3), under the bound of 3,145,728.  The bound of 1 MiB would have failed runs 3 and 6 (+1,703,936 and +1,179,648).  Unlike step A, 6 saves came at the low level (5,636,096 to 6,160,384).  So the low level is still there; the bound holds over it.  With these runs, 150 Safari pairs give a largest difference of 1,900,544 bytes, and single growths from 5,505,024 to 7,602,176, the same as before.  The Chrome run's largest difference is 327,680 in absolute value.
+  * The largest 10-minute less 1-minute growth in Safari is +1,703,936 bytes (AAC, run 3), under the bound of 3,145,728.  The bound of 1 MiB would have failed runs 3 and 6 (+1,703,936 and +1,179,648).  Unlike step A, 5 saves came at the low level (5,636,096 to 6,160,384).  So the low level is still there; the bound holds over it.  With these runs, 150 Safari pairs give a largest difference of 1,900,544 bytes, and single growths from 5,505,024 to 7,602,176, the same as before.  The Chrome run's largest difference is 327,680 in absolute value.
   * [x] 2026-11-11: `cargo run -p xtask -- check --tier push` (13 lines) and `cargo build -p xtask` passed (`m2/td97/check-push-2.log`).
+  * [x] 2026-11-12, review round 1: `a_save_that_keeps_a_part_of_the_song_fails` pins the bound from above with literal values: 5,636,096 and 8,811,296 (1/30 kept at one level), and 7,602,176 and 10,797,024 (1/18 kept in the worst layout, 3,194,848 bytes more).  It failed first with `WASM_BOUND_BYTES` at 1024 MiB, on `assert_eq!(failed.len(), 1, ...)` for the first pair (`left: 0, right: 1`), and passes at 3 MiB.  The constant's doc, MEM-4, TD-97 and the Decision log give both thresholds.
 * [x] Step C, replaced (the heap's peak, at `af135fb`): 6 Safari runs in a row and one Chrome run passed.
   * [x] 2026-11-11, at `af135fb`: 6 runs of `e2e save --browser safari` in a row passed each check, with the lock read before each (`m2/td97/accept/safari-1.log` to `safari-6.log`).  None hung.  `e2e save --browser chrome` passed (`m2/td97/accept/chrome-1.log`).  The 12 Safari values of the new measure of each format, the heap's peak above its live bytes at the save's start, in bytes:
 
@@ -267,7 +269,7 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
 * 2026-11-11, agent (team leader): step B's test models layouts (a) and (b) from the values of step A, in place of real samples of a low save.  Reason: 114 Safari saves gave none.  The CI and step 9 pairs stay in the test's doc.
 * 2026-11-11, agent (team leader): TD-97 is narrowed to the growth by the allocator's layout alone, which the new check does not see.  Reason: the check measures the page's requests; a growth by layout is real memory on an iPhone, but it does not grow with the song in the data.
 * 2026-11-11, maintainer: refuse option 1 and decision 0030.  Quote: "I think you should simply measure and choose some kind of sane tolerance.  If it _really_ really makes no sense (prove why), then we can think again.  And avoid this kind of unjustifiable overengineering."  And: "writing a custom allocator is insane overengineering".  This replaces the three option-1 lines above, and the rule not to widen `WASM_BOUND_BYTES`.
-* 2026-11-11, agent: `WASM_BOUND_BYTES` is 3 MiB.  Reason: over 120 Safari pairs (the logs of `m2/td97/measure/`, `m2/td97/accept/`, `m2/flakes/`, `m2/flakes/after/` and CI run 43008561411), the largest 10-minute minus 1-minute growth is 1,900,544 bytes (1.81 MiB, the MP3 pair of CI).  The extremes of single growths, 5,505,024 and 7,602,176, give a worst pair of 2,097,152 bytes (2.00 MiB).  Over 25 Chrome pairs, the largest difference is 196,608 (327,680 in absolute value).  3 MiB is 1 MiB above the worst pair.  The proof that it still sees a growth with the song: the 9 minutes more fail when a save grows the memory by more than 3,145,728 / 9 = 349,525 bytes a minute.  A minute of 16-bit stereo at 44.1 kHz is 10,584,000 bytes (the 60 s WAV is 10,584,044 bytes).  So a save that keeps more than about 1/30 of the song's 16-bit audio fails.  The spread comes from the allocator's layout (step A).
+* 2026-11-11, agent: `WASM_BOUND_BYTES` is 3 MiB.  Reason: after step C, over 150 Safari pairs (the logs of `m2/td97/measure/`, `m2/td97/accept/`, `m2/td97/accept2/`, `m2/flakes/`, `m2/flakes/after/` and CI run 43008561411), the largest 10-minute less 1-minute growth is 1,900,544 bytes (1.81 MiB, the MP3 pair of CI run 43008561411).  The extremes of single growths, 5,505,024 (the ALAC save of 10 minutes of step 9, `m2/flakes/after/e2e-save-3.log`) and 7,602,176, give a worst pair of 2,097,152 bytes (2.00 MiB).  Over 30 Chrome pairs, the largest difference is 196,608, and 327,680 in absolute value.  3 MiB is 1 MiB above the worst pair.  Step A saw the same requests in each measured save, and no low save, so the spread comes from the allocator's layout.  The proof that the bound still sees a growth with the song: a minute of 16-bit stereo at 44.1 kHz is 10,584,000 bytes (the 60 s WAV is 10,584,044 bytes).  At one level, the 9 minutes more fail above 3,145,728 / 9 = 349,525 bytes a minute, about 1/30 of the song's 16-bit audio.  In the worst layout seen (1-minute high, 10-minute low, 2,097,152 bytes), they fail above (3,145,728 + 2,097,152) / 9 = 582,542 bytes a minute, about 1/18.
 * 2026-11-11, agent (team leader): no TD for the Save menu's short buffer.  Reason: a one-off growth of about 2 MB for each page is no cost that a reader must act on.  The finding stays in Surprises.
 
 ## Outcomes and retrospective

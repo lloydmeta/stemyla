@@ -48,15 +48,15 @@
 //!
 //! Checks of D11 (a save that does not wait for the UI frame): for each
 //! format, a 10-minute save grows the page's WebAssembly memory by at most
-//! [`WASM_BOUND_BYTES`] (3 MiB) more than a 1-minute save.  The 10-minute WAV save
-//! takes fewer animation frames than a quarter of its blocks, with the
-//! animation frames throttled to about 4 a second.  Each save's longest
+//! [`WASM_BOUND_BYTES`] (3 MiB) more than a 1-minute save.  The 10-minute
+//! WAV save takes fewer animation frames than a quarter of its blocks, with
+//! the animation frames throttled to about 4 a second.  Each save's longest
 //! slice, and its longest end of a read, which the page logs, are at most
-//! [`SLICE_LIMIT_MS`].  The last save saves the 10-minute mix as a WAV
-//! while the song plays, with animation frames of [`LONG_FRAME_MS`], as
-//! CI's paints in software.  It fails on an underrun, on frames of another
-//! time, and when the save takes more than [`PLAYING_SAVE_MS`].  The main
-//! thread's long tasks are logged, not checked.
+//! [`SLICE_LIMIT_MS`].  The last save saves the 10-minute mix as a WAV while
+//! the song plays, with animation frames of [`LONG_FRAME_MS`], as CI's
+//! paints in software.  It fails on an underrun, on frames of another time,
+//! and when the save takes more than [`PLAYING_SAVE_MS`].  The main thread's
+//! long tasks are logged, not checked.
 //!
 //! At the end, `saves/` holds only the offered files.  It prints every
 //! measure, and runs every check also after one failed, so a run of an
@@ -102,14 +102,18 @@ const ONE_MIB: f64 = 1_048_576.0;
 /// memory than a 1-minute save, in bytes.  The save's reader holds 3 spans
 /// of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the song's
 /// length.  So the two saves need the same memory.  But the growth depends
-/// on where the allocator finds free blocks, so in Safari it spreads by up
-/// to 1,900,544 bytes for the same requests (TD-97, step A of
-/// `plans/active/tech-debt-rungs-m2-td97.md`).  3 MiB is 1 MiB above the
-/// worst pair of single growths seen (2,097,152 bytes).  The 9 minutes
-/// more fail when a save grows the memory by more than 3,145,728 / 9 =
-/// 349,525 bytes a minute of song.  A minute of 16-bit stereo at 44.1 kHz
-/// is 10,584,000 bytes, so a save that keeps more than about 1/30 of the
-/// song's 16-bit audio fails.
+/// on where the allocator finds free blocks, so in Safari it has two
+/// levels for the same requests (TD-97; step A of
+/// `plans/active/tech-debt-rungs-m2-td97.md` saw the same requests in each
+/// measured save).  The largest pair seen is +1,900,544 bytes (MP3 of CI
+/// run 43008561411).  The extremes of single growths, 5,505,024 (step 9)
+/// and 7,602,176, give a worst pair of 2,097,152 bytes; 3 MiB is 1 MiB
+/// above it.  A minute of 16-bit stereo at 44.1 kHz is 10,584,000 bytes.
+/// At one level, the 9 minutes more fail above 3,145,728 / 9 = 349,525
+/// bytes a minute: a save that keeps about 1/30 of the song's 16-bit
+/// audio.  In the worst layout seen (1-minute high, 10-minute low), they
+/// fail above (3,145,728 + 2,097,152) / 9 = 582,542 bytes a minute: about
+/// 1/18 of it.
 pub(super) const WASM_BOUND_BYTES: f64 = 3.0 * ONE_MIB;
 /// The limit of the `e2e save` step in CI's `browser-tests` job
 /// (`timeout-minutes`), in seconds.  It is the longest that every wait of a
@@ -1769,11 +1773,12 @@ mod tests {
 
     /// TD-97: in Safari, the growth of a save has two levels, about 1.9 MB
     /// apart, whatever the song's length.  The pairs of 1 and 10 minutes
-    /// that failed the bound of 1 MiB pass: MP3 of CI run 43008561411, AAC
-    /// of step 9 of `plans/completed/tech-debt-rungs-m2.md`, and the
-    /// extremes of single growths in step A of
-    /// `plans/active/tech-debt-rungs-m2-td97.md`.  One byte more than the
-    /// bound above the 1-minute save fails.
+    /// that failed the bound of 1 MiB pass: MP3 of CI run 43008561411, and
+    /// AAC of step 9 of `plans/completed/tech-debt-rungs-m2.md`.  So does
+    /// the pair of the extremes of single growths: 5,505,024 (the ALAC save
+    /// of 10 minutes of step 9, `m2/flakes/after/e2e-save-3.log`) and
+    /// 7,602,176.  One byte more than the bound above the 1-minute save
+    /// fails.
     #[test]
     fn the_two_level_pairs_of_safari_pass_and_one_byte_more_fails() {
         let pairs = [
@@ -1793,6 +1798,29 @@ mod tests {
             saves[7].wasm = Some(short + WASM_BOUND_BYTES + 1.0);
             let failed = failing(&saves);
             assert_eq!(failed.len(), 1, "{failed:?}");
+            assert!(
+                failed[0].starts_with("alac: the 10-minute save grows"),
+                "{failed:?}"
+            );
+        }
+    }
+
+    /// MEM-4, with literal values so that a wider bound fails the test: a
+    /// 10-minute save that keeps a part of the song's 16-bit audio fails.
+    /// A minute of 16-bit stereo at 44.1 kHz is 10,584,000 bytes.  At one
+    /// level (5,636,096 for both lengths), keeping 1/30 of the 9 minutes
+    /// more adds 3,175,200 bytes.  In the worst layout seen (1-minute high
+    /// at 7,602,176, 10-minute low at 5,505,024), keeping 1/18 adds
+    /// 5,292,000 bytes, so the 10-minute save grows by 3,194,848 bytes more.
+    #[test]
+    fn a_save_that_keeps_a_part_of_the_song_fails() {
+        let pairs = [(5_636_096.0, 8_811_296.0), (7_602_176.0, 10_797_024.0)];
+        for (short, long) in pairs {
+            let mut saves = good();
+            saves[6].wasm = Some(short);
+            saves[7].wasm = Some(long);
+            let failed = failing(&saves);
+            assert_eq!(failed.len(), 1, "{short} and {long}: {failed:?}");
             assert!(
                 failed[0].starts_with("alac: the 10-minute save grows"),
                 "{failed:?}"
