@@ -18,7 +18,7 @@ Check `main` before treating any of these as a regression:
 
 * Safari keeps audio suspended while macOS reports the user idle (`references/browser-quirks.md`), so `e2e smoke` and `audio-resume` fail on any commit then.  The `caffeinate -u` of `web-test` and `e2e` is to stop this, but nobody saw it with an idle user (TD-96).
 * In `e2e storage`, the `?model_url=` download case sometimes timed out in Safari 27.0.  It passed in each of 7 runs in Safari 27.2 on 2026-11-11.
-* `e2e save` can fail its check of the page's WebAssembly memory in Safari: 1 of 6 runs on 2026-11-11 (TD-97).
+* Before decision 0030, `e2e save` failed its check of the page's WebAssembly memory in Safari in 1 of 6 runs (2026-11-11, TD-97).  The check now compares the peak of the page's Rust heap, and logs the memory's growth.
 * In a Safari `web-test`, each audio context of the test page stays suspended, so 5 tests skip: the 3 busy-page tests of `app/tests/web_output.rs`, and 2 tests of `app/src/streamtest.rs`.  They skip alone too, so no earlier test causes it.  `wasm-bindgen-test-runner` gives `safaridriver` no capabilities, so Safari's autoplay rule holds the audio back (TD-96).  Before each skip, the test checks that a new audio context of the page stays suspended too.  To see the skip lines, run the command with `-- --nocapture` that TD-96 gives.  It keeps the time limit of `web-test`.  Chrome runs these tests.
 
 ## Downloads in tests

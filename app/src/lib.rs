@@ -15,6 +15,7 @@ pub mod aac_probe;
 pub mod assemble;
 pub mod decoder;
 pub mod export;
+pub mod heap_count;
 pub mod lane_store;
 pub mod lanes;
 #[cfg(target_arch = "wasm32")]
@@ -554,11 +555,43 @@ fn save_type(format: export::Format) -> &'static str {
     }
 }
 
+#[cfg(target_arch = "wasm32")]
+thread_local! {
+    /// The live bytes of the page's heap at the start of the last save
+    /// (decision 0030).
+    static SAVE_HEAP_START: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Starts the measure of a save's heap: the peak of the page's heap
+/// starts again from its live bytes now (decision 0030).
+#[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
+fn start_save_heap() {
+    SAVE_HEAP_START.set(heap_count::restart_peak());
+}
+
+/// Logs the peak of the page's heap since the last save's start, above
+/// its live bytes then, and the page's WebAssembly memory.  `e2e save`
+/// reads this line (D11, decision 0030).
+#[cfg(target_arch = "wasm32")]
+#[cfg_attr(mutants, mutants::skip)]
+fn log_save_heap(name: &str) {
+    if let (Some(start), Some(peak)) = (SAVE_HEAP_START.get(), heap_count::peak()) {
+        log::info!(
+            "save: {name}: heap peak {} bytes above {start} bytes at the save's start, page wasm {} bytes",
+            peak.saturating_sub(start),
+            separator::page_wasm_bytes()
+        );
+    }
+}
+
 /// Offers the save file at `path` as the download `name`, and removes it
-/// after [`store::OFFERED_MS`] (D6 and D7 of M8).
+/// after [`store::OFFERED_MS`] (D6 and D7 of M8).  It logs the save's
+/// heap first ([`log_save_heap`]).
 #[cfg(target_arch = "wasm32")]
 #[cfg_attr(mutants, mutants::skip)]
 fn offer_save_file(name: String, path: String, format: export::Format) {
+    log_save_heap(&name);
     wasm_bindgen_futures::spawn_local(async move {
         let offered =
             store::download_file(&name, &path, save_type(format), store::OFFERED_MS).await;
@@ -4638,6 +4671,7 @@ impl StemApp {
             generation: self.lanes_generation,
         };
         let (frames, rate) = (order.what.frames, order.what.rate);
+        start_save_heap();
         self.saving = Some(self.saving_of(order, None, |wake| {
             export::SaveSink::Stored(export::StoredWav::new(
                 format!("{}.wav", store::new_save_path()),

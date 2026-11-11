@@ -231,11 +231,15 @@ fn post(worker: &Worker, request: &Request, settings: &Settings) -> bool {
 /// Megabytes of the page's WebAssembly memory, which only ever grows: on iOS
 /// the whole tab is stopped at a fixed limit.
 pub fn page_wasm_mb() -> f64 {
+    page_wasm_bytes() as f64 / 1e6
+}
+
+/// Bytes of the page's WebAssembly memory.
+pub fn page_wasm_bytes() -> u32 {
     let mem: js_sys::WebAssembly::Memory = wasm_bindgen::memory().unchecked_into();
     mem.buffer()
         .unchecked_into::<js_sys::ArrayBuffer>()
-        .byte_length() as f64
-        / 1e6
+        .byte_length()
 }
 
 /// Copies one segment (every stem's next samples, as transferred

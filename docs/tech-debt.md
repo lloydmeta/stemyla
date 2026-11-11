@@ -504,13 +504,23 @@ This entry concerns VERIFY-1.  The causes are outside the repo (step 9 of `plans
 * A hidden test page: on 2026-11-11, 2 Safari 27.2 runs of `app --lib` stopped with no failure, while a person used the Mac.  One stopped after 182 tests, in `playback_tests::the_page_reads_a_lane_one_block_at_a_time`.  The other stopped after 82 tests, in `save_tests::a_stopped_worker_leaves_no_save_files_and_takes_no_encode`.  Safari's unified log shows the cause.  Before each stop, the test page became hidden ("view visibility state changed 1 -> 0"), and stayed hidden.  WebKit then gave its process a background assertion only, and later tried to suspend it.  In the second run, a click in the automation window showed the "Automation Interruption" alert.  The runner's limit of 600 s ended the first run.  One run passed with the page hidden at times, so a hidden page does not always stop a run.  The logs are in `m2/i1-3/` (intent review I1-3 of M2).  Fix: none in the repo.  Do not use the Mac during a Safari run.
 * WebKit bug 246069 ([Use AbortSignal.reason in Fetch code](https://bugs.webkit.org/show_bug.cgi?id=246069), NEW on 2026-11-11): Safari 27.2 rejects an aborted fetch with its own `AbortError`.  The worker gives the abort reason in its place (`download_to_opfs` in `worker/src/web.rs`).  Fix: remove the workaround when WebKit gives the reason.
 
-### TD-97: the page's memory check of `e2e save` failed once in Safari
+### TD-97: the memory check of `e2e save` does not see a growth by the allocator's layout alone
 
 This entry concerns VERIFY-1 and MEM-4.
 
-D11 of `e2e save` compares the growth of the page's WebAssembly memory in a 10-minute save and in a 1-minute save.  The growth of the 10-minute save is at most 1 MiB more (`WASM_BOUND_BYTES` in `xtask/src/e2e/save.rs`).  On 2026-11-11, in Safari 27.2, 6 runs gave 30 such pairs.  One failed: the AAC save of 1 minute grew the memory by 5,767,168 bytes, and of 10 minutes by 7,274,496 bytes.  Each growth was near 5.8 MB or near 7.3 MB, for each length and each format.  So the measure has two levels that do not depend on the length of the song.  The check fails when the 1-minute save takes the low level and the 10-minute save the high one.  The cause of the two levels is not known.  CI's `macos` job runs `e2e save --browser safari`, so the job can fail on this check until the cause is known.  The logs are in the step 9 Surprises of `plans/completed/tech-debt-rungs-m2.md`.
+Until decision 0030, D11 of `e2e save` compared the growth of the page's WebAssembly memory in a 10-minute and a 1-minute save.  In Safari 27.2, the growth had two levels, near 5.8 MB and near 7.3 MB, for each length and format.  The check failed when the 1-minute save took the low level: 1 of 6 runs on 2026-11-11, and CI run 43008561411 (MP3: 5,636,096 and 7,536,640 bytes).  Step A of `plans/active/tech-debt-rungs-m2-td97.md` measured 114 Safari saves and 30 Chrome saves.  In each, the page's Rust heap had the same live bytes at the save's start and the same peak, to 2.3 KB, for 1 and 10 minutes.  The memory's growth still spread by up to 458,752 bytes.  So the growth depends on where the allocator finds free blocks.  No save at the low level came in step A, so the layout of a low save is not known.
 
-* Fix: find what grows the page's memory by about 1.5 MB in some saves only, before the save starts or during it.  Then measure from a page where it has already grown, or remove the growth.  Do not widen the bound before the cause is known.
+Since decision 0030, the check compares the peak of the page's Rust heap in the two saves (`WASM_BOUND_BYTES`, 1 MiB).  The page counts its heap (`app/src/heap_count.rs`).  The memory's growth is in the run's log, not checked.  So the check does not see a growth of the memory by the layout alone, with the same requests.  Such a growth is real memory on an iPhone.  In step A, it did not grow with the song.
+
+* Fix: a measure of the free blocks of the page's allocator, or an allocator whose layout does not depend on the order of the page's tasks.  Then check the memory's growth too.
+
+### TD-98: the Save menu's draw makes a short buffer of about 4 MB
+
+This entry concerns MEM-4.
+
+In step A of `plans/active/tech-debt-rungs-m2-td97.md`, each opening of the Save menu gave the Rust heap a peak 3,958,034 to 3,958,130 bytes above its live bytes in Safari, and 3,906,842 to 3,907,958 in Chrome.  After the draw, the heap kept 51,934 to 53,050 bytes of it.  The page's WebAssembly memory grew by 1.6 to 2.2 MB for it, in each save.  The font atlas did not change its size.  A short search did not confirm the source.  The likely source is epaint's font atlas: when its fill passes 80 %, egui makes the fonts again (`font_atlas_almost_full` in the module `text::fonts` of `epaint` 0.36.2).  A new atlas and a copy of it for the GPU then live beside the old atlas for one frame.  The atlas is 16,384 pixels wide, so 32 rows of it take 2 MiB.  Since decision 0030, the check of D11 measures from the save's start, after the menu, so it does not count this buffer.
+
+* Fix: log the atlas's fill and the texture deltas of the menu's frame, to find the source.  Then make the buffer smaller, for example with a narrower atlas (`max_texture_side`), or count it in a check.
 
 ## Known breaches
 

@@ -177,6 +177,15 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
   * [x] 2026-11-11: 2 Chrome runs and the 2 Chrome controls, 9 Safari measure runs (6 full runs, 2 of them controls of a 15 s idle; 1 run under load that stopped; 2 runs with no late read), 2 Safari page controls, and 3 Safari runs of HEAD.  Each log is in `m2/td97/measure/`.  The table is in Surprises.
   * [x] 2026-11-11: no save at the low level in 114 Safari saves (step A item 8).  The plan says to stop and report.  Step A stops here, and steps B and C wait for the team leader.
 * [ ] Step B: the fix, with its tests.  The team leader chose option 1 on 2026-11-11 (Decision log).
+  * [x] 2026-11-11: `app/src/heap_count.rs` counts the page's Rust heap on wasm32.  The page logs the heap line at each offer of the storage path.  `save_checks` compares the peaks; the memory's growth is logged.  Decision 0030 (`proposed`), TD-97 narrowed, TD-98 new.  Each new test failed first on an assert:
+    * `the_count_follows_each_call_and_keeps_the_peak`: against a `restart_peak` that did not set the peak, `assert_eq!(heap.peak(), 200)` got 4000.
+    * `a_refused_allocation_counts_nothing`: against an `alloc` that counted a null pointer, the counts were (64, 64), not (0, 0).
+    * `a_build_with_no_count_gives_none`: against a `restart_peak` that gave `Some(0)` on a native build.
+    * `a_heap_line_gives_the_peak_above_the_start`: against a `heap_line` that gave `None`.
+    * `a_growth_by_layout_alone_passes_the_heap_check`: against the old `save_checks`, layout (a) failed "wav: the 10-minute save grows the page's WebAssembly memory ... (Some(5373952.0) and Some(7471104.0) bytes)".
+    * `a_heap_peak_that_grows_with_the_song_fails`: against the old `save_checks`, a peak 1 MiB and 64 KiB higher gave no failure (`left: 0, right: 1`).
+    * `the_wasm_check_bounds_the_growth_of_the_long_save` became `the_heap_check_bounds_the_peak_of_the_long_save`.  It also asserts that a large memory growth alone passes.
+  * [x] 2026-11-11: one Chrome run of the new build passed (`m2/td97/accept/chrome-pre.log`).  The peaks were 7,647,356 to 7,647,369 bytes, the same for 1 and 10 minutes to 0 bytes in each format.  Each heap line's start plus its peak is the absolute peak of step A's `chrome-2` (25,973,059 for WAV).  The live bytes at the save's start are about 1.7 MB above those at the item's click, so the step A peak above the click is 1.7 MB higher.
 * [ ] Step C: 6 Safari runs in a row and one Chrome run pass.
 * [ ] Step D: the review rounds.
 
