@@ -378,6 +378,11 @@ fn blackman(w: f64) -> f64 {
 mod tests {
     use super::*;
 
+    // On wasm32, usize has 32 bits, so these tests also run there, in a
+    // browser (`xtask web-test`, VERIFY-1).
+    #[cfg(target_arch = "wasm32")]
+    wasm_bindgen_test::wasm_bindgen_test_configure!(run_in_browser);
+
     const AMP: f64 = 0.5;
 
     fn tone(hz: f64, rate: u32, frames: usize) -> Vec<f32> {
@@ -415,7 +420,8 @@ mod tests {
         to_rate(tone(hz, from, 2 * from as usize), from, SONG_RATE).unwrap()
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn a_second_at_48k_is_a_second_at_44k() {
         assert_eq!(
             to_rate(vec![0.0; 48_000], 48_000, 44_100).unwrap().len(),
@@ -426,7 +432,8 @@ mod tests {
         assert!(to_rate(Vec::new(), 48_000, 44_100).unwrap().is_empty());
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn the_pass_band_is_flat_to_20_khz() {
         // Every 500 Hz, since the SNR swings by up to 13.4 dB between tones.
         for hz in (0..40)
@@ -440,7 +447,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn an_alias_stays_above_20_khz() {
         // 23 kHz is above 44.1 kHz's 22.05 kHz, so it folds to 21.1 kHz.
         let y = converted(23_000.0, 48_000);
@@ -448,7 +456,8 @@ mod tests {
         assert!(alias <= -20.0, "alias at {alias:.1} dB");
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn upsampling_from_32k_keeps_a_tone() {
         assert_eq!(
             to_rate(vec![0.0; 32_000], 32_000, 44_100).unwrap().len(),
@@ -461,7 +470,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn a_rising_rate_makes_no_audible_image() {
         // A tone f below half the input rate has an image at `from - f`,
         // just above half the input rate, in the audible band.
@@ -480,7 +490,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn a_large_fall_keeps_the_pass_band() {
         // The taps grow with the input rate, also for a ratio just under 2.
         for from in [64_000, 88_000, 192_000, 384_000] {
@@ -492,7 +503,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn every_standard_rate_converts() {
         for from in [
             8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 48_000, 88_200, 96_000, 176_400,
@@ -506,7 +518,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn input_outside_the_song_counts_as_silence() {
         // 640 frames at 48 kHz are 588 at 44.1 kHz, a whole number, so the
         // padded song's outputs fall on the same phases as the song's.  The
@@ -519,7 +532,8 @@ mod tests {
         assert_eq!(bits(&a), bits(&b[588..588 + a.len()]));
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn the_output_is_not_delayed() {
         // A click 0.02 s in stays 0.02 s in: frame 882 at 44.1 kHz.  The
         // tone tests cannot see a delay, since a sine fit takes any phase.
@@ -532,7 +546,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn the_length_and_the_position_do_not_overflow_32_bits() {
         // 30,000,000 frames at 48 kHz, about 10.4 minutes: frames * 147 and
         // i * 160 are both above 2^32.
@@ -551,7 +566,43 @@ mod tests {
         }
     }
 
-    #[test]
+    /// An input of more than 2^32 / `phases` frames makes a usize
+    /// product of a frame and `phases`, or of an output and `step`,
+    /// overflow on wasm32.  The rates give the most phases, 441, with the
+    /// fewest outputs, so the test is short: about 9.7 million frames give
+    /// 212,000 outputs.  Both converters make each output of a constant.
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
+    fn a_long_input_converts_with_a_32_bit_usize() {
+        let (from, to, phases, step) = (383_990, 8_379, 441, 20_210);
+        let filter = Filter::new(from, to).unwrap();
+        assert_eq!((filter.phases, filter.step), (phases, step));
+        let frames = (1_u64 << 32).div_ceil(phases) + 1_000;
+        let level = 0.25;
+        let whole = to_rate(vec![level; frames as usize], from, to).unwrap();
+        assert_eq!(whole.len() as u64, output_len(frames, phases, step));
+        // A row of the filter sums to 1, so a constant passes, away from
+        // the two ends.
+        let last_full = whole.len() - 64;
+        for i in [64, whole.len() / 2, last_full] {
+            assert!((whole[i] - level).abs() < 1e-4, "output {i}: {}", whole[i]);
+        }
+        let mut resampler = Resampler::new(from, to).unwrap();
+        let block = vec![level; 1 << 20];
+        let mut blocks = Vec::with_capacity(whole.len());
+        let mut left = frames as usize;
+        while left > 0 {
+            let n = left.min(block.len());
+            blocks.extend_from_slice(resampler.push(&block[..n]));
+            left -= n;
+        }
+        blocks.extend_from_slice(resampler.finish());
+        assert_eq!(blocks.len(), whole.len());
+        assert!(blocks == whole, "the block resampler differs from to_rate");
+    }
+
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn the_same_rate_is_not_copied() {
         let x = tone(440.0, SONG_RATE, 1_000);
         let (at, bits) = (
@@ -581,7 +632,8 @@ mod tests {
         (bits(&whole), bits(&blocks))
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn the_block_resampler_gives_to_rate_exactly() {
         // A tone with an offset, so no sample is 0 and an edge counts.
         let x: Vec<f32> = (0..132_075)
@@ -611,7 +663,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn the_block_resampler_holds_at_most_one_window() {
         for from in [48_000, 8_000, 384_000] {
             let mut resampler = Resampler::new(from, SONG_RATE).unwrap();
@@ -624,7 +677,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn the_block_resampler_at_the_same_rate_passes_the_input_through() {
         let x = tone(440.0, SONG_RATE, 1_000);
         let mut resampler = Resampler::new(SONG_RATE, SONG_RATE).unwrap();
@@ -634,7 +688,8 @@ mod tests {
         assert!(resampler.finish().is_empty());
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn the_block_resampler_refuses_what_to_rate_refuses() {
         for (from, to) in [(44_056, SONG_RATE), (0, SONG_RATE), (7_000, SONG_RATE)] {
             let whole = to_rate(vec![0.0; 10], from, to).unwrap_err();
@@ -643,7 +698,8 @@ mod tests {
         }
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn an_odd_rate_is_refused() {
         // 44,056 / 44,100 is 11,014 / 11,025 in lowest terms.
         let e = to_rate(vec![0.0; 10], 44_056, SONG_RATE).unwrap_err();
@@ -651,7 +707,8 @@ mod tests {
         assert!(to_rate(vec![0.0; 10], 0, SONG_RATE).is_err());
     }
 
-    #[test]
+    #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
+    #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn a_rate_outside_8_to_384_khz_is_refused() {
         // Each of these needs 441 phases or fewer, so only the range
         // refuses them: a tiny rate makes a huge song, a huge rate a huge

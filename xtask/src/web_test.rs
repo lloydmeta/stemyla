@@ -1,9 +1,11 @@
 //! `xtask web-test [--browser safari|chrome] [--chrome-arg <arg>]... [filter]`:
 //! the browser tests
 //! of `app` (song sessions in browser storage), `stem-worker` (model
-//! storage, message handling), `decode-worker` and `stem-protocol`,
-//! compiled for wasm32 and run in a real browser by
-//! `wasm-bindgen-test-runner`.
+//! storage, message handling), `decode-worker`, `stem-protocol` and
+//! `engine` (the resampler with a 32-bit `usize`), compiled for wasm32 and
+//! run in a real browser by `wasm-bindgen-test-runner`.  It keeps the
+//! output of each crate run while it prints it, and fails a crate run
+//! whose test binary has no wasm test, unless a filter is given.
 //!
 //! It runs each crate, also after a crate fails.  Then it prints one line
 //! for each crate, and fails with the name of each crate that failed.
@@ -14,7 +16,8 @@
 
 use crate::drivers::Browser;
 use anyhow::{Context, Result, bail};
-use std::process::Command;
+use std::io::{BufRead, BufReader};
+use std::process::{Command, Stdio};
 
 /// Environment variables `wasm-bindgen-test-runner` reads to pick a driver
 /// (`<DRIVER>` and `<DRIVER>_REMOTE`); all are cleared, then one is set.
@@ -59,7 +62,7 @@ pub fn run(args: &[String]) -> Result<()> {
     }
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
-    let runs: [(&str, &[&str]); 4] = [
+    let runs: [(&str, &[&str]); 5] = [
         (
             "app",
             &[
@@ -75,6 +78,7 @@ pub fn run(args: &[String]) -> Result<()> {
         ("stem-worker", &["--lib"]),
         ("decode-worker", &["--lib"]),
         ("stem-protocol", &["--test", "web"]),
+        ("engine", &["--lib"]),
     ];
     let mut results = Vec::with_capacity(runs.len());
     for (package, targets) in runs {
@@ -115,10 +119,17 @@ pub fn run(args: &[String]) -> Result<()> {
         if let Some(f) = &filter {
             cmd.args(["--", f]);
         }
-        let status = cmd
-            .status()
-            .with_context(|| format!("running cargo test for {package}"))?;
-        results.push((package, status.success()));
+        let (success, output) =
+            run_and_keep(&mut cmd).with_context(|| format!("running cargo test for {package}"))?;
+        if filter.is_none() && found_no_test(&output) {
+            println!(
+                "web-test: {package}: a test binary has no wasm test (\"{NO_TESTS}\"); mark each test with wasm_bindgen_test"
+            );
+        }
+        results.push((
+            package,
+            crate_run_passed(success, &output, filter.as_deref()),
+        ));
     }
     match summary(&results) {
         Ok(lines) => {
@@ -157,6 +168,53 @@ fn summary(results: &[(&str, bool)]) -> Result<String, String> {
             failed.join(", ")
         ))
     }
+}
+
+/// The line that `wasm-bindgen-test-runner` prints, and exits 0, when a
+/// test binary has no `wasm_bindgen_test` left, for example plain
+/// `#[test]`s only.  The runner applies the filter first, so a binary
+/// whose tests the filter removes prints it too.
+const NO_TESTS: &str = "no tests to run!";
+
+/// Whether a crate run passed: `cargo test` exited with success, and, with
+/// no filter, each test binary had a wasm test.  With a filter, the marker
+/// shows only that the filter matched no test of a binary.
+fn crate_run_passed(success: bool, output: &str, filter: Option<&str>) -> bool {
+    success && (filter.is_some() || !found_no_test(output))
+}
+
+/// Whether the output of a crate run shows a test binary with no wasm test.
+fn found_no_test(output: &str) -> bool {
+    output.lines().any(|line| line.trim() == NO_TESTS)
+}
+
+/// Runs `cmd`, prints its stdout and stderr as they come, and keeps both.
+/// Gives whether it exited with success, and the kept text.
+fn run_and_keep(cmd: &mut Command) -> Result<(bool, String)> {
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn()?;
+    let stdout = child.stdout.take().context("no stdout of cargo test")?;
+    let stderr = child.stderr.take().context("no stderr of cargo test")?;
+    let errors = std::thread::spawn(move || {
+        let mut kept = String::new();
+        for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+            eprintln!("{line}");
+            kept.push_str(&line);
+            kept.push('\n');
+        }
+        kept
+    });
+    let mut kept = String::new();
+    for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+        println!("{line}");
+        kept.push_str(&line);
+        kept.push('\n');
+    }
+    let status = child.wait().context("waiting for cargo test")?;
+    let errors = errors
+        .join()
+        .map_err(|_| anyhow::anyhow!("the stderr reader of cargo test panicked"))?;
+    kept.push_str(&errors);
+    Ok((status.success(), kept))
 }
 
 /// Writes the `webdriver.json` of [`chrome_capabilities_json`] for the
@@ -275,6 +333,36 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             plain["goog:chromeOptions"]["args"],
             serde_json::json!(["--autoplay-policy=no-user-gesture-required"])
         );
+    }
+
+    #[test]
+    fn a_test_binary_with_no_wasm_test_is_found() {
+        let output = "     Running unittests src/lib.rs (target/wasm32-unknown-unknown/debug/deps/engine-1.wasm)\n\
+                      no tests to run!\n";
+        assert!(found_no_test(output));
+        assert!(found_no_test("  no tests to run!  \r\n"));
+    }
+
+    #[test]
+    fn a_line_that_only_holds_the_words_is_not_the_marker() {
+        let output = "Running headless tests in Chrome on `http://127.0.0.1:65045/`\n\
+                      test result: ok. 1 passed; 0 failed; 0 ignored; 196 filtered out; finished in 0.01s\n";
+        assert!(!found_no_test(output));
+        assert!(!found_no_test("test says: no tests to run! twice\n"));
+    }
+
+    #[test]
+    fn the_marker_fails_only_a_run_with_no_filter() {
+        let output = "no tests to run!\n";
+        assert!(!crate_run_passed(true, output, None));
+        assert!(crate_run_passed(true, output, Some("the_length")));
+        assert!(crate_run_passed(true, "test result: ok. 3 passed\n", None));
+        assert!(!crate_run_passed(
+            false,
+            "test result: FAILED. 0 passed; 1 failed\n",
+            None
+        ));
+        assert!(!crate_run_passed(false, output, Some("the_length")));
     }
 
     #[test]

@@ -3040,6 +3040,7 @@ dependencies = [
  "rusty_mp3",
  "symphonia",
  "timestretch",
+ "wasm-bindgen-test",
  "web-time",
  "wsola",
 ]

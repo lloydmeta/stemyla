@@ -182,7 +182,7 @@ The orchestrator committed it in `808aa66`.  No work.
 * [ ] Step 5: TD-95.
 * [ ] Step 6: TD-93.
 * [x] 2026-11-11: step 7, TD-8, `STEMYLA_REQUIRE` in a wasm test.  `a_word_of_the_build_is_required_with_no_run_time_value` and `the_words_of_the_build_and_of_the_run_are_both_required` (`test-support`) first failed on their `assert_eq!` against a `claimed` that kept only the run-time value.  `a_chrome_arg_goes_after_the_autoplay_policy` (`xtask/src/web_test.rs`) first failed on its `assert_eq!` against a function that dropped the extra arguments.  In Chrome with `--disable-gpu` and `STEMYLA_REQUIRE=gpu`, `a_read_back_is_copied_into_wasm_memory_once` fails (Surprises).  `stem-worker` now takes `test-support`, so the fixture graph of `xtask check` (`the_fixture_graph_is_the_real_graph`) takes it too.
-* [ ] Step 8: TD-51.
+* [x] 2026-11-11: step 8, TD-51.  `a_test_binary_with_no_wasm_test_is_found` first failed on `assert!(found_no_test(output))` against a stub that gave `false`.  `the_marker_fails_only_a_run_with_no_filter` first failed on `assert!(crate_run_passed(true, output, Some("the_length")))` against a function that ignored the filter.  Before the engine tests had the wasm attribute, a full Chrome `web-test` failed `engine` only, on "no tests to run!".  The planted `usize` product failed on wasm32 and passed natively (Surprises).  Chrome then passed every crate.  The Safari run is owed.
 * [ ] Step 9: the Safari flakes.
 * [ ] Step 10: the macOS job (TD-92).
 * [ ] Review rounds.
@@ -221,6 +221,10 @@ Safari runs owed (each waits until the screen of the Mac is unlocked):
 
   `web-test` listed `stem-worker` as the failed crate.  The other crates ran 0 tests, with "filtered out", and passed.
 * 2026-11-11, step 7: Cargo builds `test-support` again when `STEMYLA_REQUIRE` changes.  The dep-info file holds `# env-dep:STEMYLA_REQUIRE=gpu`.  `CARGO_LOG=cargo::core::compiler::fingerprint=info` prints nothing in Cargo 1.99.1: the target is now `cargo::compiler::fingerprint`.  `CARGO_LOG=info` gives `stale: changed env "STEMYLA_REQUIRE"`, `Some("gpu") != None` and `dirty: FsStatusOutdated(StaleItem(ChangedEnv { var: "STEMYLA_REQUIRE", previous: Some("gpu"), current: None }))` for `test-support` (`m2/step7-fingerprint.log`).
+* 2026-11-11, step 8: the plan said that a filtered run with 0 tests prints "filtered out", not the marker.  That is wrong for wasm-bindgen-test-runner 0.2.130: it removes the filtered tests first, then prints "no tests to run!" when none is left (`src/wasm_bindgen_test_runner.rs`, lines 173-238).  With the filter `the_length`, each of the 5 crate runs printed the marker (`m2/step8-engine-no-wasm-test.log`).  So the marker fails only a run with no filter.
+* 2026-11-11, step 8: with no wasm test in `engine`, a full Chrome `web-test` gave "web-test: engine: a test binary has no wasm test", passed the 4 other crates, and failed with "failed crates: engine" (`m2/step8-engine-no-wasm-test-full.log`).
+* 2026-11-11, step 8: the plan's rate pair, 384 kHz to 44.1 kHz, made `a_long_input_converts_with_a_32_bit_usize` take 43.6 s natively at opt-level 0.  Its cost is `2^32 / step` outputs times the taps, so the test takes 383,990 Hz to 8,379 Hz: gcd 19, 441 phases (`MAX_PHASES`), step 20,210, 512 taps.  9.74 million frames give 212,000 outputs.  It takes 2.8 s natively, and 2.3 s on wasm32 in Chrome 157 (`m2/step8-long-chrome.log`).  The engine crate run takes 14.9 s in Chrome.
+* 2026-11-11, step 8, the plant: `let planted = i * self.step as usize; std::hint::black_box(planted);` in the output loop of `Filter::apply`.  Natively the test passed.  In Chrome it failed: "panicked at engine/src/resample.rs:322:27: attempt to multiply with overflow" (`m2/step8-planted-chrome.log`).  The plant is not committed.
 
 ## Decision log
 
@@ -242,6 +246,8 @@ Safari runs owed (each waits until the screen of the Mac is unlocked):
 * 2026-11-11, agent: step 7 joins the words of the build and of the run (`test_support::claimed`).  A word in either is required.  Reason: a wasm test has only the value of the build, and a native run has both, which Cargo keeps equal.
 * 2026-11-11, agent: step 7 gives Chrome more arguments with `web-test --chrome-arg <arg>`.  `--disable-gpu` takes the adapter away; `--disable-webgpu` does not.  `web-test` passes `STEMYLA_REQUIRE` to each crate run through its inherited environment, so it needs no code for it.
 * 2026-11-11, agent: step 7 keeps `ONLY_THE_WORDS` of `test-support` as it is.  Reason: its text names the words, and says nothing about wasm.
+* 2026-11-11, agent: step 8 fails the marker "no tests to run!" only in a `web-test` with no filter.  Reason: the runner prints the marker also when the filter removes each test of a binary, so a filtered run cannot tell the two apart.  CI and each acceptance run have no filter.
+* 2026-11-11, agent: step 8 keeps `-p engine` out of the browser-test command of `THIRD-PARTY.md`.  Reason: the command and the shipped command share one package list in `third_party_args`, and `engine`'s crate run adds only test crates and the stretch features (`cute-dsp`, `timestretch` and their dependencies, `oxideav-aac`), which the page does not ship.  DEPS-1 covers what ships; DEPS-1's pins and `Cargo.lock` cover these crates already.
 * 2026-11-11, agent: step 4 does not capture the output of a crate run.  Step 8 adds the capture, with its own tests.  Reason: step 4's acceptance is the summary only, and a small commit is easier to review.
 
 ## Outcomes and retrospective
