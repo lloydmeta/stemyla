@@ -8,8 +8,13 @@
 //! (`STEMYLA_REQUIRE=gpu,timestamps,f16,fixtures`); a skip of a listed need
 //! panics instead.  An unknown word panics too, so a typo cannot turn the
 //! check off.
+//!
+//! The list is the value of [`VAR`] at build time and at run time.  A wasm
+//! test has no environment at run time, so it gets the value of the build.
+//! Cargo builds this crate again when the value changes.  stderr of a wasm
+//! test goes nowhere, so a wasm test logs [`skip_line`] on the console.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
 
 /// The environment variable that lists the needs a run requires.
@@ -110,16 +115,44 @@ pub fn verdict(list: Option<&OsStr>, need: Need, why: &str) -> Result<String, St
     }
 }
 
-/// Reports that a test cannot run because it lacks `need`: prints the skip
-/// line, or panics when [`VAR`] requires `need`.  The caller then returns.
-/// The panic is in this body, not in a closure, so `#[track_caller]` names
-/// the caller's line.
+/// The list that a run claims: the words of [`VAR`] at build time
+/// (`built`) and at run time (`run`).  `None` when neither is set.
+pub fn claimed(built: Option<&str>, run: Option<&OsStr>) -> Option<OsString> {
+    match (built, run) {
+        (None, None) => None,
+        (Some(built), None) => Some(OsString::from(built)),
+        (None, Some(run)) => Some(run.to_os_string()),
+        (Some(built), Some(run)) => {
+            let mut both = OsString::from(built);
+            both.push(",");
+            both.push(run);
+            Some(both)
+        }
+    }
+}
+
+/// The skip line of a test that cannot run because it lacks `need`, or a
+/// panic when the run requires `need`.  The caller prints or logs the
+/// line, then returns.  The panic is in this body, not in a closure, so
+/// `#[track_caller]` names the caller's line.
 #[track_caller]
-pub fn skip(need: Need, why: impl Display) {
-    match verdict(std::env::var_os(VAR).as_deref(), need, &why.to_string()) {
-        Ok(line) => eprintln!("{line}"),
+pub fn skip_line(need: Need, why: impl Display) -> String {
+    let list = claimed(
+        option_env!("STEMYLA_REQUIRE"),
+        std::env::var_os(VAR).as_deref(),
+    );
+    match verdict(list.as_deref(), need, &why.to_string()) {
+        Ok(line) => line,
         Err(message) => panic!("{message}"),
     }
+}
+
+/// Reports that a test cannot run because it lacks `need`: prints the skip
+/// line on stderr, or panics when the run requires `need`.  The caller
+/// then returns.
+#[track_caller]
+pub fn skip(need: Need, why: impl Display) {
+    eprintln!("{}", skip_line(need, why));
 }
 
 #[cfg(test)]
@@ -151,6 +184,37 @@ mod tests {
         assert_eq!(
             verdict(list("fixtures"), Need::Fixtures, "x not found"),
             Err("VERIFY-1: STEMYLA_REQUIRE has fixtures, but this test cannot run: x not found.  Fix: write the fixtures with tools/roformer_export.py, or remove fixtures from STEMYLA_REQUIRE.".into())
+        );
+    }
+
+    #[test]
+    fn a_word_of_the_build_is_required_with_no_run_time_value() {
+        let built = claimed(Some("gpu"), None);
+        assert_eq!(
+            verdict(built.as_deref(), Need::Gpu, "no GPU adapter: none"),
+            Err("VERIFY-1: STEMYLA_REQUIRE has gpu, but this test cannot run: no GPU adapter: none.  Fix: run it where a GPU adapter opens, or remove gpu from STEMYLA_REQUIRE.".into())
+        );
+        assert_eq!(claimed(None, None), None);
+        assert_eq!(claimed(None, list("gpu")), Some(OsString::from("gpu")));
+    }
+
+    #[test]
+    fn the_words_of_the_build_and_of_the_run_are_both_required() {
+        let both = claimed(Some("fixtures"), list("gpu"));
+        assert_eq!(both, Some(OsString::from("fixtures,gpu")));
+        assert!(verdict(both.as_deref(), Need::Gpu, "none").is_err());
+        assert!(verdict(both.as_deref(), Need::Fixtures, "none").is_err());
+        assert_eq!(
+            verdict(both.as_deref(), Need::Timestamps, "none"),
+            skip_line("timestamps", "none")
+        );
+        assert_eq!(
+            verdict(
+                claimed(Some("gpus"), None).as_deref(),
+                Need::Fixtures,
+                "x not found"
+            ),
+            Err(UNKNOWN_GPUS.into())
         );
     }
 

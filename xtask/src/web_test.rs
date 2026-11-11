@@ -1,4 +1,5 @@
-//! `xtask web-test [--browser safari|chrome] [filter]`: the browser tests
+//! `xtask web-test [--browser safari|chrome] [--chrome-arg <arg>]... [filter]`:
+//! the browser tests
 //! of `app` (song sessions in browser storage), `stem-worker` (model
 //! storage, message handling), `decode-worker` and `stem-protocol`,
 //! compiled for wasm32 and run in a real browser by
@@ -31,11 +32,17 @@ const WEB_TEST_TIMEOUT_S: &str = "600";
 pub fn run(args: &[String]) -> Result<()> {
     let mut browser = Browser::default_here();
     let mut filter = None;
+    let mut chrome_args = Vec::new();
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
             "--browser" => {
                 browser = Browser::parse(args.get(i + 1).context("--browser needs a name")?)?;
+                i += 1;
+            }
+            "--chrome-arg" => {
+                let arg = args.get(i + 1).context("--chrome-arg needs an argument")?;
+                chrome_args.push(arg.clone());
                 i += 1;
             }
             other if other.starts_with("--") => bail!("unknown option {other}"),
@@ -47,6 +54,9 @@ pub fn run(args: &[String]) -> Result<()> {
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).context("reading Cargo.lock")?;
     let wanted = locked_version(&lock, "wasm-bindgen").context("no wasm-bindgen in Cargo.lock")?;
     check_runner(&wanted)?;
+    if browser != Browser::Chrome && !chrome_args.is_empty() {
+        bail!("--chrome-arg needs --browser chrome");
+    }
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
     let runs: [(&str, &[&str]); 4] = [
@@ -99,7 +109,7 @@ pub fn run(args: &[String]) -> Result<()> {
         if browser == Browser::Chrome {
             cmd.env(
                 "WASM_BINDGEN_TEST_WEBDRIVER_JSON",
-                chrome_capabilities(&root)?,
+                chrome_capabilities(&root, &chrome_args)?,
             );
         }
         if let Some(f) = &filter {
@@ -149,18 +159,25 @@ fn summary(results: &[(&str, bool)]) -> Result<String, String> {
     }
 }
 
-/// A `webdriver.json` for the runner that lets Chrome play audio without a
-/// click, so an audio context runs and its clock moves (`app/tests/
-/// web_output.rs`).  The runner adds its own arguments (headless) to these.
-fn chrome_capabilities(root: &std::path::Path) -> Result<std::path::PathBuf> {
+/// Writes the `webdriver.json` of [`chrome_capabilities_json`] for the
+/// runner, and gives its path.
+fn chrome_capabilities(root: &std::path::Path, extra: &[String]) -> Result<std::path::PathBuf> {
     let path = root.join("target/web-test-chrome.json");
     std::fs::create_dir_all(root.join("target"))?;
-    std::fs::write(
-        &path,
-        r#"{"goog:chromeOptions": {"args": ["--autoplay-policy=no-user-gesture-required"]}}"#,
-    )
-    .context("writing the Chrome capabilities")?;
+    std::fs::write(&path, chrome_capabilities_json(extra))
+        .context("writing the Chrome capabilities")?;
     Ok(path)
+}
+
+/// A `webdriver.json` that lets Chrome play audio without a click, so an
+/// audio context runs and its clock moves (`app/tests/web_output.rs`).
+/// `extra` holds the arguments of `--chrome-arg`, such as
+/// `--disable-webgpu`.  The runner adds its own arguments (headless).
+fn chrome_capabilities_json(extra: &[String]) -> String {
+    let args: Vec<&str> = std::iter::once("--autoplay-policy=no-user-gesture-required")
+        .chain(extra.iter().map(String::as_str))
+        .collect();
+    serde_json::json!({"goog:chromeOptions": {"args": args}}).to_string()
 }
 
 /// The version of `name` in a `Cargo.lock` (the first, if several).
@@ -237,6 +254,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                  web-test: stem-protocol: passed\n\
                  web-test: failed crates: app, decode-worker"
                 .to_string())
+        );
+    }
+
+    #[test]
+    fn a_chrome_arg_goes_after_the_autoplay_policy() {
+        let json: serde_json::Value =
+            serde_json::from_str(&chrome_capabilities_json(&["--disable-webgpu".to_string()]))
+                .unwrap();
+        assert_eq!(
+            json["goog:chromeOptions"]["args"],
+            serde_json::json!([
+                "--autoplay-policy=no-user-gesture-required",
+                "--disable-webgpu"
+            ])
+        );
+        let plain: serde_json::Value =
+            serde_json::from_str(&chrome_capabilities_json(&[])).unwrap();
+        assert_eq!(
+            plain["goog:chromeOptions"]["args"],
+            serde_json::json!(["--autoplay-policy=no-user-gesture-required"])
         );
     }
 

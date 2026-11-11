@@ -3485,15 +3485,22 @@ async fn a_short_read_of_the_mix_is_an_error() {
 /// it is read as a slice, so a `to_vec` of that slice made a second copy.
 /// `Job::mask` reads one mask of a chunk (18.9 MB at the default chunk)
 /// this way, six times for each chunk.  A browser with no GPU adapter
-/// (CI's headless Chrome can have none) logs a skip (TD-8).  Any other
-/// error, such as an adapter whose device does not open, fails the test.
+/// (CI's headless Chrome can have none) logs a skip, which fails when the
+/// build has `STEMYLA_REQUIRE=gpu`.  Any other error, such as an adapter
+/// whose device does not open, fails the test.
 #[wasm_bindgen_test]
 async fn a_read_back_is_copied_into_wasm_memory_once() {
     let gpu = match Gpu::new(wgpu::PowerPreference::default()).await {
         Ok(gpu) => gpu,
         Err(error) => match error.strip_prefix("no GPU adapter: ") {
             Some(e) => {
-                console_log!("skipped: no GPU adapter: {e}");
+                console_log!(
+                    "{}",
+                    test_support::skip_line(
+                        test_support::Need::Gpu,
+                        format!("no GPU adapter: {e}")
+                    )
+                );
                 return;
             }
             None => panic!("the GPU did not open: {error}"),
@@ -3519,14 +3526,21 @@ async fn a_read_back_is_copied_into_wasm_memory_once() {
 /// tile that names it, `f16_ok` stays false, and the default loads f32.
 /// The error scopes catch the errors, so none reaches the device's error
 /// sink, where it could fail a later check or the model upload.  A browser
-/// with no GPU adapter logs a skip (TD-8).
+/// with no GPU adapter logs a skip, which fails when the build has
+/// `STEMYLA_REQUIRE=gpu`.
 #[wasm_bindgen_test]
 async fn an_f16_variant_the_browser_rejects_keeps_f32_weights() {
     let gpu = match Gpu::new(wgpu::PowerPreference::default()).await {
         Ok(gpu) => gpu,
         Err(error) => match error.strip_prefix("no GPU adapter: ") {
             Some(e) => {
-                console_log!("skipped: no GPU adapter: {e}");
+                console_log!(
+                    "{}",
+                    test_support::skip_line(
+                        test_support::Need::Gpu,
+                        format!("no GPU adapter: {e}")
+                    )
+                );
                 return;
             }
             None => panic!("the GPU did not open: {error}"),

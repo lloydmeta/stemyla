@@ -7499,6 +7499,7 @@ dependencies = [
  "safetensors 0.7.0",
  "stem-protocol",
  "symphonia",
+ "test-support",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "wasm-bindgen-test",

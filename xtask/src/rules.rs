@@ -59,22 +59,17 @@ const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
         "app/tests/web_output.rs",
         "skipped: the audio context is suspended",
-        "a wasm test cannot read STEMYLA_REQUIRE; the test asserts that the browser is not Chrome, and CI runs Chrome",
+        "a suspended audio context is not a need of STEMYLA_REQUIRE: the test asserts that the browser is not Chrome, and CI runs Chrome",
     ),
     (
         "app/src/streamtest.rs",
         "skipped: the audio context is suspended",
-        "a wasm test cannot read STEMYLA_REQUIRE; the test asserts the audio clock in Chrome, and CI runs Chrome",
-    ),
-    (
-        "worker/src/web/tests.rs",
-        "skipped: no GPU adapter: {e}",
-        "a wasm test cannot read STEMYLA_REQUIRE; CI's headless Chrome can have no GPU adapter, so the maintainer's Mac gives the evidence (TD-8).  `a_read_back_is_copied_into_wasm_memory_once` and `an_f16_variant_the_browser_rejects_keeps_f32_weights` log it",
+        "a suspended audio context is not a need of STEMYLA_REQUIRE: the test asserts the audio clock in Chrome, and CI runs Chrome",
     ),
     (
         "worker/src/web/tests/aac.rs",
         "skipped: this browser has no AAC encoder",
-        "a wasm test cannot read STEMYLA_REQUIRE; CI's Chrome on Linux has no AAC encoder, so the maintainer's Mac gives the evidence (TD-92).  `a_real_aac_decodes_to_the_source` logs it",
+        "STEMYLA_REQUIRE has no need for an AAC encoder; CI's Chrome on Linux has no AAC encoder, so the maintainer's Mac gives the evidence (TD-92).  `a_real_aac_decodes_to_the_source` logs it",
     ),
 ];
 

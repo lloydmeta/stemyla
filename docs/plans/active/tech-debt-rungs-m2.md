@@ -181,7 +181,7 @@ The orchestrator committed it in `808aa66`.  No work.
 * [x] 2026-11-11: step 3, Trunk 0.22.1.  The new test `trunk_s_lock_file_never_reaches_the_site` (`xtask/tests/publish.rs`) first failed on its first assert: `check_build` gave `Ok(())` for a build with `.trunk-lock`.  With the refusal and no removal, it failed on the assert "the lock file stays in the site tree".  It passes with both.
 * [ ] Step 5: TD-95.
 * [ ] Step 6: TD-93.
-* [ ] Step 7: TD-8, `STEMYLA_REQUIRE` in a wasm test.
+* [x] 2026-11-11: step 7, TD-8, `STEMYLA_REQUIRE` in a wasm test.  `a_word_of_the_build_is_required_with_no_run_time_value` and `the_words_of_the_build_and_of_the_run_are_both_required` (`test-support`) first failed on their `assert_eq!` against a `claimed` that kept only the run-time value.  `a_chrome_arg_goes_after_the_autoplay_policy` (`xtask/src/web_test.rs`) first failed on its `assert_eq!` against a function that dropped the extra arguments.  In Chrome with `--disable-gpu` and `STEMYLA_REQUIRE=gpu`, `a_read_back_is_copied_into_wasm_memory_once` fails (Surprises).  `stem-worker` now takes `test-support`, so the fixture graph of `xtask check` (`the_fixture_graph_is_the_real_graph`) takes it too.
 * [ ] Step 8: TD-51.
 * [ ] Step 9: the Safari flakes.
 * [ ] Step 10: the macOS job (TD-92).
@@ -211,6 +211,16 @@ Safari runs owed (each waits until the screen of the Mac is unlocked):
 * 2026-11-11, step 3: Trunk names its lock file `.trunk-lock`, in the dist folder (`BUILD_LOCK_FILE` in `src/build.rs` at the tag `v0.22.1`, [commit 5ccc168](https://github.com/trunk-rs/trunk/commit/5ccc1688d9a313ebbc60af0fb5a0ede366b1803a)).  0.22.1 changes only the dependencies from 0.22.0.  The file stays after the build: it is empty, and `app/dist/.trunk-lock` is ignored by `.gitignore`.
 * 2026-11-11, step 3: the SHA-256 of `trunk-x86_64-unknown-linux-gnu.tar.gz` of v0.22.1 is `2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1`.  `shasum -a 256` of the download and the `digest` of the release asset in the GitHub API give the same value.  The tarball holds one file, `trunk`.  Nobody ran it.
 * 2026-11-11, step 3: `trunk build --release` in `app`, at `5057fc4`, gives the same 26 paths in `app/dist` with 0.21.14 and with 0.22.1, and 0.22.1 adds `.trunk-lock` (`m2/step3-dist-0.21.14.txt`, `m2/step3-dist-0.22.1.txt`).  The workers keep their names (`stem-worker_loader.js`, `decode-worker_loader.js`), and the snippet folders keep their hashes.
+* 2026-11-11, step 7, the Chrome runs with the filter `a_read_back_is_copied` (logs in `m2/step7-*.log`):
+
+  | Chrome argument | `STEMYLA_REQUIRE` | Result of `a_read_back_is_copied_into_wasm_memory_once` |
+  | - | - | - |
+  | `--disable-webgpu` | `gpu` | passed: the adapter opened, so Chrome 157 has no such switch |
+  | `--disable-gpu` | `gpu` | failed: "VERIFY-1: STEMYLA_REQUIRE has gpu, but this test cannot run: no GPU adapter: ... webgpu found no adapters" |
+  | `--disable-gpu` | not set | passed (the runner shows no console line of a test that passes) |
+
+  `web-test` listed `stem-worker` as the failed crate.  The other crates ran 0 tests, with "filtered out", and passed.
+* 2026-11-11, step 7: Cargo builds `test-support` again when `STEMYLA_REQUIRE` changes.  The dep-info file holds `# env-dep:STEMYLA_REQUIRE=gpu`.  `CARGO_LOG=cargo::core::compiler::fingerprint=info` prints nothing in Cargo 1.99.1: the target is now `cargo::compiler::fingerprint`.  `CARGO_LOG=info` gives `stale: changed env "STEMYLA_REQUIRE"`, `Some("gpu") != None` and `dirty: FsStatusOutdated(StaleItem(ChangedEnv { var: "STEMYLA_REQUIRE", previous: Some("gpu"), current: None }))` for `test-support` (`m2/step7-fingerprint.log`).
 
 ## Decision log
 
@@ -228,6 +238,10 @@ Safari runs owed (each waits until the screen of the Mac is unlocked):
 * 2026-11-11, agent (orchestrator): the order while the lock holds is the Chrome baseline, step 2 (Chrome now, Safari owed), step 3, step 7, step 8 and step 10.  Steps 5, 6 and 9 wait for the lock to clear.  Step 6's pure function, its tests and the draft wgpu issue need no Safari, so they may go first.  After step 10, the implementer stops, so the orchestrator pushes and reads the CI run.
 * 2026-11-11, agent (orchestrator): step 2 applies its patch with `--exclude=docs/plans/active/tech-debt-rungs.md`.  The hunk of the parent plan is in `m2/step2-parent-plan.diff`, for the orchestrator.  Reason: only the orchestrator edits the parent plan.
 * 2026-11-11, agent: step 3 removes Trunk's lock file after the build, and `check_build` refuses a build that still holds it.  Reason: the removal keeps `publish` working with Trunk 0.22, and the refusal stops the file if a later change skips the removal.
+* 2026-11-11, agent: step 7 adds `test_support::skip_line`, which gives the skip line or panics.  A wasm test logs the line with `console_log!`, and `skip` prints it on stderr.  Reason: one function keeps the panic and the words, and `test-support` needs no `web-sys` for a console path.
+* 2026-11-11, agent: step 7 joins the words of the build and of the run (`test_support::claimed`).  A word in either is required.  Reason: a wasm test has only the value of the build, and a native run has both, which Cargo keeps equal.
+* 2026-11-11, agent: step 7 gives Chrome more arguments with `web-test --chrome-arg <arg>`.  `--disable-gpu` takes the adapter away; `--disable-webgpu` does not.  `web-test` passes `STEMYLA_REQUIRE` to each crate run through its inherited environment, so it needs no code for it.
+* 2026-11-11, agent: step 7 keeps `ONLY_THE_WORDS` of `test-support` as it is.  Reason: its text names the words, and says nothing about wasm.
 * 2026-11-11, agent: step 4 does not capture the output of a crate run.  Step 8 adds the capture, with its own tests.  Reason: step 4's acceptance is the summary only, and a small commit is easier to review.
 
 ## Outcomes and retrospective

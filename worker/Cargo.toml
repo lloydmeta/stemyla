@@ -34,6 +34,8 @@ web-sys = { version = "0.3.107", features = ["Blob", "BlobPropertyBag", "Dedicat
 # Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3.80"
+# Fails a GPU skip when the build has STEMYLA_REQUIRE=gpu (VERIFY-1).
+test-support = { path = "../test-support" }
 # Decodes the worker's FLAC and M4A in its tests, so a second
 # implementation checks the output of flacenc, of `m4a` and of the
 # browser's AAC encoder.
