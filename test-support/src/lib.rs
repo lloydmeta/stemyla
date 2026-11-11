@@ -3,10 +3,10 @@
 //!
 //! Stable libtest has no run-time skip: a test that returns early reports
 //! `ok`, and `cargo test` hides its stderr.  So a test that has no GPU
-//! adapter, no adapter feature or no fixture calls [`skip`] before it
-//! returns.  [`VAR`] lists what the run claims to have
-//! (`STEMYLA_REQUIRE=gpu,timestamps,f16,fixtures`); a skip of a listed need
-//! panics instead.  An unknown word panics too, so a typo cannot turn the
+//! adapter, no adapter feature, no fixture or no AAC encoder calls
+//! [`skip`] before it returns.  [`VAR`] lists what the run claims to have
+//! (`STEMYLA_REQUIRE=gpu,timestamps,f16,fixtures,aac`); a skip of a listed
+//! need panics instead.  An unknown word panics too, so a typo cannot turn the
 //! check off.
 //!
 //! The list is the value of [`VAR`] at build time and at run time.  A wasm
@@ -32,12 +32,20 @@ pub enum Need {
     F16,
     /// The PyTorch fixtures that `tools/roformer_export.py` writes.
     Fixtures,
+    /// A browser with an AAC encoder for WebCodecs (TD-92).
+    Aac,
 }
 
-const NEEDS: [Need; 4] = [Need::Gpu, Need::Timestamps, Need::F16, Need::Fixtures];
+const NEEDS: [Need; 5] = [
+    Need::Gpu,
+    Need::Timestamps,
+    Need::F16,
+    Need::Fixtures,
+    Need::Aac,
+];
 
 const ONLY_THE_WORDS: &str =
-    "Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.";
+    "Fix: use only gpu, timestamps, f16, fixtures and aac, separated by commas.";
 
 impl Need {
     /// The word for this need in [`VAR`].
@@ -47,6 +55,7 @@ impl Need {
             Need::Timestamps => "timestamps",
             Need::F16 => "f16",
             Need::Fixtures => "fixtures",
+            Need::Aac => "aac",
         }
     }
 
@@ -56,6 +65,9 @@ impl Need {
             Need::Timestamps => "run it on an adapter with timestamp-query",
             Need::F16 => "run it on an adapter with the downlevel flag SHADER_F16_IN_F32",
             Need::Fixtures => "write the fixtures with tools/roformer_export.py",
+            Need::Aac => {
+                "run it in a browser with an AAC encoder, such as Chrome or Safari on macOS"
+            }
         }
     }
 }
@@ -169,7 +181,7 @@ mod tests {
         ))
     }
 
-    const UNKNOWN_GPUS: &str = "VERIFY-1: STEMYLA_REQUIRE has the unknown word \"gpus\".  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.";
+    const UNKNOWN_GPUS: &str = "VERIFY-1: STEMYLA_REQUIRE has the unknown word \"gpus\".  Fix: use only gpu, timestamps, f16, fixtures and aac, separated by commas.";
 
     #[test]
     fn a_required_need_that_cannot_run_fails() {
@@ -260,7 +272,7 @@ mod tests {
         assert_eq!(parse("gpu"), Ok(vec![Need::Gpu]));
         assert_eq!(
             parse("GPU"),
-            Err("VERIFY-1: STEMYLA_REQUIRE has the unknown word \"GPU\".  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.".into())
+            Err("VERIFY-1: STEMYLA_REQUIRE has the unknown word \"GPU\".  Fix: use only gpu, timestamps, f16, fixtures and aac, separated by commas.".into())
         );
         assert!(parse("Fixtures").is_err());
     }
@@ -294,7 +306,7 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
         assert_eq!(
             verdict(Some(OsStr::from_bytes(b"gpu\xff")), Need::Fixtures, "x not found"),
-            Err("VERIFY-1: STEMYLA_REQUIRE is not Unicode.  Fix: use only gpu, timestamps, f16 and fixtures, separated by commas.".into())
+            Err("VERIFY-1: STEMYLA_REQUIRE is not Unicode.  Fix: use only gpu, timestamps, f16, fixtures and aac, separated by commas.".into())
         );
     }
 
@@ -312,6 +324,19 @@ mod tests {
         assert_eq!(
             verdict(list("f16"), Need::Gpu, "no GPU adapter: none"),
             Err("VERIFY-1: STEMYLA_REQUIRE has f16, which needs gpu, but this test cannot run: no GPU adapter: none.  Fix: run it on an adapter with the downlevel flag SHADER_F16_IN_F32, or remove f16 from STEMYLA_REQUIRE.".into())
+        );
+    }
+
+    #[test]
+    fn aac_is_the_need_of_an_aac_encoder() {
+        assert_eq!(parse("gpu,aac"), Ok(vec![Need::Gpu, Need::Aac]));
+        assert_eq!(
+            verdict(list("aac"), Need::Aac, "this browser has no AAC encoder"),
+            Err("VERIFY-1: STEMYLA_REQUIRE has aac, but this test cannot run: this browser has no AAC encoder.  Fix: run it in a browser with an AAC encoder, such as Chrome or Safari on macOS, or remove aac from STEMYLA_REQUIRE.".into())
+        );
+        assert_eq!(
+            verdict(list("gpu"), Need::Aac, "this browser has no AAC encoder"),
+            skip_line("aac", "this browser has no AAC encoder")
         );
     }
 

@@ -116,7 +116,7 @@ cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-wor
 
 ### Browser tests
 
-The browser-only behaviour is tested in a real browser.  CI runs these in headless Chrome; locally they are optional and need one install, the test runner at the `wasm-bindgen` version in `Cargo.lock`.  `xtask web-test` stops when the two differ, for example after a `wasm-bindgen` update:
+The browser-only behaviour is tested in a real browser.  CI runs these in headless Chrome on Linux.  CI's `macos` job runs them in Safari, and runs the real AAC encode in Chrome (TD-92); it is not a required check.  Locally they are optional and need one install, the test runner at the `wasm-bindgen` version in `Cargo.lock`.  `xtask web-test` stops when the two differ, for example after a `wasm-bindgen` update:
 
 ```bash
 cargo run -p xtask -- setup wasm-bindgen-cli

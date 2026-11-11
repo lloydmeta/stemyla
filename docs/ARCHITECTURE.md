@@ -48,7 +48,7 @@ flowchart LR
 
   It reads each lane file in blocks of at most 1 MiB.  The page sends `classic` when every input lane of a song has a session file.  So classic drums of a stored song does not stop the page, and its lane is a stored lane.  For a song in memory, the page runs the block HPSS itself, within the memory path's limit for the lanes that it holds.  The page starts the worker at the first open (`app::decoder`).  The page does not read the session files back.  It shows stored lanes from their overviews (M7).
 * `stem-protocol` (`protocol/`): the messages between the page and its workers, one encoder and one decoder per message, shared by both sides.
-* `test-support`: `skip`, which a test calls when it has no GPU adapter, no adapter feature or no fixture.  It prints a skip line, or panics when `STEMYLA_REQUIRE` lists that need (VERIFY-1).  A wasm test logs `skip_line` on the console, and reads the `STEMYLA_REQUIRE` of its build.  It is only a dev-dependency.
+* `test-support`: `skip`, which a test calls when it has no GPU adapter, no adapter feature, no fixture or no AAC encoder.  It prints a skip line, or panics when `STEMYLA_REQUIRE` lists that need (VERIFY-1).  A wasm test logs `skip_line` on the console, and reads the `STEMYLA_REQUIRE` of its build.  It is only a dev-dependency.
 * `xtask`: tools run with Cargo.  They are the static file server, the browser test runners (`web-test`, `e2e`), the docs check (`docs-check`) and the local checks by tier (`check`).  They also include the review round tools (`review`), the list and removal of what runs leave in the repo (`clean`), and publishing.  The others are model conversion, CPU separation, self-test reference files, the demo song generator and benchmarks.
 
 ### Layers

@@ -184,10 +184,10 @@ The orchestrator committed it in `808aa66`.  No work.
 * [x] 2026-11-11: step 7, TD-8, `STEMYLA_REQUIRE` in a wasm test.  `a_word_of_the_build_is_required_with_no_run_time_value` and `the_words_of_the_build_and_of_the_run_are_both_required` (`test-support`) first failed on their `assert_eq!` against a `claimed` that kept only the run-time value.  `a_chrome_arg_goes_after_the_autoplay_policy` (`xtask/src/web_test.rs`) first failed on its `assert_eq!` against a function that dropped the extra arguments.  In Chrome with `--disable-gpu` and `STEMYLA_REQUIRE=gpu`, `a_read_back_is_copied_into_wasm_memory_once` fails (Surprises).  `stem-worker` now takes `test-support`, so the fixture graph of `xtask check` (`the_fixture_graph_is_the_real_graph`) takes it too.
 * [x] 2026-11-11: step 8, TD-51.  `a_test_binary_with_no_wasm_test_is_found` first failed on `assert!(found_no_test(output))` against a stub that gave `false`.  `the_marker_fails_only_a_run_with_no_filter` first failed on `assert!(crate_run_passed(true, output, Some("the_length")))` against a function that ignored the filter.  Before the engine tests had the wasm attribute, a full Chrome `web-test` failed `engine` only, on "no tests to run!".  The planted `usize` product failed on wasm32 and passed natively (Surprises).  Chrome then passed every crate.  The Safari run is owed.
 * [x] 2026-11-11: step 9, the Safari flakes (Surprises).  `a_session_with_the_lock_key_set_true_is_locked`, `only_a_safaridriver_with_no_parent_is_stale`, `the_user_stays_active_for_the_limit_or_until_the_run_ends` and `a_binary_with_no_session_and_no_test_run_is_found` first failed on their asserts against stubs that gave `false`, an empty list or empty arguments.  `no_lock_key_or_a_false_one_is_unlocked` and `a_failed_test_is_not_a_session_that_did_not_start` first failed against stubs that gave `true`.  `a_stored_file_removed_after_it_was_opened_is_a_read_error` failed in 2 of 5 Safari `web-test` runs before the fix, and in none of 5 after.  The stalled-download case of `e2e storage` failed in 3 of 3 Safari runs before the fix, and in none of 4 after.  One failure is left, with TD-97: the page memory check of `e2e save`, in 1 of 3 runs after the fixes.
-* [ ] Step 10: the macOS job (TD-92).
+* [x] 2026-11-11: step 10, the macOS job (TD-92), committed and not yet run by CI.  `aac_is_the_need_of_an_aac_encoder` (`test-support`) first failed on its `assert_eq!`: `parse("gpu,aac")` gave the unknown word "aac".  `the_ci_step_limit_is_the_waits_limit` and `a_save_step_with_no_limit_is_found` first failed on their asserts against a `save_step_limits` that read the first step only.  In Chrome 157 on the Mac, with `STEMYLA_REQUIRE=aac`, `a_real_aac_decodes_to_the_source` passed.  With a planted `&& false` on the encoder probe, it failed with "VERIFY-1: STEMYLA_REQUIRE has aac, but this test cannot run" (Surprises).
 * [ ] Review rounds.
 
-Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises).  The Safari baseline at 0.2.130 replaces both owed runs.
+Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises).  The Safari baseline at 0.2.130 replaces both owed runs.  The orchestrator pushes, and reads the first run of the `macos` job.
 
 ## Surprises and discoveries
 
@@ -273,6 +273,9 @@ Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises). 
 * 2026-11-11, step 9, the measure after the fixes, with the same conditions (`m2/flakes/after/`).  Each of the 5 `web-test` runs passed each crate.  Each of the 3 runs of `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage` and `flac` passed.  Run 3 of `e2e save` failed one check: the AAC save of 1 minute grew the page's WebAssembly memory by 5,767,168 bytes, and of 10 minutes by 7,274,496 bytes, over the bound of 1 MiB.  Each growth of the 6 runs was near 5.8 MB or near 7.3 MB, for each format and length, so the two levels do not depend on the song.  The fixes of step 9 change no code of the page.  The cause is not known: TD-97.
 * 2026-11-11, step 9: in Chrome 157, the stem worker's tests `a_stored_file` passed, and `e2e storage` passed with "Error: no data from the server for 60 s".
 
+* 2026-11-11, step 10: `macos-latest` is macOS 26.7.2 on arm64, with Safari 27.2, Chrome 156 and ChromeDriver 156 in `CHROMEWEBDRIVER` (image 20261102.0473.1, [macos-26-arm64-Readme.md](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-arm64-Readme.md)).  So `drivers::chromedriver` finds the driver, as on Linux.
+* 2026-11-11, step 10: the plant `!(aac_encoder_here(..).await && false)` in `a_real_aac_decodes_to_the_source`, with `STEMYLA_REQUIRE=aac`, failed the test in Chrome 157, and `web-test` listed `stem-worker` (`m2/step10-chrome-aac-planted.log`).  The plant is not committed.
+
 ## Decision log
 
 * 2026-11-11, maintainer: the answers to questions 5 to 8 of the parent plan (see "The decisions that M2 follows").
@@ -305,6 +308,9 @@ Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises). 
 * 2026-11-11, agent: step 9 ends only a `safaridriver` whose parent is `launchd`.  Reason: a driver with a parent belongs to a run, maybe of the maintainer.  No run of the measure left a stale driver, so the second try of a session start was not seen.
 * 2026-11-11, agent: step 9 is one commit.  Reason: the fixes share the docs of Safari, and each has its own test or Safari run in Progress.
 * 2026-11-11, agent: step 9 leaves the memory check of `e2e save` as it is, with TD-97.  Reason: the cause of its two levels is not known, and the plan allows a TD for a failure left.  A wider bound would hide a real growth.
+* 2026-11-11, agent: step 10 checks the limit of each `e2e save` step of `ci.yml`, and wants 3: the Linux step, and the Safari and Chrome steps of the `macos` job.  Reason: a new save step with no limit then fails the test.
+* 2026-11-11, agent: step 10 gives the `macos` job a limit of 120 minutes: 60 for `e2e save` in Chrome, about 30 for the other steps with a cold cache, and 30 to spare.
+* 2026-11-11, agent: step 10 narrows TD-92 to the trim of `AudioDecoder`, and keeps it open.  Reason: the job runs the real encode, but no test measures a trim, and the job is not a required check.
 
 ## Outcomes and retrospective
 

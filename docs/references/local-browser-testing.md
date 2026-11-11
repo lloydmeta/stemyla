@@ -5,6 +5,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 ## Which browser
 
 * Safari is the local default.  `safaridriver` starts no session while the screen is locked: it waits, then gives "The session timed out while connecting to a Safari instance" (2026-11-11, TD-96).  So `web-test` and `e2e` with Safari on macOS read the lock first, and fail at once with a clear error.  The check is `ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked`, which gives nothing when the screen is unlocked.  Do not quit Safari to clear a timeout.  If sessions time out with the screen unlocked, use `--browser chrome`, and say in the PR that Safari is unverified.
+* `web-test` runs each crate, also after a crate fails.  At the end, it prints one line for each crate, and names each crate that failed.
 * In Safari, `web-test` sets `WASM_BINDGEN_NO_DEBUG=1` for the crate run of `stem-worker` only, and prints why (TD-93).  To run that crate by hand in Safari, set it too.
 * A probe that leaves its WebDriver session open makes later sessions fail with "already paired with another WebDriver session".  `web-test` and `e2e` with Safari end each `safaridriver` whose parent is gone before they start.  If a session does not start, they end such drivers, and try the session start once more.  They try no test or scenario again (TD-96).  End a probe's session yourself.
 * `web-test` and `e2e` with Safari hold `caffeinate -u` while they run, so macOS does not report the user idle (TD-96).

@@ -2446,22 +2446,41 @@ mod tests {
         );
     }
 
-    /// Finding 3-1 of review round 3 of M8: CI gives the `e2e save` step the
-    /// limit that the waits fit in.
+    /// The `timeout-minutes` of each `e2e save` step of a workflow, in
+    /// order, or `None` for a step that has none.
+    fn save_step_limits(ci: &str) -> Vec<Option<u64>> {
+        ci.split("e2e save --browser ")
+            .skip(1)
+            .map(|step| {
+                step.lines()
+                    .skip(1)
+                    .take_while(|l| !l.trim_start().starts_with("- "))
+                    .find_map(|l| l.trim().strip_prefix("timeout-minutes:"))
+                    .and_then(|m| m.trim().parse().ok())
+            })
+            .collect()
+    }
+
+    /// Finding 3-1 of review round 3 of M8: CI gives each `e2e save` step
+    /// the limit that the waits fit in.  The Linux job has one, and the
+    /// macOS job one for Safari and one for Chrome (TD-92).
     #[test]
     fn the_ci_step_limit_is_the_waits_limit() {
-        let ci = include_str!("../../../.github/workflows/ci.yml");
-        let step = ci
-            .split("e2e save --browser chrome")
-            .nth(1)
-            .expect("the e2e save step");
-        let minutes: u64 = step
-            .lines()
-            .take_while(|l| !l.trim_start().starts_with("- "))
-            .find_map(|l| l.trim().strip_prefix("timeout-minutes:"))
-            .and_then(|m| m.trim().parse().ok())
-            .expect("the step's timeout-minutes");
-        assert_eq!(minutes * 60, STEP_LIMIT_S);
+        let limits = save_step_limits(include_str!("../../../.github/workflows/ci.yml"));
+        assert_eq!(limits.len(), 3, "{limits:?}");
+        for limit in limits {
+            assert_eq!(limit.map(|m| m * 60), Some(STEP_LIMIT_S));
+        }
+    }
+
+    #[test]
+    fn a_save_step_with_no_limit_is_found() {
+        let ci = "      - run: cargo run --locked -p xtask -- e2e save --browser chrome\n\
+                  \x20       timeout-minutes: 60\n\
+                  \x20     - run: cargo run --locked -p xtask -- e2e save --browser safari\n\
+                  \x20     - run: cargo run --locked -p xtask -- e2e flac --browser safari\n\
+                  \x20       timeout-minutes: 60\n";
+        assert_eq!(save_step_limits(ci), [Some(60), None]);
     }
 
     /// The CI run of 2026-10-28: a save that goes on is not stopped by a

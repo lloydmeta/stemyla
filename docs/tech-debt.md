@@ -465,15 +465,15 @@ The skill's "Stop and wait" lists the reasons to stop, and a request of the main
 
 * Fix: the maintainer decides on P5 of the close-out of harness phase 3b, in `plans/active/harness-engineering.md` ("Proposals of harness phase 3b").  Until then, the guide's recipe "Run a big task hands-off" says how to pause and resume.
 
-### TD-92: CI cannot run the real AAC encode
+### TD-92: the AAC delay assumes a decoder that trims nothing
 
 This entry concerns VERIFY-1.
 
-Chromium on Linux has no AAC encoder for WebCodecs ([Chromium issue 40942807](https://issues.chromium.org/issues/40942807)).  CI's `browser-tests` job runs Chrome on `ubuntu-latest`.  So CI tests the AAC encode of a save only with the fake encoder of `worker/src/web/tests/aac.rs`.  The real encode runs only on a Mac: `a_real_aac_decodes_to_the_source` logs a skip in CI, and passes.  `xtask e2e save` saves AAC only where the page offers it, so on a Mac.  On Linux, it fails if the page offers AAC (`aac_rule`), since this entry then needs an update.
+Chromium on Linux has no AAC encoder for WebCodecs ([Chromium issue 40942807](https://issues.chromium.org/issues/40942807)), so CI's `browser-tests` job tests the AAC encode of a save only with the fake encoder of `worker/src/web/tests/aac.rs`.  CI's `macos` job, on `macos-latest`, runs `a_real_aac_decodes_to_the_source` in Chrome with `STEMYLA_REQUIRE=aac`, so a browser with no encoder fails it.  It also runs `e2e save` in Chrome and in Safari, which save AAC there (`aac_rule`).  The job is not a required check at first (Q6 of `plans/active/tech-debt-rungs.md`).
 
 The worker's probe measures the encoder's delay through `AudioDecoder`, so it assumes that `AudioDecoder` trims no frames.  The W3C AAC registration says that it trims none for a plain AAC stream ([W3C, AAC WebCodecs Registration](https://www.w3.org/TR/2026/DNOTE-webcodecs-aac-codec-registration-20260924/)).  Only macOS shows this, in Chrome 157 and Safari 27.2.  A decoder that trims `t` frames would give a delay `t` frames too small.  The file's `elst` and `iTunSMPB` would then start `t` frames early, in the silent lead-in.  So the source would start `t` frames late and lose its last `t` frames.
 
-* Fix: a CI runner with an AAC encoder, such as `macos-latest`, that runs the real-encode test and `e2e save`.
+* Fix: a test that measures the trim of each browser's `AudioDecoder`, in the `macos` job.  The maintainer decides when the `macos` job becomes a required check.
 
 ### TD-93: a Safari `web-test` turns off the debug glue of the stem worker
 

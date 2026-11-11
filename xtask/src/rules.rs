@@ -66,11 +66,6 @@ const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[
         "skipped: the audio context is suspended",
         "a suspended audio context is not a need of STEMYLA_REQUIRE: the test asserts the audio clock in Chrome, and CI runs Chrome",
     ),
-    (
-        "worker/src/web/tests/aac.rs",
-        "skipped: this browser has no AAC encoder",
-        "STEMYLA_REQUIRE has no need for an AAC encoder; CI's Chrome on Linux has no AAC encoder, so the maintainer's Mac gives the evidence (TD-92).  `a_real_aac_decodes_to_the_source` logs it",
-    ),
 ];
 
 /// VERIFY-1: every skip message goes through `test_support::skip`, so that

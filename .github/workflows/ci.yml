@@ -237,6 +237,73 @@ jobs:
             target/e2e/**/*.png
           if-no-files-found: ignore
 
+  # Safari, and the real AAC encode, on a Mac (TD-92, TD-93, TD-96).
+  # macos-latest is macOS 26 on arm64, with Safari 27.2, Chrome and a
+  # matching ChromeDriver in $CHROMEWEBDRIVER (actions/runner-images,
+  # images/macos/macos-26-arm64-Readme.md, 2026-11-02).  It is not in
+  # `needs` of publish, and not a required check at first (Q6 of
+  # docs/plans/active/tech-debt-rungs.md).  The GPU tests may skip here:
+  # GitHub states nothing about the runner's GPU, so the job does not set
+  # gpu in STEMYLA_REQUIRE.
+  macos:
+    name: browser tests (macOS)
+    runs-on: macos-latest
+    # On the maintainer's Mac (2026-11-11), the Safari `web-test` took
+    # 5 minutes, and the Safari scenarios 8.  The setup builds Trunk and
+    # wasm-bindgen-cli with `cargo install`, and the crates for wasm32,
+    # which took about 15 minutes on the Linux jobs with no cache.  `e2e
+    # save` in Chrome may take its limit of 60 minutes.  So the limit is
+    # 60, about 30 for the other steps, and 30 to spare.  A hung browser
+    # must not hold the runner for GitHub's 6 h default.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+          targets: wasm32-unknown-unknown
+      # Also caches ~/.cargo/bin, so Trunk and wasm-bindgen-cli are built
+      # once per version.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      # The action setup-trunk takes the Linux release tarball only, so
+      # Trunk comes from `cargo install --locked` at its pin (BUILD-1).
+      - name: Install the wasm32 target, Trunk and wasm-bindgen-test-runner at their pins
+        run: cargo run --locked -p xtask -- setup wasm32 trunk wasm-bindgen-cli
+      - name: Turn on Safari's WebDriver
+        run: sudo safaridriver --enable
+      - run: cargo run --locked -p xtask -- web-test --browser safari
+      - run: trunk build --release
+        working-directory: app
+      - run: cargo run --locked -p xtask -- e2e smoke --browser safari
+      - run: cargo run --locked -p xtask -- e2e decode --browser safari
+      - run: cargo run --locked -p xtask -- e2e playback --browser safari
+      - run: cargo run --locked -p xtask -- e2e old-session --browser safari
+      - run: cargo run --locked -p xtask -- e2e audio-resume --browser safari
+      - run: cargo run --locked -p xtask -- e2e storage --browser safari
+      - run: cargo run --locked -p xtask -- e2e flac --browser safari
+      - run: cargo run --locked -p xtask -- e2e save --browser safari
+        # The same limit as the Linux step, for the same waits.
+        timeout-minutes: 60
+      # Chrome on macOS has an AAC encoder, and Chrome on Linux has none
+      # (TD-92).  STEMYLA_REQUIRE=aac makes the test fail, not skip, with
+      # no encoder.  Only this step sets it.
+      - name: The real AAC encode, in Chrome
+        run: cargo run --locked -p xtask -- web-test --browser chrome a_real_aac_decodes_to_the_source
+        env:
+          STEMYLA_REQUIRE: aac
+      - run: cargo run --locked -p xtask -- e2e save --browser chrome
+        # The same limit as the Linux step, for the same waits.
+        timeout-minutes: 60
+      - if: failure() || cancelled()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: e2e-macos
+          # Not the generated audio (tens of MB).
+          path: |
+            target/e2e/**/*.log
+            target/e2e/**/*.png
+          if-no-files-found: ignore
+
   publish:
     name: publish to gh-pages
     needs: [fmt, clippy, test, wasm-build, browser-tests]
