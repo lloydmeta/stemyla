@@ -135,8 +135,10 @@ Branch `tech-debt/2026-11-11`, from `main` at `ee3728e`.  Each step is one commi
 8. TD-51 (VERIFY-1): run `engine`'s tests on wasm32 in `web-test`.  Acceptance: a `usize` product in `Filter::apply` fails on wasm32.  Close TD-51.
 9. Safari flakes.  First measure: run the whole Safari `web-test` 5 times, and each `e2e` scenario that needs no GPU 3 times.  Record a table of each failure, with its cause, in Surprises.  Then fix each cause.  No test or scenario is retried; only a WebDriver session start may end a stale session and try once more.  A cause outside the repo gets a clear error, a line in `references/local-browser-testing.md`, and a TD.  For the idle audio, try `caffeinate -u` for the length of an `e2e` run.  Acceptance: after the fixes, 5 Safari `web-test` runs and 3 runs of each scenario pass, or each failure left has a TD.
 10. A macOS job in CI (TD-92).  It runs on `macos-latest`, and is not a required check.  It runs `xtask setup`, `safaridriver --enable`, the Safari `web-test`, and the Safari `e2e` scenarios that need no GPU.  It also runs `a_real_aac_decodes_to_the_source` and `e2e save` in Chrome, with the real AAC encoder.  Acceptance: the job passes on the PR; with no AAC encoder the AAC test fails, not skips.  Narrow TD-92, or close it.
+11. TD-97 (VERIFY-1, MEM-4), added on 2026-11-11 after CI run 43008561411 failed D11 for MP3 in Safari.  Find what grows the page's WebAssembly memory by about 1.5 to 1.9 MB in some saves only.  First lead: `save_once` reads `wasm_before` 3 s after a new page, so a late growth of the page's start can fall before or after that read.  WebAssembly memory never shrinks, so the size after a save is the high-water mark of the page.  Do not widen `WASM_BOUND_BYTES`.  Acceptance: a test of the measure fails on the two-level data of TD-97 and of run 43008561411.  `e2e save --browser safari` passes 6 runs in a row on the Mac, and close TD-97.
+12. The `macos` job becomes a required check of the ruleset `main` (the maintainer's ask of 2026-11-11).  The orchestrator adds `browser tests (macOS)` after step 11 lands and the job passes on the PR.  Acceptance: the ruleset lists the check.
 
-Acceptance of M2: `check --tier push` passes on the maintainer's Mac.  CI passes, the macOS job included.  `web-test --browser safari` passes on the Mac.  `docs/tech-debt.md` lists TD-51 and TD-95 under `## Closed`, or each has a narrowed entry with its cause.
+Acceptance of M2: `check --tier push` passes on the maintainer's Mac.  CI passes, the macOS job included.  After step 12, the `macos` job is a required check.  `web-test --browser safari` passes on the Mac.  `docs/tech-debt.md` lists TD-51 and TD-95 under `## Closed`, or each has a narrowed entry with its cause.
 
 ### M3: rung 3, the wire format (one PR)
 
@@ -187,7 +189,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-08: `check --tier push` passed on the tree of the last commit of M1, on the maintainer's Mac.
   * [x] 2026-11-08: CI passed on `5b3fbf6`, the last code commit of M1, the nightly step included (run 42405974754).
 * [x] 2026-11-11: the triage of TD-79 to TD-95, the new M2, and the answers to questions 5 to 8.
-* [x] M2: rung 2, Safari and verification.  Its milestone plan is `plans/completed/tech-debt-rungs-m2.md`.
+* [ ] M2: rung 2, Safari and verification.  Its milestone plan is `plans/completed/tech-debt-rungs-m2.md`.
   * [x] 2026-11-11: the milestone plan, `f18a690`, after 2 rounds of a `Plan` agent.
   * [x] 2026-11-11: the 10 steps: `808aa66` step 1, `34f7f6c` step 4, `5057fc4` step 2, `99b23eb` step 3, `cccfcfe` step 7 (TD-8), `95f5351` step 8 (TD-51 closed), `f6f1aa7` step 5 (TD-95 closed), `de7ffa3` step 6 (TD-93 narrowed), `707010d` step 9 (TD-96 and TD-97 new), `e7e11c5` step 10 (TD-92 narrowed).
   * [x] 2026-11-11: CI run 42952206488 on `e7e11c5` passed each job, the `macos` job included (46 minutes).
@@ -197,6 +199,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-11: the TD-96 command with `--nocapture` ran in Safari 27.2 on the maintainer's Mac (exit 0): `app --lib` passed 197 tests with 2 skip lines, and `web_output` passed 4 with 3 skip lines.
   * [x] 2026-11-11: intent review round 2 found that round 1 is resolved, and no significant finding.  I2-1, the PR body, goes into the body at close-out.  For I2-2, a full `xtask web-test --browser safari` passed on the maintainer's Mac at `4c23f79` (19:16 to 19:21 JST): app, stem-worker, decode-worker, stem-protocol and engine passed, with no failure.  The nits I2-3 and I2-4 are reported, not fixed.
   * [x] 2026-11-11: intent review round 3 found no significant finding, so the intent review ends (decision 0024).  For I3-1: `check --tier push` passed (13 checks) on the maintainer's Mac at `f5be16a`, and CI run 43003704558 on `f5be16a` passed each job, the `macos` job included.  The nit I3-2 is reported, not fixed.
+  * [ ] Step 11, TD-97, and step 12, the required `macos` check (CI run 43008561411 failed D11 in Safari).
 * [ ] M3: rung 3.
 
 ## Surprises and discoveries
@@ -235,6 +238,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-11, agent: the branch `tech-debt/2026-11-11` moved by fast-forward from `ff633a3` to `ee3728e`, so that M2 starts with TD-92 to TD-95 in the register.
 * 2026-11-11, agent: the intent review of M2, round 1, found 3 significant should-fix findings.  I1-1: the PR body now holds the draft wgpu issue, as TD-93 says.  I1-2: the CI result of the code head goes in Progress.  I1-3: the Safari skip of `an_output_left_behind_by_a_busy_page_is_replaced` goes to the team, with review round 6.  The nits I1-4 and I1-6 are fixed in the PR body and the triage.
 * 2026-11-11, agent: review round 6 (6-1) takes the CI run on `c156c4a` as the fix, with no count of skips that `xtask` prints.  Reason: the finding was a code head with no CI result, and the run passed.  A count is new behaviour, which a late round does not add.  TD-96 records that a CI log shows no skip line, and how a direct run with `--nocapture` shows them (review round 7, 7-1).
+* 2026-11-11, maintainer: after CI run 43008561411 failed D11 of `e2e save` for MP3 in Safari (TD-97), fix TD-97 now, and make the `macos` job a required check (steps 11 and 12 of M2).
 
 ## Outcomes and retrospective
 
