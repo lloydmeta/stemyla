@@ -1,0 +1,184 @@
+# Tech debt rungs, M2 step 11: TD-97, the page's memory check of `e2e save`
+
+## Purpose
+
+D11 of `xtask e2e save` checks that a save of a 10-minute song grows the page's WebAssembly memory by at most 1 MiB more than a save of a 1-minute song (MEM-4).  In Safari, the check fails at times with no change of the code: CI run 43008561411 failed it for MP3.  CI's `macos` job runs `e2e save --browser safari`, and step 12 of the parent plan makes that job a required check.  So a flaky check would block merges.
+
+This step finds the cause of the flake with measurements, then fixes the measure or the cause.  The check must stay sound: it must still fail when a save grows the page's memory with the length of the song.  It must not fail because of when the page's start-up growth lands.
+
+This plan is step 11 of M2 of `plans/active/tech-debt-rungs.md`.
+
+## Context and orientation
+
+### The decisions that this step follows
+
+* The maintainer asked on 2026-11-11 to fix TD-97 now, and to make the `macos` job a required check (step 12).  The orchestrator changes the ruleset; no agent of this step changes it.
+* Do not widen `WASM_BOUND_BYTES` (step 11 of the parent plan, and the fix line of TD-97).
+* Decision 0024 is the review rule, through the `review-rounds` skill.  The review base is `b94f5bc`.
+* Question 8 of the parent plan: no retry of a test or a scenario.  Only a WebDriver session start may try once more.
+
+### The code today
+
+* `xtask/src/e2e/save.rs`:
+  * `run` restores each planted session once first, so the first decode and the stem overviews do not overlap a save.  Then it calls `save_once` for each format (`formats`) and each length (`SECONDS`, 60 s and 600 s).
+  * `restore` makes the session current with a script, then reloads the page (`p.reload()`).  It waits for the line `store: session <id> is current`, and gives the log mark of the new page.  So each save is on a new page.
+  * `save_once` waits for the probe line of the new page, then `p.idle(3.0)`.  Then it calls `window.__e2e_heap()`, and then it reads `wasm_before` with the script `WASM_MEMORY` (`memory.buffer.byteLength` of `window.wasmBindings`).  It clicks the save (`click_save`), waits for the offer, and reads `wasm_after` with `AFTER_SAVE`.  `growth(wasm_before, wasm_after)` gives `Save::wasm`.
+  * `save_checks` compares, for each format, the `wasm` of the 600 s save with the 60 s save: `l - s <= WASM_BOUND_BYTES`.  The test of the bound is in the `mod tests` of the file, near line 1740.
+  * `WASM_BOUND_BYTES` is 1 MiB.  Its doc says that the save's reader holds 3 spans of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the length of the song.
+* `xtask/e2e/save_spy.js`: `__e2e_heap` runs `gc()` 4 times, with a task of 20 ms after the first 3, in Chrome (`--js-flags=--expose-gc`).  A collection queues the finalizers of wasm-bindgen's JS objects, which free their Rust objects in a later task.  The spy also calls `__e2e_heap` at each write of a save (`__e2e_start_heap`, `__e2e_stop_heap`).  In Safari, `__e2e_heap` gives `null` at once and collects nothing.  So in Safari, those frees come only when Safari's own collector runs.
+* `app/src/lib.rs`, near line 707: the page logs `page wasm <n> MB <when>` at some stages, rounded to 1 MB.  That is too coarse for this step.
+* `xtask/src/e2e/old_session.rs` reads the page's memory twice, about 2 s apart, and keeps the larger value.  This is a known pattern for a late growth.
+
+### The facts about WebAssembly memory
+
+* A memory grows in pages of 64 KiB, and never shrinks.  Its `buffer.byteLength` after a save is the high-water mark of the page, not of the save ([MDN, `WebAssembly.Memory.prototype.grow()`](https://developer.mozilla.org/en-US/docs/WebAssembly/Reference/JavaScript_interface/Memory/grow)).
+* So a growth that the page does after `wasm_before` and before the save counts as growth of the save.  Growth that the page did before `wasm_before` does not.  And a save that allocates into free space that the page start left does not grow the memory at all.
+
+### The data
+
+* CI run 43008561411, job 130482081111, `e2e save --browser safari` on `macos-latest`.  Growth of each save, in bytes, as 60 s / 600 s: wav 7,471,104 / 7,340,032; flac 7,536,640 / 7,405,568; alac 7,405,568 / 7,405,568; mp3 5,636,096 / 7,536,640 (failed); aac 7,274,496 / 7,536,640.  The log is in the orchestrator's scratchpad, `m2/fail-130482081111.log`.
+* Step 9 of `plans/completed/tech-debt-rungs-m2.md` (Surprises, 2026-11-11): 6 runs on the maintainer's Mac in Safari 27.2 gave 30 pairs.  Each growth was near 5.8 MB or near 7.3 MB.  One pair failed: aac 5,767,168 / 7,274,496.
+* M8 of `plans/completed/stream-from-storage-m8.md`, in Chrome: each save grew the memory by 3.5 to 3.9 MB, and a 10-minute save by -0.13 to +0.25 MiB more than a 1-minute save.
+* So in Safari the growth has two levels, about 1.5 to 1.9 MB apart, that do not depend on the length of the song or the format.  The check fails when the 1-minute save takes the low level and the 10-minute save the high one.
+
+### The leads
+
+The cause is not known.  Measure before you choose one of these.  Each one is a lead, not a fact.
+
+* L1, the start-up of the page (the orchestrator's first lead).  `save_once` reads `wasm_before` 3 s after the page shows its session.  If the page grows its memory by about 1.5 to 1.9 MB later than that, in some runs only, the growth falls into the save.
+* L2, the save itself.  The order of the allocations of a save can differ between runs, for example with the timing of the worker's replies.  Rust's allocator on wasm32 asks `memory.grow` for a large block that fits no free hole.  So one shift of the place of one buffer moves the high-water mark by a whole buffer.  The steps of the data are 1,507,328 bytes (23 pages) and 1,900,544 bytes (29 pages).  One span of 65,536 frames of 2 channels of `f32` is 524,288 bytes, and 3 spans are 1,572,864 bytes (24 pages).
+* L3, inputs that depend on the browser: the page's allocations depend on values that come from JS, such as animation frames, events and sizes.  Safari can give other values than Chrome.  (The module's `memory.grow(n)` sets the number of pages, not the engine, and `byteLength` is exact.)
+* L4, the collector.  In Chrome, `__e2e_heap` collects garbage before `wasm_before` and at each write, so the finalizers free the Rust objects of dropped JS wrappers at known times.  In Safari, they run when Safari's collector runs.  So in some saves about 1.5 MB is free when the save starts, and in others it is not.  This fits the two levels and the lower, tighter numbers of Chrome.
+
+* L5, the Save menu.  `click_save` opens the menu, waits 0.5 s, takes a screenshot, then clicks the item.  The draw of the menu can grow the memory after `wasm_before` and before the save.
+
+What each lead predicts:
+
+* L1: the growth comes at a time after the page loads, with no relation to the save.  A page with no save shows it too.
+* L2: the growth comes at a fixed stage of the save, such as the allocation of the reader's spans, and its size changes between runs.
+* L3: the growth differs between Safari and Chrome at the same stage, with the same history of the page.
+* L4: the growth changes with the time of the collector.  The count of finalizer frees before the save differs between the two levels.
+* L5: the growth comes between the two clicks.
+
+### The rules of the Mac
+
+* Before each Safari run, check the screen lock: `ioreg -n Root -d1 -a | plutil -extract IOConsoleUsers xml1 -o - - | grep -A1 CGSSessionScreenIsLocked`.  It gives `<false/>` or nothing when the screen is unlocked.  If it is locked, wait and report; do not run Safari.
+* Run one browser run at a time.
+* Give every wait a time limit.  Run each `e2e` command with the Bash tool's `timeout`, or in the background with a time limit.  A run of `e2e save` takes about 3.5 minutes; give it at most 15 minutes.
+* End a hung run: its `xtask`, the runner and `safaridriver`.  Never quit Safari.
+* The maintainer does not use the Mac during Safari runs.  A hidden page can hang a run (TD-96).  After a hang, read `/usr/bin/log show --last 1h --predicate 'process == "Safari" AND eventMessage CONTAINS "view visibility state changed"'`.
+* Never search the file system from `/` or `~`.  Use the paths in this plan and in `docs/references/local-browser-testing.md`.
+* Chrome needs `CHROMEDRIVER` (`docs/references/local-browser-testing.md`).  On this Mac (arm64), it is `/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.
+* Build the page first: `(cd app && trunk build --release)`.  The `e2e` commands are in the root `README.md` (browser tests).
+
+### The paths of this step
+
+* The orchestrator's scratchpad: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/e7f95d63-1ad1-4b43-bc80-eeb341ac774e/scratchpad/m2/td97/`.  Put the logs of the measure runs there, as `measure/<browser>-<n>.log`, and the logs of the acceptance runs as `accept/<browser>-<n>.log`.
+* Each change of `.claude/**`, `CLAUDE.md` or `plans/active/tech-debt-rungs.md` goes to the orchestrator as a unified diff in that folder.  No agent of this step edits those paths.
+
+### Terms
+
+* Level: one of the two values near which the growth of a save falls in Safari.
+* Settled page: a page whose WebAssembly memory has not grown for a stated time, after its session is current.
+* Start-up growth: growth of the page's memory after the page shows its session and before the click of the mix lane's Save.
+* Level, after the fix: the values of the new measure, which the check compares.
+
+## Plan of work
+
+Each step that changes code is one commit, with `cargo run -p xtask -- check --tier commit` before it, signed (`git commit -S`).  Each new test fails first, on an assert.
+
+### Step A: measure
+
+Step A commits only the table in Surprises, and a measure that stays as a note of the run.  A measure that stays needs its own test (VERIFY-1).
+
+1. Add a sampler that does not block the run, in `xtask/e2e/save_spy.js`.  The server injects the spy before the app on each page, so each reload starts it again, from the page's load.  When `window.wasmBindings` gives its memory, keep the `memory` object once.  Then a `setInterval` of 0.25 s reads `memory.buffer.byteLength` with no `await`, and keeps it with `performance.now()`.  So the sampler makes almost no garbage, which matters for L4.  Read its samples after the offer, and 3 s after the offer, with one script each.  Keep the run's waits as they are: `p.idle(3.0)` stays, so the measure does not move the click (a later click is itself a fix of L1).
+2. Stamp each line of `xtask/e2e/console.js` with `performance.now()`, so the page's lines and the samples have the same clock.  Mark these times: the page's load, the `is current` line, the probe line, the read of `wasm_before`, each `gc()` of `__e2e_heap` (in Chrome), the click of the mix lane's Save, the click of the menu's item, and the offer.  `click_save` waits 0.5 s and takes a screenshot while the menu is open.  Give the growth between the two clicks on its own, since the menu's draw can grow the memory too (L5).
+3. Log the memory at the save's own stages from the page: the allocation of the reader's spans, the first write, the first reply of the worker, and the end.  A temporary log line in `app/` is acceptable for the measure.
+4. Count the finalizer frees of wasm-bindgen's objects before the save and during it, if the page can count them without a change of its behaviour (for example, a wrapper of `FinalizationRegistry` in the spy).  If it cannot, say so in Surprises.
+5. Add two controls:
+   * a new page, sampled for 20 s with no save;
+   * a save after a 15 s idle of its page, in place of 3 s.
+   Run the controls as a separate scenario or a temporary flag.  Do not commit them unless they stay with a test.
+6. Run `e2e save --browser safari` 3 times and `e2e save --browser chrome` 2 times on the Mac, with the rules of the Mac.  Run each control twice in Safari and once in Chrome.  Keep each log in `m2/td97/measure/`.
+7. Record a table in Surprises: for each run and each save, the memory at each time of item 2, the time and size of each growth, and the level.  Give the count of saves at each level, for each browser.  Compare it with the counts of step 9 (no sampler), so a measure that changes the levels is seen.  Say which lead the data supports, by the predictions above, with the evidence.
+8. Run more Safari measure runs until at least one save at the low level has samples, up to 9 runs in all.  Step B needs them.  If 9 runs give no low-level save, stop and report to the team leader with the data.
+
+Acceptance: the table in Surprises shows when and where the memory grew, at each level.  It names the cause, or narrows it to one or more of L1 to L4, with evidence.
+
+### Step B: fix the measure or the cause
+
+Choose the fix from the data of step A, and record the choice in the Decision log.  The candidates:
+
+* If L5 holds: read `wasm_before` after the menu opens, just before the click of the item.  A test asserts that a growth that scales with the length, after that read, still fails the check.
+* If L1 holds: read `wasm_before` from a settled page.  For example, poll the memory until it has not grown for a stated time, with a time limit, and fail with a clear message at the limit.  Or wait for a page line that ends the start-up.  A growth after the settled read still counts.
+* If L4 holds: make the time of the frees the same in each save, in Safari too, or measure in a way that does not depend on it.  The page itself must not depend on the collector for a sound bound.
+* If L2 or L3 holds: change the measure so that it does not depend on the order of the allocations, but still sees a growth with the length of the song.  For example, compare the high-water marks of the two saves on pages of the same history.  Or remove the cause in the page, if the cause is in the repo.
+* If the cause is outside the repo, the measure must still become sound and stop the flake, since step 12 makes the job a required check.  Only the cause may stay in TD-97, narrowed, with the evidence.  Say so in `docs/references/browser-quirks.md` or `docs/references/local-browser-testing.md`.
+* A measure that passes the bare pairs of growth of TD-97 is not a fix.  A minimum of reads, a subtraction of a level, or a rounding to a level hides the flake.
+
+Whatever the fix, these hold:
+
+* `WASM_BOUND_BYTES` stays 1 MiB.
+* The check still fails when a 10-minute save grows the page's memory by more than 1 MiB more than a 1-minute save (MEM-4).
+* The measure is a pure function with unit tests in `xtask/src/e2e/save.rs`.  The browser run gives it its inputs.
+* No retry of the scenario or of a save (question 8).
+* Update every doc that states the measure in the same commit (DOC-1): the module doc of `xtask/src/e2e/save.rs`, the doc of `WASM_BOUND_BYTES`, the root `README.md` if it names the measure, `docs/invariants.md` (the gaps of MEM-4 and of VERIFY-1), `docs/references/local-browser-testing.md` (the TD-97 line), and `docs/tech-debt.md` (TD-97 to `## Closed`, or narrowed).
+
+Acceptance:
+
+* A unit test of the new measure takes raw samples of step A as its inputs: those of a 60 s save at the low level, and those of a 600 s save at the high level.  They can come from two runs or two formats; the test's doc names both log files.  With those samples, `growth` at the old read point gives a pair over the bound, and the test asserts that.  The new measure passes the same samples, and the test asserts that too.  The test fails on the old measure, on an assert.  The two-level pairs of TD-97 and of run 43008561411 are in the test's doc, as the cases that the samples stand for.
+* A unit test asserts that the check fails when the growth scales with the length: for example, a 10-minute save that grows the memory by 1 MiB and one 64 KiB page more than the 1-minute save, after the start-up growth has settled.
+* If the fix waits for a settled page, a unit test of the wait covers the stable case, the late growth case and the time limit.  Another test asserts that the check fails when a growth that scales with the length lands after the settled read and before the click.  So the wait does not hide it.
+
+### Step C: acceptance runs
+
+1. Build the page: `(cd app && trunk build --release)`.
+2. Run `e2e save --browser safari` 6 times in a row on the Mac, with the rules of the Mac.  Each run passes every check.  A failure starts the count again after its cause is known and fixed.  A run that a hidden page hangs (TD-96, shown by the visibility log) does not count, and does not start the count again.  Any other hang starts the count again.
+3. Six passes alone are not proof: before the fix, about 1 run in 6 failed, so 6 passes in a row came about 1 time in 3 with no fix.  So, for each format, all 12 values of the new measure (6 runs, 2 lengths) span at most 1 MiB (one level, not two).  Give the 12 values of each format as a table in Progress.  Give the count of saves at each level before the fix (step A, the old measure) and after (the new measure).
+4. Run `e2e save --browser chrome` once.  It passes.
+5. Run `cargo run -p xtask -- check --tier push` and `cargo build -p xtask`.
+6. Record each run, its log path and its D11 numbers in Progress.
+
+Acceptance: 6 Safari runs in a row pass, the 12 values of each format span at most 1 MiB, the Chrome run passes, and `check --tier push` passes.  TD-97 is under `## Closed` in `docs/tech-debt.md`, or narrowed with a clear cause outside the repo.
+
+### Step D: review rounds
+
+The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1, until the stop rule of decision 0024 holds.  The criteria are step 11 of M2 in the parent plan and this plan.  After the last round, the team leader moves this plan to `docs/plans/completed/`, and changes its line in `docs/README.md`.
+
+## Validation and acceptance
+
+* `cargo test -p xtask` passes, with the new tests of steps A and B.
+* `cargo run -p xtask -- check --tier push` passes on the maintainer's Mac.
+* `cargo run -p xtask -- e2e save --browser safari` passes 6 times in a row on the maintainer's Mac.
+* `cargo run -p xtask -- e2e save --browser chrome` passes.
+* CI's `macos` job passes on the PR (the orchestrator pushes and reads it).
+* `docs/tech-debt.md` lists TD-97 under `## Closed`, or it has a narrowed entry with its cause.
+
+## Idempotence and recovery
+
+* A measure run changes no committed file.  Run it again at any time.
+* Each step is one commit, so a revert of one commit undoes one step.
+* A hung run: end its `xtask`, runner and `safaridriver`, check the screen lock and the visibility log, and run it again.  Never quit Safari.
+* If the data of step A names no cause, or has no low-level save, add Safari runs up to 9 in all.  Then stop and report to the team leader with the data.
+
+## Progress
+
+* [ ] 2026-11-11: this plan, after review by a `Plan` agent (round 1: 4 blockers, 5 should-fix and 3 nits; round 2: 4 should-fix; each fixed).
+* [ ] Step A: measure, with the table in Surprises.
+* [ ] Step B: the fix, with its tests.
+* [ ] Step C: 6 Safari runs in a row and one Chrome run pass.
+* [ ] Step D: the review rounds.
+
+## Surprises and discoveries
+
+* None yet.
+
+## Decision log
+
+* 2026-11-11, maintainer: fix TD-97 now; make the `macos` job a required check after it (step 12 of the parent plan).
+* 2026-11-11, agent: measure first, then choose the fix.  Reason: the cause is not known, and a fix of the measure that hides a real growth breaks MEM-4.
+* 2026-11-11, agent: the acceptance adds one level for each format across the 6 Safari runs.  Reason: 6 passes in a row came about 1 time in 3 before any fix (plan review round 1).
+
+## Outcomes and retrospective
+
+* None yet.
