@@ -44,8 +44,8 @@ The triage of the entries that M4A (PR #43) added, on 2026-11-11, at `ee3728e`:
 
 The facts of the tools on 2026-11-11, from crates.io:
 
-* Trunk: the pin is 0.21.14, and the latest is 0.22.1 (2026-10-26).  0.22.0 locks the dist folder, and keeps the lock file there ([v0.22.0](https://github.com/trunk-rs/trunk/releases/tag/v0.22.0)).
-* wasm-bindgen and wasm-bindgen-cli: the pin is 0.2.129, and the latest is 0.2.130 (2026-10-30).  `js-sys`, `web-sys`, `wasm-bindgen-futures` and `wasm-bindgen-test` move with it.
+* Trunk: the pin is 0.21.14, and the latest is 0.22.1 (2026-10-26).  Step 3 of M2 moved the pin to 0.22.1.  0.22.0 locks the dist folder, and keeps the lock file there ([v0.22.0](https://github.com/trunk-rs/trunk/releases/tag/v0.22.0)).
+* wasm-bindgen and wasm-bindgen-cli: the pin is 0.2.129, and the latest is 0.2.130 (2026-10-30).  Step 2 of M2 moved the pin to 0.2.130.  `js-sys`, `web-sys`, `wasm-bindgen-futures` and `wasm-bindgen-test` move with it.
 * cargo-mutants: the pin, 27.1.0, is the latest.
 * wgpu: 30.0.1 is the latest.  Its `trunk` branch still reads `GPUAdapterInfo.subgroupMinSize` as a `u32` (`wgpu/src/backend/webgpu.rs`), so no release fixes TD-93.  The nearest issue is [gfx-rs/wgpu#10882](https://github.com/gfx-rs/wgpu/issues/10882).
 * GitHub-hosted standard runners are free in a public repository ([Actions billing](https://docs.github.com/en/billing/concepts/product-billing/github-actions)).  `macos-latest` is a standard runner: arm64, an Apple M1 of 3 cores ([hosted runners](https://docs.github.com/en/actions/reference/runners/github-hosted-runners)).  It cannot run nested virtualization, and GitHub states nothing about its GPU.
@@ -124,7 +124,7 @@ Decision 0024, through the `review-rounds` skill.
 Branch `tech-debt/2026-11-11`, from `main` at `ee3728e`.  Each step is one commit, with a test that fails on the gap first.  The Safari runs need the maintainer's Mac, with Develop > Allow Remote Automation on.  Never quit the maintainer's Safari.
 
 1. `xtask setup` (VERIFY-1, BUILD-1).  One table in `xtask` holds the pin of each dev tool.  The tools are Trunk, wasm-bindgen-cli (its version comes from `Cargo.lock`), cargo-mutants, the nightly of TD-22 and the `wasm32-unknown-unknown` target.  `xtask setup` installs each tool that is missing or at another version, with `cargo install --locked` or `rustup`.  `xtask setup --check` only reports.  CI installs wasm-bindgen-cli with `xtask setup`.  CI keeps Trunk as a release binary with its SHA-256, and a test keeps its version equal to the pin.  Acceptance: a pure function that maps the installed versions to the actions has a test for each case.  A test fails when `README.md` or `ci.yml` names another pin than the table.
-2. wasm-bindgen 0.2.129 to 0.2.130, with `js-sys`, `web-sys`, `wasm-bindgen-futures` and `wasm-bindgen-test` at their matching releases (DEPS-1).  The release is under a month old, so pin it exactly.  Acceptance: `check --tier push`, and `web-test` in Chrome and Safari, give the same results as before the change.
+2. wasm-bindgen 0.2.129 to 0.2.130, with `js-sys`, `web-sys`, `wasm-bindgen-futures` and `wasm-bindgen-test` at their matching releases.  `SETTLED_CRATES` lists each of them, so a caret requirement stays (DEPS-1).  Regenerate `THIRD-PARTY.md`.  Acceptance: `check --tier push`, and `web-test` in Chrome and Safari, give the same results as before the change.
 3. Trunk 0.21.14 to 0.22.1.  Check that `xtask publish` does not copy Trunk's lock file to `gh-pages`, and that `filehash = false` keeps the worker names.  Acceptance: `trunk build --release` gives the same file names in `app/dist`, and a test fails when `publish` would copy the lock file.
 4. `xtask web-test` runs each crate, then lists each crate that failed.  Acceptance: a test of the pure summary fails when a failure before the last crate is lost.
 5. TD-95 (VERIFY-1): find why the test build of the decode worker decodes nothing in Safari, and fix the test or the code.  Acceptance: `web-test --browser safari` passes the 12 tests of `decode-worker`.  If the cause is outside the repo, record it in `references/browser-quirks.md`, and narrow TD-95 to it.
@@ -185,7 +185,11 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-08: `check --tier push` passed on the tree of the last commit of M1, on the maintainer's Mac.
   * [x] 2026-11-08: CI passed on `5b3fbf6`, the last code commit of M1, the nightly step included (run 42405974754).
 * [x] 2026-11-11: the triage of TD-79 to TD-95, the new M2, and the answers to questions 5 to 8.
-* [ ] M2: rung 2, Safari and verification.
+* [ ] M2: rung 2, Safari and verification.  Its milestone plan is `plans/active/tech-debt-rungs-m2.md`.
+  * [x] 2026-11-11: the milestone plan, `f18a690`, after 2 rounds of a `Plan` agent.
+  * [x] 2026-11-11: the 10 steps: `808aa66` step 1, `34f7f6c` step 4, `5057fc4` step 2, `99b23eb` step 3, `cccfcfe` step 7 (TD-8), `95f5351` step 8 (TD-51 closed), `f6f1aa7` step 5 (TD-95 closed), `de7ffa3` step 6 (TD-93 narrowed), `707010d` step 9 (TD-96 and TD-97 new), `e7e11c5` step 10 (TD-92 narrowed).
+  * [x] 2026-11-11: CI run 42952206488 on `e7e11c5` passed each job, the `macos` job included (46 minutes).
+  * [ ] Review rounds.
 * [ ] M3: rung 3.
 
 ## Surprises and discoveries
@@ -220,6 +224,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-11, maintainer: run M2 in orchestrated mode, since the maintainer is away (questions 5 to 8 hold the answers).
 * 2026-11-11, agent: no message of "Start".  Reason: the maintainer asked for the mode, questions 5 to 8 have answers, and no new choice is open.
 * 2026-11-11, agent: step 4 goes before step 2, so the Safari baseline of every crate comes before the new wasm-bindgen.  Step 2 waits as a patch in the orchestrator's scratchpad, `m2/step2-wasm-bindgen-0.2.130.patch`.
+* 2026-11-11, agent: M2's agent decisions are in the Decision log of `plans/active/tech-debt-rungs-m2.md`.  Among them: the Safari timeouts came from the locked screen; step 2 keeps caret requirements (`SETTLED_CRATES`); step 10 adds the need `aac` to `STEMYLA_REQUIRE`; the `macos` job installs Trunk with `xtask setup`.
 * 2026-11-11, agent: the branch `tech-debt/2026-11-11` moved by fast-forward from `ff633a3` to `ee3728e`, so that M2 starts with TD-92 to TD-95 in the register.
 
 ## Outcomes and retrospective
