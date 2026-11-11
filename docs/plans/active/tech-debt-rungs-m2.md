@@ -178,7 +178,7 @@ The orchestrator committed it in `808aa66`.  No work.
 * [x] 2026-11-11: step 4, `web-test` runs each crate and lists the failed crates.  The new test `a_failure_before_the_last_crate_names_that_crate` first failed on its `assert_eq!` against a `summary` that kept only the last result: it gave `Ok` with no line of failed crates.
 * [x] 2026-11-11: the baseline at wasm-bindgen 0.2.129 in Chrome, at `34f7f6c`: each crate passed (Surprises).  The Safari baseline is owed.
 * [x] 2026-11-11: step 2, wasm-bindgen 0.2.130.  Chrome gives the same results as the baseline (Surprises).  The Safari comparison is owed.  The step changes no behaviour of the repo's code, so it adds no test.
-* [ ] Step 3: Trunk 0.22.1.
+* [x] 2026-11-11: step 3, Trunk 0.22.1.  The new test `trunk_s_lock_file_never_reaches_the_site` (`xtask/tests/publish.rs`) first failed on its first assert: `check_build` gave `Ok(())` for a build with `.trunk-lock`.  With the refusal and no removal, it failed on the assert "the lock file stays in the site tree".  It passes with both.
 * [ ] Step 5: TD-95.
 * [ ] Step 6: TD-93.
 * [ ] Step 7: TD-8, `STEMYLA_REQUIRE` in a wasm test.
@@ -208,6 +208,9 @@ Safari runs owed (each waits until the screen of the Mac is unlocked):
   | `stem-protocol` | `--test web` | 31 passed | 31 passed |
 
 * 2026-11-11, step 2: crates.io gives 2026-10-30 as the release date of `wasm-bindgen` 0.2.130, `js-sys` and `web-sys` 0.3.107, `wasm-bindgen-futures` 0.4.80 and `wasm-bindgen-test` 0.3.80.  None is yanked.
+* 2026-11-11, step 3: Trunk names its lock file `.trunk-lock`, in the dist folder (`BUILD_LOCK_FILE` in `src/build.rs` at the tag `v0.22.1`, [commit 5ccc168](https://github.com/trunk-rs/trunk/commit/5ccc1688d9a313ebbc60af0fb5a0ede366b1803a)).  0.22.1 changes only the dependencies from 0.22.0.  The file stays after the build: it is empty, and `app/dist/.trunk-lock` is ignored by `.gitignore`.
+* 2026-11-11, step 3: the SHA-256 of `trunk-x86_64-unknown-linux-gnu.tar.gz` of v0.22.1 is `2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1`.  `shasum -a 256` of the download and the `digest` of the release asset in the GitHub API give the same value.  The tarball holds one file, `trunk`.  Nobody ran it.
+* 2026-11-11, step 3: `trunk build --release` in `app`, at `5057fc4`, gives the same 26 paths in `app/dist` with 0.21.14 and with 0.22.1, and 0.22.1 adds `.trunk-lock` (`m2/step3-dist-0.21.14.txt`, `m2/step3-dist-0.22.1.txt`).  The workers keep their names (`stem-worker_loader.js`, `decode-worker_loader.js`), and the snippet folders keep their hashes.
 
 ## Decision log
 
@@ -224,6 +227,7 @@ Safari runs owed (each waits until the screen of the Mac is unlocked):
 * 2026-11-11, agent (orchestrator): step 9 gets one more fix.  `web-test` and `e2e` with Safari on macOS check the screen lock first, and fail at once with a clear message.  A pure parse of the `ioreg` output gets tests.  A line goes in `references/local-browser-testing.md`.
 * 2026-11-11, agent (orchestrator): the order while the lock holds is the Chrome baseline, step 2 (Chrome now, Safari owed), step 3, step 7, step 8 and step 10.  Steps 5, 6 and 9 wait for the lock to clear.  Step 6's pure function, its tests and the draft wgpu issue need no Safari, so they may go first.  After step 10, the implementer stops, so the orchestrator pushes and reads the CI run.
 * 2026-11-11, agent (orchestrator): step 2 applies its patch with `--exclude=docs/plans/active/tech-debt-rungs.md`.  The hunk of the parent plan is in `m2/step2-parent-plan.diff`, for the orchestrator.  Reason: only the orchestrator edits the parent plan.
+* 2026-11-11, agent: step 3 removes Trunk's lock file after the build, and `check_build` refuses a build that still holds it.  Reason: the removal keeps `publish` working with Trunk 0.22, and the refusal stops the file if a later change skips the removal.
 * 2026-11-11, agent: step 4 does not capture the output of a crate run.  Step 8 adds the capture, with its own tests.  Reason: step 4's acceptance is the summary only, and a small commit is easier to review.
 
 ## Outcomes and retrospective

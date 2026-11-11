@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use xtask::publish::{
-    CopiedBuild, KEPT_BUILDS, Options, Prepared, build_id, check_build, check_build_id, check_id,
-    check_kept_builds, commit_dir, deploy, kept_ids, parse_versions, prepare_site, remote_head,
-    skip_reason,
+    CopiedBuild, KEPT_BUILDS, Options, Prepared, TRUNK_LOCK, build_id, check_build, check_build_id,
+    check_id, check_kept_builds, commit_dir, deploy, kept_ids, parse_versions, prepare_site,
+    remote_head, remove_trunk_lock, skip_reason,
 };
 
 /// A committer identity, and no user or system git config (which may sign
@@ -836,6 +836,36 @@ fn checks_the_build() {
         ("/pages/", "up", true)
     );
     assert!(Options::parse(&["--bogus".into()]).is_err());
+}
+
+/// Trunk 0.22 keeps its lock file in the dist folder, which is the site
+/// tree.  The build check refuses it, and the publish removes it first.
+#[test]
+fn trunk_s_lock_file_never_reaches_the_site() {
+    let root = scratch("trunk-lock");
+    let id = "aaaaaaaaaaaa";
+    let build = versioned_site(&root, id, "v1").join("v").join(id);
+    let url = format!("/stemyla/v/{id}/");
+    let lock = build.join(TRUNK_LOCK);
+    std::fs::write(&lock, "").unwrap();
+
+    let refused = check_build(&build, &url);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains(".trunk-lock")),
+        "{refused:?}"
+    );
+
+    let removed = remove_trunk_lock(&build);
+    assert!(removed.is_ok(), "{removed:?}");
+    assert!(!lock.exists(), "the lock file stays in the site tree");
+    let checked = check_build(&build, &url);
+    assert!(checked.is_ok(), "{checked:?}");
+
+    let again = remove_trunk_lock(&build);
+    assert!(again.is_ok(), "a build with no lock file: {again:?}");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// An unreachable remote fails with a hint, and `--remote .` publishes

@@ -33,9 +33,10 @@
 //!    cannot roll the site back (see [`skip_reason`]).
 //! 2. `trunk build --release --public-url <url>v/<id>/` into
 //!    `target/pages/v/<id>`, with `STEMYLA_BUILD_ID=<id>` so the About menu
-//!    shows the id and links to its commit, and checks the result: the
-//!    page, both wasm modules, the worker loader, the base and asset paths
-//!    under the build's URL, and the id in the app's wasm.
+//!    shows the id and links to its commit.  It removes Trunk's lock file
+//!    ([`TRUNK_LOCK`]) from the build, and checks the result: the page,
+//!    both wasm modules, the worker loader, no lock file, the base and
+//!    asset paths under the build's URL, and the id in the app's wasm.
 //! 3. Fetches the branch from the remote if it exists there.  Then adds the
 //!    newest [`KEPT_BUILDS`] builds: the new one, and the older ones from
 //!    the branch, byte for byte.  A build id the branch has ever published
@@ -193,6 +194,7 @@ pub fn main(args: &[String]) -> Result<()> {
             "trunk build failed (the wasm target is added with `rustup target add wasm32-unknown-unknown`)"
         );
     }
+    remove_trunk_lock(&build)?;
     check_build(&build, &build_url)?;
     check_build_id(&build, &id)?;
 
@@ -651,6 +653,20 @@ pub fn deploy(
 /// build's own folder on the site.  The base matters as much as the
 /// assets: the app starts the worker from a relative URL, which resolves
 /// against it.
+/// The lock file that Trunk 0.22 keeps in its dist folder.  `publish`
+/// builds into the site tree, so the lock file would go to the site.
+pub const TRUNK_LOCK: &str = ".trunk-lock";
+
+/// Removes Trunk's lock file from the build in `dir`, if it is there.
+pub fn remove_trunk_lock(dir: &Path) -> Result<()> {
+    let lock = dir.join(TRUNK_LOCK);
+    match std::fs::remove_file(&lock) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("removing {}", lock.display())),
+    }
+}
+
 pub fn check_build(dir: &Path, url: &str) -> Result<()> {
     let need = [
         "index.html",
@@ -669,6 +685,13 @@ pub fn check_build(dir: &Path, url: &str) -> Result<()> {
         if len == 0 {
             bail!("the build is missing {} (or it is empty)", p.display());
         }
+    }
+    let lock = dir.join(TRUNK_LOCK);
+    if lock.exists() {
+        bail!(
+            "the build holds Trunk's lock file {}; publish would copy it to the site",
+            lock.display()
+        );
     }
     let html = std::fs::read_to_string(dir.join("index.html"))?;
     if !html.contains(&format!("<base href=\"{url}\"")) {

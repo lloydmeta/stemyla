@@ -13,7 +13,7 @@ use anyhow::{Context, Result, bail};
 use std::process::Command;
 
 /// The Trunk that builds the app.
-pub const TRUNK: &str = "0.21.14";
+pub const TRUNK: &str = "0.22.1";
 
 /// The cargo-mutants of `xtask review mutants`.
 pub const CARGO_MUTANTS: &str = "27.1.0";

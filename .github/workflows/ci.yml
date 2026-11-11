@@ -24,8 +24,8 @@ env:
   # Pinned so CI matches the local toolchain and clippy/rustfmt results do
   # not drift when a new stable is released.  Bump deliberately.
   RUST_VERSION: "1.99.0"
-  TRUNK_VERSION: "0.21.14"
-  TRUNK_SHA256: "f2b4680cd239693a646a2795e4633c625328d7b2a044fbe749fa3a2fe9e7036b"
+  TRUNK_VERSION: "0.22.1"
+  TRUNK_SHA256: "2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1"
 
 jobs:
   fmt:
