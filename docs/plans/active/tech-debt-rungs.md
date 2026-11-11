@@ -245,6 +245,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-11, agent: review round 6 (6-1) takes the CI run on `c156c4a` as the fix, with no count of skips that `xtask` prints.  Reason: the finding was a code head with no CI result, and the run passed.  A count is new behaviour, which a late round does not add.  TD-96 records that a CI log shows no skip line, and how a direct run with `--nocapture` shows them (review round 7, 7-1).
 * 2026-11-11, maintainer: after CI run 43008561411 failed D11 of `e2e save` for MP3 in Safari (TD-97), fix TD-97 now, and make the `macos` job a required check (steps 11 and 12 of M2).
 * 2026-11-11, maintainer: refused decision 0030, a counting allocator in the page ("writing a custom allocator is insane overengineering").  Step 11 then set a tolerance from the measured spread, with a proof that it still fails a save that grows with the song.  The rule of proportion went into `CLAUDE.md`, `plans/PLANS.md` and the `orchestrate` skill (`d47eac6`).
+* 2026-11-12, maintainer: accepted the rule of proportion in `CLAUDE.md`, `plans/PLANS.md` and the `orchestrate` skill.
 
 ## Outcomes and retrospective
 
