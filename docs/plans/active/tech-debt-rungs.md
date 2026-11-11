@@ -187,7 +187,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-08: `check --tier push` passed on the tree of the last commit of M1, on the maintainer's Mac.
   * [x] 2026-11-08: CI passed on `5b3fbf6`, the last code commit of M1, the nightly step included (run 42405974754).
 * [x] 2026-11-11: the triage of TD-79 to TD-95, the new M2, and the answers to questions 5 to 8.
-* [ ] M2: rung 2, Safari and verification.  Its milestone plan is `plans/completed/tech-debt-rungs-m2.md`.
+* [x] M2: rung 2, Safari and verification.  Its milestone plan is `plans/completed/tech-debt-rungs-m2.md`.
   * [x] 2026-11-11: the milestone plan, `f18a690`, after 2 rounds of a `Plan` agent.
   * [x] 2026-11-11: the 10 steps: `808aa66` step 1, `34f7f6c` step 4, `5057fc4` step 2, `99b23eb` step 3, `cccfcfe` step 7 (TD-8), `95f5351` step 8 (TD-51 closed), `f6f1aa7` step 5 (TD-95 closed), `de7ffa3` step 6 (TD-93 narrowed), `707010d` step 9 (TD-96 and TD-97 new), `e7e11c5` step 10 (TD-92 narrowed).
   * [x] 2026-11-11: CI run 42952206488 on `e7e11c5` passed each job, the `macos` job included (46 minutes).
@@ -196,7 +196,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-11: intent review round 1 found 3 significant should-fix findings (I1-1 to I1-3).  I1-1 and I1-2 were fixed in the PR body and by CI run 42982197888 on `fbe588a`.  I1-3 went to the team (`a67f23b`), with review rounds 6 to 9 of the same run, the late rule: 14 agents, 622,120 tokens and 16.8 wall minutes.  The fixes are `0574e9c`, `e9e5897` and `c6a1be8`.  Round 9 had no should-fix, so the stop rule of decision 0024 holds.  All 9 rounds: 55 agents, 3,212,213 tokens, 78.2 wall minutes and 1 intervention.
   * [x] 2026-11-11: the TD-96 command with `--nocapture` ran in Safari 27.2 on the maintainer's Mac (exit 0): `app --lib` passed 197 tests with 2 skip lines, and `web_output` passed 4 with 3 skip lines.
   * [x] 2026-11-11: intent review round 2 found that round 1 is resolved, and no significant finding.  I2-1, the PR body, goes into the body at close-out.  For I2-2, a full `xtask web-test --browser safari` passed on the maintainer's Mac at `4c23f79` (19:16 to 19:21 JST): app, stem-worker, decode-worker, stem-protocol and engine passed, with no failure.  The nits I2-3 and I2-4 are reported, not fixed.
-  * [ ] Intent review round 3.
+  * [x] 2026-11-11: intent review round 3 found no significant finding, so the intent review ends (decision 0024).  For I3-1: `check --tier push` passed (13 checks) on the maintainer's Mac at `f5be16a`, and CI run 43003704558 on `f5be16a` passed each job, the `macos` job included.  The nit I3-2 is reported, not fixed.
 * [ ] M3: rung 3.
 
 ## Surprises and discoveries
