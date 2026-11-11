@@ -8,7 +8,7 @@
 //!
 //! A Safari run on macOS checks the screen lock first, holds
 //! `caffeinate -u` while it runs, and ends each stale `safaridriver`
-//! (TD-96).
+//! before each session start (TD-96).
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
@@ -89,23 +89,28 @@ pub fn screen_is_locked(plist: &str) -> bool {
 }
 
 /// Refuses a Safari run on macOS while the screen is locked, before a
-/// driver starts.  If `ioreg` gives no output, it says so, and goes on.
-pub fn refuse_a_locked_screen(browser: Browser) -> Result<()> {
-    if browser != Browser::Safari || !cfg!(target_os = "macos") {
+/// driver starts.  `on_macos` tells whether this is macOS, and `ioreg`
+/// gives the plist of [`ioreg_root`].  With no plist, it says so, and
+/// goes on.
+pub fn refuse_a_locked_screen(
+    browser: Browser,
+    on_macos: bool,
+    ioreg: impl FnOnce() -> Option<String>,
+) -> Result<()> {
+    if browser != Browser::Safari || !on_macos {
         return Ok(());
     }
-    match Command::new("/usr/sbin/ioreg")
-        .args(["-n", "Root", "-d1", "-a"])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            if screen_is_locked(&String::from_utf8_lossy(&out.stdout)) {
-                bail!("{LOCKED_TEXT}");
-            }
-        }
-        _ => eprintln!("the screen lock is not known: /usr/sbin/ioreg gave no output"),
+    match ioreg() {
+        Some(plist) if screen_is_locked(&plist) => bail!("{LOCKED_TEXT}"),
+        Some(_) => {}
+        None => eprintln!("the screen lock is not known: /usr/sbin/ioreg gave no output"),
     }
     Ok(())
+}
+
+/// The plist of `ioreg -n Root -d1 -a`, or `None` when `ioreg` fails.
+pub fn ioreg_root() -> Option<String> {
+    crate::stdout_on_success(Command::new("/usr/sbin/ioreg").args(["-n", "Root", "-d1", "-a"]))
 }
 
 /// The longest that [`keep_user_active`] holds its assertion: longer than
@@ -138,18 +143,29 @@ fn user_active_args(pid: u32, secs: u64) -> [String; 5] {
 
 /// Safari keeps each `AudioContext` suspended while macOS reports the user
 /// idle (`references/browser-quirks.md`).  So a Safari run on macOS
-/// declares the user active with `caffeinate -u` while it runs.
-pub fn keep_user_active(browser: Browser) -> UserActive {
-    if browser != Browser::Safari || !cfg!(target_os = "macos") {
+/// declares the user active with `caffeinate` ([`caffeinate`]) while it
+/// runs.  `on_macos` tells whether this is macOS.
+pub fn keep_user_active(
+    browser: Browser,
+    on_macos: bool,
+    caffeinate: impl FnOnce() -> std::io::Result<Child>,
+) -> UserActive {
+    if browser != Browser::Safari || !on_macos {
         return UserActive(None);
     }
-    let child = Command::new("/usr/bin/caffeinate")
-        .args(user_active_args(std::process::id(), ACTIVE_LIMIT_S))
-        .spawn();
+    let child = caffeinate();
     if let Err(e) = &child {
         eprintln!("caffeinate did not start ({e}), so Safari may keep its audio suspended");
     }
     UserActive(child.ok())
+}
+
+/// Starts `caffeinate -u`, which declares the user active for
+/// [`ACTIVE_LIMIT_S`], or until this process ends.
+pub fn caffeinate() -> std::io::Result<Child> {
+    Command::new("/usr/bin/caffeinate")
+        .args(user_active_args(std::process::id(), ACTIVE_LIMIT_S))
+        .spawn()
 }
 
 /// The pids of the `safaridriver`s in `ps -x -o pid=,ppid=,comm=` whose
@@ -167,18 +183,21 @@ pub fn stale_safaridrivers(ps: &str) -> Vec<u32> {
         .collect()
 }
 
-/// Ends each stale `safaridriver` of this user, so a new session can
-/// pair with Safari.  It ends no driver that a running program owns.
-pub fn end_stale_safari_sessions() {
-    let Ok(out) = Command::new("/bin/ps")
-        .args(["-x", "-o", "pid=,ppid=,comm="])
-        .output()
-    else {
-        return;
-    };
-    for pid in stale_safaridrivers(&String::from_utf8_lossy(&out.stdout)) {
+/// The processes of this user, as `ps -x -o pid=,ppid=,comm=` lists them,
+/// or `None` when `ps` fails.
+pub fn processes() -> Option<String> {
+    crate::stdout_on_success(Command::new("/bin/ps").args(["-x", "-o", "pid=,ppid=,comm="]))
+}
+
+/// Ends each stale `safaridriver` in `ps` (the text of [`processes`]), so
+/// a new session can pair with Safari.  It gives `run` one `kill` command
+/// for each stale driver, and ends no driver that a running program owns.
+pub fn end_stale_safari_sessions(ps: Option<&str>, mut run: impl FnMut(Command)) {
+    for pid in stale_safaridrivers(ps.unwrap_or_default()) {
         eprintln!("ending the stale safaridriver {pid}, whose parent is gone");
-        let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+        let mut kill = Command::new("/bin/kill");
+        kill.arg(pid.to_string());
+        run(kill);
     }
 }
 
@@ -239,6 +258,118 @@ mod tests {
         let plist = console_session("\t\t\t<key>CGSSessionScreenIsLocked</key>\n\t\t\t<false/>\n");
         assert!(!screen_is_locked(&plist));
         assert!(!screen_is_locked(""));
+    }
+
+    const LOCKED: &str = "\t\t\t<key>CGSSessionScreenIsLocked</key>\n\t\t\t<true/>\n";
+
+    #[test]
+    fn safari_on_macos_refuses_a_locked_screen() {
+        let error = refuse_a_locked_screen(Browser::Safari, true, || Some(console_session(LOCKED)))
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("the screen is locked"),
+            "{error}"
+        );
+        assert!(
+            refuse_a_locked_screen(Browser::Safari, true, || Some(console_session(""))).is_ok()
+        );
+    }
+
+    #[test]
+    fn safari_on_macos_goes_on_when_the_lock_is_not_known() {
+        assert!(refuse_a_locked_screen(Browser::Safari, true, || None).is_ok());
+    }
+
+    #[test]
+    fn only_safari_on_macos_reads_the_screen_lock() {
+        let not_read = || -> Option<String> { panic!("ioreg was read") };
+        assert!(refuse_a_locked_screen(Browser::Chrome, true, not_read).is_ok());
+        assert!(refuse_a_locked_screen(Browser::Safari, false, not_read).is_ok());
+        assert!(refuse_a_locked_screen(Browser::Chrome, false, not_read).is_ok());
+    }
+
+    #[test]
+    fn ioreg_gives_the_root_plist_on_macos_only() {
+        let plist = ioreg_root();
+        if cfg!(target_os = "macos") {
+            let plist = plist.expect("ioreg gives the root plist on macOS");
+            assert!(plist.contains("<key>IOConsoleUsers</key>"), "{plist}");
+        } else {
+            assert_eq!(plist, None);
+        }
+    }
+
+    #[test]
+    fn the_user_stays_active_for_4_hours() {
+        assert_eq!(ACTIVE_LIMIT_S, 14_400);
+    }
+
+    #[test]
+    fn only_safari_on_macos_declares_the_user_active() {
+        let not_started = || -> std::io::Result<Child> { panic!("caffeinate started") };
+        assert!(
+            keep_user_active(Browser::Chrome, true, not_started)
+                .0
+                .is_none()
+        );
+        assert!(
+            keep_user_active(Browser::Safari, false, not_started)
+                .0
+                .is_none()
+        );
+        assert!(
+            keep_user_active(Browser::Chrome, false, not_started)
+                .0
+                .is_none()
+        );
+        let started = std::cell::Cell::new(false);
+        let held = keep_user_active(Browser::Safari, true, || {
+            started.set(true);
+            Err(std::io::Error::other("no caffeinate for lloyd"))
+        });
+        assert!(started.get(), "Safari on macOS starts caffeinate");
+        assert!(
+            held.0.is_none(),
+            "a caffeinate that did not start holds nothing"
+        );
+    }
+
+    #[test]
+    fn each_stale_safaridriver_gets_one_kill() {
+        let ps = "50712 50699 /usr/bin/safaridriver\n\
+                  50801     1 /usr/bin/safaridriver\n\
+                  50803     1 /usr/bin/safaridriver\n";
+        let mut kills = Vec::new();
+        end_stale_safari_sessions(Some(ps), |kill| {
+            let args: Vec<String> = kill
+                .get_args()
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect();
+            kills.push((kill.get_program().to_string_lossy().into_owned(), args));
+        });
+        assert_eq!(
+            kills,
+            [
+                ("/bin/kill".to_string(), vec!["50801".to_string()]),
+                ("/bin/kill".to_string(), vec!["50803".to_string()]),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_process_list_ends_nothing() {
+        end_stale_safari_sessions(None, |kill| panic!("{kill:?} ran"));
+    }
+
+    #[test]
+    fn the_process_list_holds_this_process() {
+        let ps = processes().expect("ps lists the processes of this user");
+        let this = std::process::id().to_string();
+        assert!(
+            ps.lines()
+                .any(|line| line.split_whitespace().next() == Some(this.as_str())),
+            "no line for {this} in:\n{ps}"
+        );
     }
 
     #[test]

@@ -83,10 +83,13 @@ export async function wipe() {
 export async function plant_folder(path) { await folder_at(path, true); }
 // Safari 27 writes a typed array view's whole buffer, not just the view
 // (MEM-5), and `bytes` is a view into the wasm memory.  So write a copy.
+// Copy before the first await: a growth of the wasm memory during an
+// await detaches the view.
 export async function plant_at(path, bytes) {
+  const copy = bytes.slice();
   const [d, n] = split_at(path);
   const w = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createWritable();
-  await w.write(bytes.slice());
+  await w.write(copy);
   await w.close();
 }
 // The bytes of the file at `path`, or null if there is none.

@@ -195,26 +195,78 @@ impl Drop for Driver {
     }
 }
 
-/// Starts a driver and a browser session.  If Safari's session does not
-/// start, it ends the stale sessions, and tries once more with a new
-/// driver.  It tries nothing else again (Q8 of the tech debt rungs).
-pub fn start_session(browser: Browser, args: &[String]) -> Result<(Driver, Session)> {
-    let driver = Driver::start(browser)?;
-    match Session::new(&driver, browser, args) {
-        Ok(session) => Ok((driver, session)),
-        Err(first) if browser == Browser::Safari => {
-            drop(driver);
-            eprintln!(
-                "the Safari session did not start ({first:#}); ending the stale sessions, and trying once more"
-            );
-            crate::drivers::end_stale_safari_sessions();
-            let driver = Driver::start(browser)?;
-            let session = Session::new(&driver, browser, args)
-                .with_context(|| format!("the first try failed too: {first:#}"))?;
-            Ok((driver, session))
-        }
-        Err(e) => Err(e),
+/// How [`start_session`] starts a session in one browser.  Q8 of the tech
+/// debt rungs allows a second try of a session start only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StartPlan {
+    /// End the stale Safari sessions before each try (TD-96).
+    pub end_stale_sessions: bool,
+    /// How many times to try.
+    pub tries: u32,
+}
+
+/// Safari ends the stale sessions before each try, and tries twice, since
+/// a stale session can hold Safari (TD-96).  Chrome tries once.
+pub fn start_plan(browser: Browser) -> StartPlan {
+    match browser {
+        Browser::Safari => StartPlan {
+            end_stale_sessions: true,
+            tries: 2,
+        },
+        Browser::Chrome => StartPlan {
+            end_stale_sessions: false,
+            tries: 1,
+        },
     }
+}
+
+/// Calls `start` as `plan` tells, and gives its first success.  Before
+/// each try, it calls `end_stale` if the plan tells it to.  The error
+/// names the error of each try.
+pub fn start_with<T>(
+    plan: StartPlan,
+    mut end_stale: impl FnMut(),
+    mut start: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut errors = Vec::new();
+    for attempt in 1..=plan.tries {
+        if plan.end_stale_sessions {
+            end_stale();
+        }
+        match start() {
+            Ok(started) => return Ok(started),
+            Err(e) => {
+                eprintln!(
+                    "try {attempt} of {}: the session did not start ({e:#})",
+                    plan.tries
+                );
+                errors.push(format!("try {attempt}: {e:#}"));
+            }
+        }
+    }
+    bail!("the session did not start; {}", errors.join("; "))
+}
+
+/// Starts a driver and a browser session, as [`start_plan`] tells.  A
+/// failed try stops its driver before the next try starts a new one.  It
+/// tries nothing else again (Q8 of the tech debt rungs).
+pub fn start_session(browser: Browser, args: &[String]) -> Result<(Driver, Session)> {
+    start_with(
+        start_plan(browser),
+        || {
+            crate::drivers::end_stale_safari_sessions(
+                crate::drivers::processes().as_deref(),
+                |mut kill| {
+                    let _ = kill.status();
+                },
+            )
+        },
+        || {
+            let driver = Driver::start(browser)?;
+            let session = Session::new(&driver, browser, args)?;
+            Ok((driver, session))
+        },
+    )
 }
 
 /// A browser session, ended when dropped.
@@ -675,6 +727,78 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
+
+    #[test]
+    fn safari_ends_the_stale_sessions_and_tries_twice() {
+        assert_eq!(
+            start_plan(Browser::Safari),
+            StartPlan {
+                end_stale_sessions: true,
+                tries: 2
+            }
+        );
+    }
+
+    #[test]
+    fn chrome_tries_once_and_ends_no_session() {
+        assert_eq!(
+            start_plan(Browser::Chrome),
+            StartPlan {
+                end_stale_sessions: false,
+                tries: 1
+            }
+        );
+    }
+
+    /// The order of the calls of `start_with`: `end` for `end_stale`, and
+    /// `start` for `start`, which fails while `failures` lasts.
+    fn calls_of(plan: StartPlan, failures: usize) -> (Vec<&'static str>, Result<&'static str>) {
+        let calls = std::cell::RefCell::new(Vec::new());
+        let mut left = failures;
+        let result = start_with(
+            plan,
+            || calls.borrow_mut().push("end"),
+            || {
+                calls.borrow_mut().push("start");
+                if left > 0 {
+                    left -= 1;
+                    bail!("no session for lloyd {left}")
+                }
+                Ok("session")
+            },
+        );
+        (calls.into_inner(), result)
+    }
+
+    #[test]
+    fn safari_ends_the_stale_sessions_before_the_first_try() {
+        let (calls, result) = calls_of(start_plan(Browser::Safari), 0);
+        assert_eq!(calls, ["end", "start"]);
+        assert_eq!(result.unwrap(), "session");
+    }
+
+    #[test]
+    fn a_failed_safari_start_is_tried_once_more() {
+        let (calls, result) = calls_of(start_plan(Browser::Safari), 1);
+        assert_eq!(calls, ["end", "start", "end", "start"]);
+        assert_eq!(result.unwrap(), "session");
+        let (calls, result) = calls_of(start_plan(Browser::Safari), 2);
+        assert_eq!(calls, ["end", "start", "end", "start"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the session did not start; try 1: no session for lloyd 1; try 2: no session for lloyd 0"
+        );
+    }
+
+    #[test]
+    fn a_failed_chrome_start_is_not_tried_again() {
+        let (calls, result) = calls_of(start_plan(Browser::Chrome), 1);
+        assert_eq!(calls, ["start"]);
+        assert_eq!(
+            result.unwrap_err().to_string(),
+            "the session did not start; try 1: no session for lloyd 0"
+        );
+    }
 
     /// A one-shot fake driver: answers one request with `reply` and sends
     /// back what it received (request line, then body).

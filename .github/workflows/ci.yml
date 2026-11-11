@@ -102,6 +102,9 @@ jobs:
           # .claude/settings.json, which needs rustfmt (and jq, which the
           # runner has).
           components: rustfmt
+          # a_wasm_build_reads_the_build_value in test-support compiles its
+          # lib for wasm32 (VERIFY-1).
+          targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install ALSA headers and software Vulkan (lavapipe)
         run: |
@@ -251,11 +254,12 @@ jobs:
     # On the maintainer's Mac (2026-11-11), the Safari `web-test` took
     # 5 minutes, and the Safari scenarios 8.  The setup builds Trunk and
     # wasm-bindgen-cli with `cargo install`, and the crates for wasm32,
-    # which took about 15 minutes on the Linux jobs with no cache.  `e2e
-    # save` in Chrome may take its limit of 60 minutes.  So the limit is
-    # 60, about 30 for the other steps, and 30 to spare.  A hung browser
-    # must not hold the runner for GitHub's 6 h default.
-    timeout-minutes: 120
+    # which took about 15 minutes on the Linux jobs with no cache.  Each of
+    # the two `e2e save` steps, in Safari and in Chrome, may take its limit
+    # of 60 minutes.  So the limit is 30 for the setup and the other steps,
+    # 60 for each save, and 30 to spare.  A hung browser must not hold the
+    # runner for GitHub's 6 h default.
+    timeout-minutes: 180
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1

@@ -569,32 +569,48 @@ mod tests {
     /// An input of more than 2^32 / `phases` frames makes a usize
     /// product of a frame and `phases`, or of an output and `step`,
     /// overflow on wasm32.  The rates give the most phases, 441, with the
-    /// fewest outputs, so the test is short: about 9.7 million frames give
-    /// 212,000 outputs.  Both converters make each output of a constant.
+    /// fewest outputs, so the test is short: about 9.8 million frames give
+    /// 214,000 outputs.  The input is a ramp, so an output whose position
+    /// wraps gets a wrong value, also with no overflow checks.  About 2,200
+    /// outputs come after the frame where a usize product wraps.
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen_test::wasm_bindgen_test)]
     #[cfg_attr(not(target_arch = "wasm32"), test)]
     fn a_long_input_converts_with_a_32_bit_usize() {
         let (from, to, phases, step) = (383_990, 8_379, 441, 20_210);
         let filter = Filter::new(from, to).unwrap();
         assert_eq!((filter.phases, filter.step), (phases, step));
-        let frames = (1_u64 << 32).div_ceil(phases) + 1_000;
-        let level = 0.25;
-        let whole = to_rate(vec![level; frames as usize], from, to).unwrap();
+        let wraps_at = (1_u64 << 32).div_ceil(phases);
+        let frames = wraps_at + 100_000;
+        let ramp = |frame: u64| (frame as f64 / frames as f64) as f32;
+        let whole = to_rate((0..frames).map(ramp).collect(), from, to).unwrap();
         assert_eq!(whole.len() as u64, output_len(frames, phases, step));
-        // A row of the filter sums to 1, so a constant passes, away from
-        // the two ends.
+        // A row of the filter sums to 1, and is symmetric, so a ramp
+        // passes, away from the two ends.  Output `i` falls at input
+        // `i * step / phases`.
         let last_full = whole.len() - 64;
-        for i in [64, whole.len() / 2, last_full] {
-            assert!((whole[i] - level).abs() < 1e-4, "output {i}: {}", whole[i]);
+        let first_wrapped = (wraps_at * phases).div_ceil(step) as usize;
+        assert!(first_wrapped < last_full - 1_000, "{first_wrapped}");
+        for i in [
+            64,
+            whole.len() / 2,
+            first_wrapped,
+            last_full - 1_000,
+            last_full,
+        ] {
+            let want = (i as f64 * step as f64 / phases as f64) / frames as f64;
+            let got = f64::from(whole[i]);
+            assert!((got - want).abs() < 1e-4, "output {i}: {got}, not {want}");
         }
         let mut resampler = Resampler::new(from, to).unwrap();
-        let block = vec![level; 1 << 20];
+        let mut block = Vec::with_capacity(1 << 20);
         let mut blocks = Vec::with_capacity(whole.len());
-        let mut left = frames as usize;
-        while left > 0 {
-            let n = left.min(block.len());
-            blocks.extend_from_slice(resampler.push(&block[..n]));
-            left -= n;
+        let mut next = 0;
+        while next < frames {
+            let end = frames.min(next + (1 << 20));
+            block.clear();
+            block.extend((next..end).map(ramp));
+            blocks.extend_from_slice(resampler.push(&block));
+            next = end;
         }
         blocks.extend_from_slice(resampler.finish());
         assert_eq!(blocks.len(), whole.len());

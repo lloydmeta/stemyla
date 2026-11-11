@@ -836,6 +836,13 @@ fn checks_the_build() {
         ("/pages/", "up", true)
     );
     assert!(Options::parse(&["--bogus".into()]).is_err());
+    let refused = xtask::publish::main(&["--bogus".into()]);
+    assert!(
+        refused
+            .as_ref()
+            .is_err_and(|err| err.to_string().starts_with("unknown option --bogus")),
+        "{refused:?}"
+    );
 }
 
 /// Trunk 0.22 keeps its lock file in the dist folder, which is the site
@@ -865,6 +872,15 @@ fn trunk_s_lock_file_never_reaches_the_site() {
 
     let again = remove_trunk_lock(&build);
     assert!(again.is_ok(), "a build with no lock file: {again:?}");
+
+    std::fs::create_dir(&lock).unwrap();
+    let stuck = remove_trunk_lock(&build);
+    assert!(
+        stuck
+            .as_ref()
+            .is_err_and(|err| err.to_string().contains("removing")),
+        "a lock that cannot be removed: {stuck:?}"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 

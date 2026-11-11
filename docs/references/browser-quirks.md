@@ -64,7 +64,7 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  A planted WGSL
 
 Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  `AbortController.abort(reason)` rejects the `fetch` and the reads of its body with "AbortError: Fetch is aborted", not with `reason`.  Chrome gives `reason`.  This is [WebKit bug 246069](https://bugs.webkit.org/show_bug.cgi?id=246069) (NEW).
 
-* The code: `download_to_opfs` in `worker/src/web.rs` gives the signal's reason when the signal is aborted, so a stalled download says "no data from the server for 60 s" in each browser (TD-96).
+* The code: `download_to_opfs` in `worker/src/web.rs` gives the signal's reason when the signal is aborted.  So a stalled download says "no data from the server for 60 s" in each browser (TD-96).
 * Rule: none.  `e2e storage` checks the text in each browser.
 
 ## Safari gives the size of a stored `File` at its first read

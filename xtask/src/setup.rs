@@ -149,21 +149,31 @@ pub fn chosen(all: Vec<Tool>, names: &[String]) -> Result<Vec<Tool>> {
 
 fn run_probe(probe: &Probe) -> Option<String> {
     let (Probe::Version(command) | Probe::Listed(command)) = probe;
-    let out = Command::new(&command[0])
-        .args(&command[1..])
-        .current_dir(crate::workspace_root())
-        .output()
-        .ok()?;
-    out.status
-        .success()
-        .then(|| String::from_utf8_lossy(&out.stdout).into_owned())
+    crate::stdout_on_success(
+        Command::new(&command[0])
+            .args(&command[1..])
+            .current_dir(crate::workspace_root()),
+    )
 }
 
 fn have(tool: &Tool) -> Option<String> {
     installed(&tool.probe, &tool.pin, run_probe(&tool.probe).as_deref())
 }
 
-pub fn run(args: &[String]) -> Result<()> {
+/// Runs the install command of `tool` in `root`, and gives whether it
+/// exited with success.
+fn install(tool: &Tool, root: &std::path::Path) -> Result<bool> {
+    let status = Command::new(&tool.install[0])
+        .args(&tool.install[1..])
+        .current_dir(root)
+        .status()
+        .with_context(|| format!("running {}", tool.install.join(" ")))?;
+    Ok(status.success())
+}
+
+/// The arguments of `setup`: whether `--check` is given, and the names
+/// of the tools.
+fn parse_args(args: &[String]) -> Result<(bool, Vec<String>)> {
     let check_only = args.iter().any(|arg| arg == "--check");
     if let Some(option) = args
         .iter()
@@ -171,16 +181,34 @@ pub fn run(args: &[String]) -> Result<()> {
     {
         bail!("unknown option {option}; usage: xtask setup [--check] [tool...]");
     }
-    let names: Vec<String> = args
+    let names = args
         .iter()
         .filter(|arg| !arg.starts_with("--"))
         .cloned()
         .collect();
+    Ok((check_only, names))
+}
+
+pub fn run(args: &[String]) -> Result<()> {
+    let (check_only, names) = parse_args(args)?;
     let root = crate::workspace_root();
     let lock = std::fs::read_to_string(root.join("Cargo.lock")).context("reading Cargo.lock")?;
     let tools = chosen(tools(&lock)?, &names)?;
+    set_up(&tools, check_only, have, |tool| install(tool, &root))
+}
+
+/// Keeps each of `tools` that is at its pin, and installs each other one
+/// with `install`, or only lists it with `check_only`.  `have` reads the
+/// installed version of a tool.  It fails when a tool is not at its pin
+/// at the end.
+fn set_up(
+    tools: &[Tool],
+    check_only: bool,
+    mut have: impl FnMut(&Tool) -> Option<String>,
+    mut install: impl FnMut(&Tool) -> Result<bool>,
+) -> Result<()> {
     let mut missing = Vec::new();
-    for tool in &tools {
+    for tool in tools {
         let action = action(tool, have(tool));
         println!("{}", line(tool, &action));
         if action == Action::Keep {
@@ -190,13 +218,8 @@ pub fn run(args: &[String]) -> Result<()> {
             missing.push(tool.name);
             continue;
         }
-        let status = Command::new(&tool.install[0])
-            .args(&tool.install[1..])
-            .current_dir(&root)
-            .status()
-            .with_context(|| format!("running {}", tool.install.join(" ")))?;
-        let after = action_after(tool, status.success(), have(tool));
-        if let Some(problem) = after {
+        let succeeded = install(tool)?;
+        if let Some(problem) = action_after(tool, succeeded, have(tool)) {
             bail!(problem);
         }
         println!("ok: {} {}", tool.name, tool.pin);
@@ -420,6 +443,129 @@ mod tests {
             "only four tokens after the name"
         );
         assert_eq!(pin_mentions("trunk 1.2", "trunk"), Vec::<String>::new());
+    }
+
+    /// A tool whose probe and install are harmless shell commands.
+    fn shell_tool(probe: &str, install: &str) -> Tool {
+        Tool {
+            name: "trunk",
+            pin: "1.2.3".to_string(),
+            probe: Probe::Version(vec!["sh".into(), "-c".into(), probe.into()]),
+            install: vec!["sh".into(), "-c".into(), install.into()],
+        }
+    }
+
+    #[test]
+    fn a_probe_gives_the_stdout_of_a_command_that_succeeds() {
+        let trunk = shell_tool("echo trunk 1.2.3", "exit 0");
+        assert_eq!(run_probe(&trunk.probe), Some("trunk 1.2.3\n".to_string()));
+        assert_eq!(have(&trunk), Some("1.2.3".to_string()));
+        let failed = shell_tool("echo trunk 1.2.3; exit 1", "exit 0");
+        assert_eq!(run_probe(&failed.probe), None);
+        assert_eq!(have(&failed), None);
+    }
+
+    #[test]
+    fn an_install_gives_whether_its_command_succeeded() {
+        let root = crate::workspace_root();
+        assert!(install(&shell_tool("", "exit 0"), &root).unwrap());
+        assert!(!install(&shell_tool("", "exit 1"), &root).unwrap());
+    }
+
+    fn args(words: &[&str]) -> Vec<String> {
+        words.iter().map(|word| word.to_string()).collect()
+    }
+
+    #[test]
+    fn the_arguments_give_check_and_the_tool_names() {
+        assert_eq!(
+            parse_args(&args(&["trunk", "--check", "wasm32"])).unwrap(),
+            (true, args(&["trunk", "wasm32"]))
+        );
+        assert_eq!(
+            parse_args(&args(&["trunk"])).unwrap(),
+            (false, args(&["trunk"]))
+        );
+        assert_eq!(parse_args(&[]).unwrap(), (false, Vec::new()));
+    }
+
+    #[test]
+    fn an_unknown_option_fails() {
+        let error = parse_args(&args(&["--check", "--lloyd"]))
+            .unwrap_err()
+            .to_string();
+        assert!(error.starts_with("unknown option --lloyd;"), "{error}");
+        let error = run(&args(&["--lloyd"])).unwrap_err().to_string();
+        assert!(error.starts_with("unknown option --lloyd;"), "{error}");
+    }
+
+    #[test]
+    fn check_lists_each_tool_not_at_its_pin_and_installs_nothing() {
+        let tools = [tool("trunk"), tool("wasm-bindgen-cli"), tool("nightly")];
+        let error = set_up(
+            &tools,
+            /* check_only= */ true,
+            |tool| (tool.name == "wasm-bindgen-cli").then(|| tool.pin.clone()),
+            |tool| panic!("{} installed", tool.name),
+        )
+        .unwrap_err()
+        .to_string();
+        assert_eq!(
+            error,
+            "2 tool(s) not at the pin: trunk, nightly; run `cargo run -p xtask -- setup`"
+        );
+        assert!(
+            set_up(
+                &tools,
+                /* check_only= */ true,
+                |tool| Some(tool.pin.clone()),
+                |tool| panic!("{} installed", tool.name),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn setup_installs_only_a_tool_not_at_its_pin() {
+        let tools = [tool("trunk"), tool("wasm-bindgen-cli")];
+        let installed = std::cell::RefCell::new(Vec::new());
+        let result = set_up(
+            &tools,
+            /* check_only= */ false,
+            |tool| {
+                (tool.name == "wasm-bindgen-cli" || installed.borrow().contains(&tool.name))
+                    .then(|| tool.pin.clone())
+            },
+            |tool| {
+                installed.borrow_mut().push(tool.name);
+                Ok(true)
+            },
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(installed.into_inner(), ["trunk"]);
+        let error = set_up(
+            &tools,
+            /* check_only= */ false,
+            |_| None,
+            |_| Ok(false),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.ends_with("--force` failed"), "{error}");
+    }
+
+    #[test]
+    fn a_version_can_be_the_fourth_word_after_the_name() {
+        assert_eq!(pin_mentions("trunk a b c 1.2.3", "trunk"), ["1.2.3"]);
+    }
+
+    #[test]
+    fn a_version_has_three_parts_of_digits_only() {
+        assert!(is_version("0.22.1"));
+        assert!(!is_version("1.2.x"));
+        assert!(!is_version("1..3"));
+        assert!(!is_version("1.2.3.4"));
+        assert_eq!(pin_mentions("trunk 1.2.x", "trunk"), Vec::<String>::new());
     }
 
     /// The pins are only here: a doc or CI that names another version of a

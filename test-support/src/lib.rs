@@ -9,10 +9,12 @@
 //! need panics instead.  An unknown word panics too, so a typo cannot turn the
 //! check off.
 //!
-//! The list is the value of [`VAR`] at build time and at run time.  A wasm
-//! test has no environment at run time, so it gets the value of the build.
-//! Cargo builds this crate again when the value changes.  stderr of a wasm
-//! test goes nowhere, so a wasm test logs [`skip_line`] on the console.
+//! A native test reads the list from the value of [`VAR`] at run time.  A
+//! wasm test has no environment at run time, so it also reads the value of
+//! the build of this crate for wasm32.  Cargo builds this crate again when
+//! that value changes.  A native build ignores the value of the build, so
+//! the value of an earlier build cannot fail a native test.  stderr of a
+//! wasm test goes nowhere, so a wasm test logs [`skip_line`] on the console.
 
 use std::ffi::{OsStr, OsString};
 use std::fmt::Display;
@@ -143,16 +145,22 @@ pub fn claimed(built: Option<&str>, run: Option<&OsStr>) -> Option<OsString> {
     }
 }
 
+/// The value of [`VAR`] when this crate was built for wasm32, where a test
+/// has no environment at run time.
+#[cfg(target_arch = "wasm32")]
+const BUILT: Option<&str> = option_env!("STEMYLA_REQUIRE");
+
+/// A native test reads only the value of its run.
+#[cfg(not(target_arch = "wasm32"))]
+const BUILT: Option<&str> = None;
+
 /// The skip line of a test that cannot run because it lacks `need`, or a
 /// panic when the run requires `need`.  The caller prints or logs the
 /// line, then returns.  The panic is in this body, not in a closure, so
 /// `#[track_caller]` names the caller's line.
 #[track_caller]
 pub fn skip_line(need: Need, why: impl Display) -> String {
-    let list = claimed(
-        option_env!("STEMYLA_REQUIRE"),
-        std::env::var_os(VAR).as_deref(),
-    );
+    let list = claimed(BUILT, std::env::var_os(VAR).as_deref());
     match verdict(list.as_deref(), need, &why.to_string()) {
         Ok(line) => line,
         Err(message) => panic!("{message}"),

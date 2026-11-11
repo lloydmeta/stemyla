@@ -244,8 +244,9 @@ impl Opts {
 
 pub fn run(args: &[String]) -> Result<()> {
     let o = Opts::parse(args)?;
-    crate::drivers::refuse_a_locked_screen(o.browser)?;
-    let _active = crate::drivers::keep_user_active(o.browser);
+    let on_macos = cfg!(target_os = "macos");
+    crate::drivers::refuse_a_locked_screen(o.browser, on_macos, crate::drivers::ioreg_root)?;
+    let _active = crate::drivers::keep_user_active(o.browser, on_macos, crate::drivers::caffeinate);
     if !o.dist.join("index.html").is_file() {
         bail!(
             "{} has no index.html (build the app first: cd app && trunk build --release)",

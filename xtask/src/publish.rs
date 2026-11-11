@@ -188,7 +188,7 @@ pub fn main(args: &[String]) -> Result<()> {
         .current_dir(repo.join("app"))
         .env("STEMYLA_BUILD_ID", &id)
         .status()
-        .context("could not run trunk (install it with `cargo install --locked trunk`)")?;
+        .context("could not run trunk (install it with `cargo run -p xtask -- setup trunk`)")?;
     if !status.success() {
         bail!(
             "trunk build failed (the wasm target is added with `rustup target add wasm32-unknown-unknown`)"
@@ -648,11 +648,6 @@ pub fn deploy(
     Ok(commit)
 }
 
-/// Checks one Trunk build, in `dir`, before it is published: the files the
-/// page needs exist, and the page's base and assets are under `url`, the
-/// build's own folder on the site.  The base matters as much as the
-/// assets: the app starts the worker from a relative URL, which resolves
-/// against it.
 /// The lock file that Trunk 0.22 keeps in its dist folder.  `publish`
 /// builds into the site tree, so the lock file would go to the site.
 pub const TRUNK_LOCK: &str = ".trunk-lock";
@@ -667,6 +662,11 @@ pub fn remove_trunk_lock(dir: &Path) -> Result<()> {
     }
 }
 
+/// Checks one Trunk build, in `dir`, before it is published: the files the
+/// page needs exist, and the page's base and assets are under `url`, the
+/// build's own folder on the site.  The base matters as much as the
+/// assets: the app starts the worker from a relative URL, which resolves
+/// against it.
 pub fn check_build(dir: &Path, url: &str) -> Result<()> {
     let need = [
         "index.html",
