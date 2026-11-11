@@ -1776,9 +1776,9 @@ mod tests {
     /// that failed the bound of 1 MiB pass: MP3 of CI run 43008561411, and
     /// AAC of step 9 of `plans/completed/tech-debt-rungs-m2.md`.  So does
     /// the pair of the extremes of single growths: 5,505,024 (the ALAC save
-    /// of 10 minutes of step 9, `m2/flakes/after/e2e-save-3.log`) and
-    /// 7,602,176.  One byte more than the bound above the 1-minute save
-    /// fails.
+    /// of 10 minutes of step 9) and 7,602,176.  The Decision log of
+    /// `plans/active/tech-debt-rungs-m2-td97.md` lists their logs.  One
+    /// byte more than the bound above the 1-minute save fails.
     #[test]
     fn the_two_level_pairs_of_safari_pass_and_one_byte_more_fails() {
         let pairs = [
@@ -1806,14 +1806,17 @@ mod tests {
     }
 
     /// MEM-4, with literal values: a 10-minute save that keeps a part of
-    /// the song's 16-bit audio fails.  So a bound wide enough to pass a save
-    /// that keeps 1/30 of the song fails this test.  A minute of 16-bit
-    /// stereo at 44.1 kHz is 10,584,000 bytes.  At one level (5,636,096 for
-    /// both lengths), keeping 1/30 of the 9 minutes more adds 3,175,200
-    /// bytes.  The worst layout of the extremes of single growths seen has
-    /// the 1-minute save high (7,602,176) and the 10-minute save low
-    /// (5,505,024).  There, keeping 1/18 adds 5,292,000 bytes.  So the
-    /// 10-minute save grows by 3,194,848 bytes more.
+    /// the song's 16-bit audio fails.  The first pair (1/30 kept at one
+    /// level) pins the bound from above: a bound wide enough to pass it
+    /// fails this test.  The second pair (1/18 kept in the worst layout of
+    /// the extremes) documents that case.  It catches no bound that the
+    /// first pair passes.  A minute of 16-bit stereo at 44.1 kHz is
+    /// 10,584,000 bytes.  At one level (5,636,096 for both lengths), keeping
+    /// 1/30 of the 9 minutes more adds 3,175,200 bytes.  The worst layout of
+    /// the extremes of single growths seen has the 1-minute save high
+    /// (7,602,176) and the 10-minute save low (5,505,024).  There, keeping
+    /// 1/18 adds 5,292,000 bytes.  So the 10-minute save grows by 3,194,848
+    /// bytes more.
     #[test]
     fn a_save_that_keeps_a_part_of_the_song_fails() {
         let pairs = [(5_636_096.0, 8_811_296.0), (7_602_176.0, 10_797_024.0)];
