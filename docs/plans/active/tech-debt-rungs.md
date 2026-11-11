@@ -185,11 +185,12 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-08: `check --tier push` passed on the tree of the last commit of M1, on the maintainer's Mac.
   * [x] 2026-11-08: CI passed on `5b3fbf6`, the last code commit of M1, the nightly step included (run 42405974754).
 * [x] 2026-11-11: the triage of TD-79 to TD-95, the new M2, and the answers to questions 5 to 8.
-* [ ] M2: rung 2, Safari and verification.  Its milestone plan is `plans/active/tech-debt-rungs-m2.md`.
+* [ ] M2: rung 2, Safari and verification.  Its milestone plan is `plans/completed/tech-debt-rungs-m2.md`.
   * [x] 2026-11-11: the milestone plan, `f18a690`, after 2 rounds of a `Plan` agent.
   * [x] 2026-11-11: the 10 steps: `808aa66` step 1, `34f7f6c` step 4, `5057fc4` step 2, `99b23eb` step 3, `cccfcfe` step 7 (TD-8), `95f5351` step 8 (TD-51 closed), `f6f1aa7` step 5 (TD-95 closed), `de7ffa3` step 6 (TD-93 narrowed), `707010d` step 9 (TD-96 and TD-97 new), `e7e11c5` step 10 (TD-92 narrowed).
   * [x] 2026-11-11: CI run 42952206488 on `e7e11c5` passed each job, the `macos` job included (46 minutes).
-  * [ ] Review rounds.
+  * [x] 2026-11-11: 5 review rounds, logged in `reviews/tech-debt-2026-11-11-m2.md`: 41 agents, 2,590,093 tokens, 61.4 wall minutes and 1 intervention.  The late rounds fixed one Decision log line (round 4, 4-1); round 5 found nothing.  Debt: TD-51 and TD-95 closed; TD-8, TD-92 and TD-93 narrowed; TD-96 and TD-97 new.
+  * [ ] The intent review.
 * [ ] M3: rung 3.
 
 ## Surprises and discoveries
@@ -224,7 +225,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-11, maintainer: run M2 in orchestrated mode, since the maintainer is away (questions 5 to 8 hold the answers).
 * 2026-11-11, agent: no message of "Start".  Reason: the maintainer asked for the mode, questions 5 to 8 have answers, and no new choice is open.
 * 2026-11-11, agent: step 4 goes before step 2, so the Safari baseline of every crate comes before the new wasm-bindgen.  Step 2 waits as a patch in the orchestrator's scratchpad, `m2/step2-wasm-bindgen-0.2.130.patch`.
-* 2026-11-11, agent: M2's agent decisions are in the Decision log of `plans/active/tech-debt-rungs-m2.md`.  Among them: the Safari timeouts came from the locked screen; step 2 keeps caret requirements (`SETTLED_CRATES`); step 10 adds the need `aac` to `STEMYLA_REQUIRE`; the `macos` job installs Trunk with `xtask setup`.
+* 2026-11-11, agent: M2's agent decisions are in the Decision log of `plans/completed/tech-debt-rungs-m2.md`.  Among them: the Safari timeouts came from the locked screen; step 2 keeps caret requirements (`SETTLED_CRATES`); step 10 adds the need `aac` to `STEMYLA_REQUIRE`; the `macos` job installs Trunk with `xtask setup`.
 * 2026-11-11, agent: the branch `tech-debt/2026-11-11` moved by fast-forward from `ff633a3` to `ee3728e`, so that M2 starts with TD-92 to TD-95 in the register.
 
 ## Outcomes and retrospective
