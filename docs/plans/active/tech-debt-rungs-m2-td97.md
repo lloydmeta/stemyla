@@ -107,6 +107,14 @@ Acceptance: the table in Surprises shows when and where the memory grew, at each
 
 ### Step B: fix the measure or the cause
 
+The choice, after step A (Decision log, 2026-11-11): option 1 of Surprises.  The page counts its Rust heap with a counting global allocator on wasm32.  At the save's start, it logs the live bytes.  At the end, it logs the peak of the save above them.  `e2e save` compares those peaks of the 10-minute and the 1-minute saves, against `WASM_BOUND_BYTES`.  The memory's growth stays in the log, not checked.  The rest of this step stays as written, but where the choice changes it:
+
+* The allocator is hand-written in `app`, about 30 lines, with no new crate (DEPS-1).  It wraps the default allocator.  Its counters are generic over the inner allocator, so a native test can check them.  It allocates nothing itself, and adds no wait (RT-1).
+* The page gives the two values in one log line, as the worker's `memory: encode` line does.  A pure parser in `xtask/src/e2e/save.rs` reads it, with tests.
+* A new decision record in `docs/decisions/`, `proposed`, says why the check measures the heap's requests and not the memory's growth.  The orchestrator lists it under "Needs your attention".
+* TD-97 is narrowed, not closed, to the gap that is left: the check does not see a growth that comes from the allocator's layout alone.  The entry gives the evidence of step A.
+* The short buffer of about 4 MB that the Save menu's draw makes (L5) is a cost of MEM-4 on an iPhone.  Find what makes it, if a short search can.  Else record it in a TD.
+
 Choose the fix from the data of step A, and record the choice in the Decision log.  The candidates:
 
 * If L5 holds: read `wasm_before` after the menu opens, just before the click of the item.  A test asserts that a growth that scales with the length, after that read, still fails the check.
@@ -126,7 +134,7 @@ Whatever the fix, these hold:
 
 Acceptance:
 
-* A unit test of the new measure takes raw samples of step A as its inputs: those of a 60 s save at the low level, and those of a 600 s save at the high level.  They can come from two runs or two formats; the test's doc names both log files.  With those samples, `growth` at the old read point gives a pair over the bound, and the test asserts that.  The new measure passes the same samples, and the test asserts that too.  The test fails on the old measure, on an assert.  The two-level pairs of TD-97 and of run 43008561411 are in the test's doc, as the cases that the samples stand for.
+* No save at the low level came in step A, so no real samples of one exist.  So a unit test models the two layouts of Surprises, (a) and (b), from the measured values of step A.  In each, the page asks for the same heap in the 1-minute and the 10-minute save, and the memory's growth differs by about 1.9 MB.  The test asserts that the old measure gives a pair over the bound, and that the new measure passes.  It fails on the old measure, on an assert.  The two-level pairs of TD-97 and of run 43008561411 are in the test's doc, as the cases that the model stands for.
 * A unit test asserts that the check fails when the growth scales with the length: for example, a 10-minute save that grows the memory by 1 MiB and one 64 KiB page more than the 1-minute save, after the start-up growth has settled.
 * If the fix waits for a settled page, a unit test of the wait covers the stable case, the late growth case and the time limit.  Another test asserts that the check fails when a growth that scales with the length lands after the settled read and before the click.  So the wait does not hide it.
 
@@ -168,7 +176,7 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
   * [x] 2026-11-11: the measure tools, in a worktree outside the repo (`m2/td97/measure-tree`, patch `m2/td97/measure.patch`).  No part is committed, so no test is owed.  They are the sampler, the stamps, the events, the finalizer count, a count of the Rust heap, a log of the font atlas, and the two controls.
   * [x] 2026-11-11: 2 Chrome runs and the 2 Chrome controls, 9 Safari measure runs (6 full runs, 2 of them controls of a 15 s idle; 1 run under load that stopped; 2 runs with no late read), 2 Safari page controls, and 3 Safari runs of HEAD.  Each log is in `m2/td97/measure/`.  The table is in Surprises.
   * [x] 2026-11-11: no save at the low level in 114 Safari saves (step A item 8).  The plan says to stop and report.  Step A stops here, and steps B and C wait for the team leader.
-* [ ] Step B: the fix, with its tests.
+* [ ] Step B: the fix, with its tests.  The team leader chose option 1 on 2026-11-11 (Decision log).
 * [ ] Step C: 6 Safari runs in a row and one Chrome run pass.
 * [ ] Step D: the review rounds.
 
@@ -216,6 +224,9 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
 * 2026-11-11, agent: the measure tools stay in a worktree outside the repo, with a patch.  Reason: the counting allocator and the log of the font atlas change the page, and step A commits no tool that has no test.
 * 2026-11-11, agent: 2 of the 9 Safari measure runs read the samples just after the offer, with no idle of 3 s after it.  Reason: to keep the time between pages of HEAD, in case the idle removed the low level.  They gave the same levels.
 * 2026-11-11, agent: step A stops after 9 Safari measure runs with no low save (step A item 8).  Steps B and C wait for the team leader.  Reason: step B's test needs samples of a low save, and the plan says to report then.
+* 2026-11-11, agent (team leader): step B takes option 1, the Rust heap's peak above its live bytes at the save's start.  Reason: in each save, the page asks for the same heap, to 2.3 KB, for 1 and 10 minutes.  The memory's growth then depends on the allocator's layout, which no measure of `byteLength` can fix.  The peak does not depend on the layout, and it grows with a buffer that grows with the song (MEM-4).  Option 2 fails for layout (b), and option 3 keeps the two levels.  Option 4 waits for a condition that nobody can make.
+* 2026-11-11, agent (team leader): step B's test models layouts (a) and (b) from the values of step A, in place of real samples of a low save.  Reason: 114 Safari saves gave none.  The CI and step 9 pairs stay in the test's doc.
+* 2026-11-11, agent (team leader): TD-97 is narrowed to the growth by the allocator's layout alone, which the new check does not see.  Reason: the check measures the page's requests; a growth by layout is real memory on an iPhone, but it does not grow with the song in the data.
 
 ## Outcomes and retrospective
 
