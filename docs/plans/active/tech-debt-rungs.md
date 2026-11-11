@@ -195,7 +195,8 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
   * [x] 2026-11-11: 5 review rounds, logged in `reviews/tech-debt-2026-11-11-m2.md`: 41 agents, 2,590,093 tokens, 61.4 wall minutes and 1 intervention.  The late rounds fixed one Decision log line (round 4, 4-1); round 5 found nothing.  Debt: TD-51 and TD-95 closed; TD-8, TD-92 and TD-93 narrowed; TD-96 and TD-97 new.
   * [x] 2026-11-11: intent review round 1 found 3 significant should-fix findings (I1-1 to I1-3).  I1-1 and I1-2 were fixed in the PR body and by CI run 42982197888 on `fbe588a`.  I1-3 went to the team (`a67f23b`), with review rounds 6 to 9 of the same run, the late rule: 14 agents, 622,120 tokens and 16.8 wall minutes.  The fixes are `0574e9c`, `e9e5897` and `c6a1be8`.  Round 9 had no should-fix, so the stop rule of decision 0024 holds.  All 9 rounds: 55 agents, 3,212,213 tokens, 78.2 wall minutes and 1 intervention.
   * [x] 2026-11-11: the TD-96 command with `--nocapture` ran in Safari 27.2 on the maintainer's Mac (exit 0): `app --lib` passed 197 tests with 2 skip lines, and `web_output` passed 4 with 3 skip lines.
-  * [ ] Intent review round 2.
+  * [x] 2026-11-11: intent review round 2 found that round 1 is resolved, and no significant finding.  I2-1, the PR body, goes into the body at close-out.  For I2-2, a full `xtask web-test --browser safari` passed on the maintainer's Mac at `4c23f79` (19:16 to 19:21 JST): app, stem-worker, decode-worker, stem-protocol and engine passed, with no failure.  The nits I2-3 and I2-4 are reported, not fixed.
+  * [ ] Intent review round 3.
 * [ ] M3: rung 3.
 
 ## Surprises and discoveries
