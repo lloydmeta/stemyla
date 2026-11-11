@@ -103,7 +103,7 @@ const ONE_MIB: f64 = 1_048_576.0;
 /// of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the song's
 /// length.  So the two saves need the same memory.  But in Safari the
 /// growth has two levels, whatever the length (TD-97).  Step A of
-/// `plans/active/tech-debt-rungs-m2-td97.md` saw the same requests in each
+/// `plans/completed/tech-debt-rungs-m2-td97.md` saw the same requests in each
 /// measured save, all at the high level.  So the allocator's layout is the
 /// likely cause; the bound does not depend on the cause.  The largest pair
 /// seen is +1,900,544 bytes (MP3 of CI run 43008561411).  The extremes of
@@ -1777,7 +1777,7 @@ mod tests {
     /// AAC of step 9 of `plans/completed/tech-debt-rungs-m2.md`.  So does
     /// the pair of the extremes of single growths: 5,505,024 (the ALAC save
     /// of 10 minutes of step 9) and 7,602,176.  The Decision log of
-    /// `plans/active/tech-debt-rungs-m2-td97.md` lists their logs.  One
+    /// `plans/completed/tech-debt-rungs-m2-td97.md` lists their logs.  One
     /// byte more than the bound above the 1-minute save fails.
     #[test]
     fn the_two_level_pairs_of_safari_pass_and_one_byte_more_fails() {

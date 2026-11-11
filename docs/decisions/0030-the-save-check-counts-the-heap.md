@@ -10,7 +10,7 @@ D11 of `xtask e2e save` checks MEM-4 for a save: a save of 10 minutes needs at m
 
 In Safari, this growth had two levels, about 1.9 MB apart, for each length and format (TD-97).  The check failed when the 1-minute save had the low level and the 10-minute save the high level: 1 run in 6 on the maintainer's Mac, and CI run 43008561411.  CI's `macos` job runs this check, and step 12 of M2 makes the job required.
 
-Step A of `plans/active/tech-debt-rungs-m2-td97.md` measured 114 Safari saves and 30 Chrome saves with a sampler and a count of the Rust heap.  In each save, the page's Rust heap had the same live bytes at the save's start, and the same peak in the save, to 2.3 KB, for 1 and for 10 minutes.  The memory's growth still spread by up to 458,752 bytes.  So the growth depends on where the allocator finds free blocks when the save starts, not on what the save asks for.  No low save came in step A, so the layout of a low save is not known.  The Rust heap's count does not depend on the layout.
+Step A of `plans/completed/tech-debt-rungs-m2-td97.md` measured 114 Safari saves and 30 Chrome saves with a sampler and a count of the Rust heap.  In each save, the page's Rust heap had the same live bytes at the save's start, and the same peak in the save, to 2.3 KB, for 1 and for 10 minutes.  The memory's growth still spread by up to 458,752 bytes.  So the growth depends on where the allocator finds free blocks when the save starts, not on what the save asks for.  No low save came in step A, so the layout of a low save is not known.  The Rust heap's count does not depend on the layout.
 
 ## Options
 

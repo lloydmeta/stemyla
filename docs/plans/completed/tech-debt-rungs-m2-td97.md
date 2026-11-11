@@ -175,7 +175,7 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
 ## Progress
 
 * [x] 2026-11-11: this plan, after review by a `Plan` agent (round 1: 4 blockers, 5 should-fix and 3 nits; round 2: 4 should-fix; each fixed).
-* [ ] Step A: measure, with the table in Surprises.
+* [x] Step A: measure, with the table in Surprises.
   * [x] 2026-11-11: the measure tools, in a worktree outside the repo (`m2/td97/measure-tree`, patch `m2/td97/measure.patch`).  No part is committed, so no test is owed.  They are the sampler, the stamps, the events, the finalizer count, a count of the Rust heap, a log of the font atlas, and the two controls.
   * [x] 2026-11-11: 2 Chrome runs and the 2 Chrome controls, 9 Safari measure runs (6 full runs, 2 of them controls of a 15 s idle; 1 run under load that stopped; 2 runs with no late read), 2 Safari page controls, and 3 Safari runs of HEAD.  Each log is in `m2/td97/measure/`.  The table is in Surprises.
   * [x] 2026-11-11: no save at the low level in 114 Safari saves (step A item 8).  The plan says to stop and report.  Step A stops here, and steps B and C wait for the team leader.
@@ -219,7 +219,11 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
 
   * Levels: before the fix, step 9 and CI had 7 low saves in 70 (old measure).  In step A, 0 in 114 Safari saves.  In step C, the old growth (logged) had 0 low saves in 60; the new measure has one value for each format, in each run, in both browsers.  The Chrome run gave the same 5 peaks.  The values of step C span 0 bytes, so they are within 1 MiB.  But no low save came in step C either, so step C does not show the new check on a page at the low level.  Step B's model test covers that case.
   * [x] 2026-11-11: `cargo run -p xtask -- check --tier push` and `cargo build -p xtask` passed (`m2/td97/check-push.log`).
-* [ ] Step D: the review rounds.
+* [x] Step D: the review rounds, from base `b94f5bc`, in the run of decision 0024.  The orchestrator keeps the log in `docs/reviews/`.
+  * [x] 2026-11-12, review round 1 (head `2d94624`): 9 agents, 552,181 tokens, 15.6 wall minutes.  3 should-fix, each confirmed and significant: no test pinned the bound from above (1-1); the proof left out the worst layout (1-2); the plans kept the 1 MiB rules (1-3).  5 nits.  Fixes: `0f3f491`, and `66b2fbd` in the parent plan.  Mutants: 2 tested, 2 caught.
+  * [x] 2026-11-12, review round 2 (head `66b2fbd`): 4 agents, 295,994 tokens, 9.1 wall minutes.  1 should-fix, confirmed and significant: MEM-4 said that Safari checks the JS heap (2-1).  5 nits.  Fixes: `ab9c6a5`, and `861acac` in the parent plan.  No mutants in the diff.
+  * [x] 2026-11-12, review round 3 (head `861acac`): 4 agents, 288,863 tokens, 10.0 wall minutes.  1 should-fix, confirmed and not significant: MEM-4 left out the `browser-tests` job for D11 (3-1).  6 nits.  Fixes: `ce2b78d`, and `826e325` in the parent plan and the `orchestrate` skill.  No mutants in the diff.  The stop rule of decision 0024 holds.
+  * Rounds 1 to 3: 17 agents, 1,137,038 tokens, 34.7 wall minutes and 0 interventions.  Each should-fix is fixed.  No TD is new.
 
 ## Surprises and discoveries
 
@@ -274,4 +278,8 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
 
 ## Outcomes and retrospective
 
-* None yet.
+* 2026-11-12: TD-97 is closed.  D11 keeps the growth of the page's WebAssembly memory as its measure, with a bound of 3 MiB from the measured spread.  The bound still fails a save that keeps about 1/30 of the song's 16-bit audio at one level, and about 1/18 in the worst layout of the extremes.  Two tests pin the bound from below and from above.  6 Safari runs in a row and one Chrome run passed, and CI's `macos` job passed on `2d94624`.
+* Not done: the cause of the two levels is not proven.  Step A saw the same requests in each measured save, all at the high level, and no low save came.  The bound does not depend on the cause.
+* What to do differently: try the simplest fix that the data supports first.  The plan, its review and TD-97 ruled out a wider bound before any measure, and the team leader then chose a counting allocator in the page (decision 0030).  The maintainer refused it as too large.  A tolerance with a 1-line proof was there from the start.  The rule of proportion is now in `CLAUDE.md`, `plans/PLANS.md` and the `orchestrate` skill (`d47eac6`, `826e325`).
+* What worked: the measure first.  Step A ruled out the start of the page, the collector and the Save menu as the cause, so the bound rests on data, not on a guess.
+* Watch: the review rounds found 5 should-fix findings, all in the docs and tests of the bound, not in the bound.  A proof in a doc needs its worst case, and a test that uses the constant cannot pin it.
