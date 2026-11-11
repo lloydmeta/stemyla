@@ -179,7 +179,7 @@ The orchestrator committed it in `808aa66`.  No work.
 * [x] 2026-11-11: the baseline at wasm-bindgen 0.2.129 in Chrome, at `34f7f6c`: each crate passed (Surprises).  The Safari baseline is at 0.2.130, at `95f5351`: the known failures of TD-93 and TD-95, and one known flake (Surprises).
 * [x] 2026-11-11: step 2, wasm-bindgen 0.2.130.  Chrome gives the same results as the baseline (Surprises).  The Safari comparison is owed.  The step changes no behaviour of the repo's code, so it adds no test.
 * [x] 2026-11-11: step 3, Trunk 0.22.1.  The new test `trunk_s_lock_file_never_reaches_the_site` (`xtask/tests/publish.rs`) first failed on its first assert: `check_build` gave `Ok(())` for a build with `.trunk-lock`.  With the refusal and no removal, it failed on the assert "the lock file stays in the site tree".  It passes with both.
-* [ ] Step 5: TD-95.
+* [x] 2026-11-11: step 5, TD-95.  `a_planted_file_reads_back_as_written` (`decoder/src/web/tests.rs`) first failed in Safari 27.2 on its `assert_eq!`: the planted file held 1,835,008 bytes, not 4,044, and no `RIFF` at the start.  After the fix, the 13 tests of the `decode-worker` crate run pass in Safari 27.2 and in Chrome 157.  The crate run is the command that `web-test` runs, with the same runner and driver variables.  The full Safari `web-test` comes after step 6.
 * [ ] Step 6: TD-93.
 * [x] 2026-11-11: step 7, TD-8, `STEMYLA_REQUIRE` in a wasm test.  `a_word_of_the_build_is_required_with_no_run_time_value` and `the_words_of_the_build_and_of_the_run_are_both_required` (`test-support`) first failed on their `assert_eq!` against a `claimed` that kept only the run-time value.  `a_chrome_arg_goes_after_the_autoplay_policy` (`xtask/src/web_test.rs`) first failed on its `assert_eq!` against a function that dropped the extra arguments.  In Chrome with `--disable-gpu` and `STEMYLA_REQUIRE=gpu`, `a_read_back_is_copied_into_wasm_memory_once` fails (Surprises).  `stem-worker` now takes `test-support`, so the fixture graph of `xtask check` (`the_fixture_graph_is_the_real_graph`) takes it too.
 * [x] 2026-11-11: step 8, TD-51.  `a_test_binary_with_no_wasm_test_is_found` first failed on `assert!(found_no_test(output))` against a stub that gave `false`.  `the_marker_fails_only_a_run_with_no_filter` first failed on `assert!(crate_run_passed(true, output, Some("the_length")))` against a function that ignored the filter.  Before the engine tests had the wasm attribute, a full Chrome `web-test` failed `engine` only, on "no tests to run!".  The planted `usize` product failed on wasm32 and passed natively (Surprises).  Chrome then passed every crate.  The Safari run is owed.
@@ -235,6 +235,16 @@ Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises). 
   | `stem-protocol` | `--test web` | 31 passed | none |
   | `engine` | `--lib` | 18 passed (13 s) | none |
 
+* 2026-11-11, step 5, TD-95, in Safari 27.2 with the screen unlocked.  Each experiment ran the `decode-worker` crate run only, with the runner and `SAFARIDRIVER` that `web-test` sets (logs in `m2/step5/`):
+
+  | Experiment | The one change | Result |
+  | - | - | - |
+  | e1 | none, at `3a567cd` | 6 passed, 6 failed, the 6 tests of TD-95.  A WAV gives "no decoder for codec", an M4A "no known format at the start of the file". |
+  | e2 | a new test plants a WAV of 4,044 bytes with `plant_at`, and reads it back | failed: the file holds 1,835,008 bytes (28 pages of 64 KiB, the wasm memory), with no `RIFF` at the start |
+  | e3 | `plant_at` writes `bytes.slice()`, a whole copy | 13 passed |
+
+  The cause is in the test, not in the decode worker.  wasm-bindgen gives a `&[u8]` to JavaScript as a view into the wasm memory.  Safari writes the whole buffer of a view (`references/browser-quirks.md`, MEM-5).  So each planted file held the whole wasm memory.  The release build passed `e2e decode`, since the page writes whole arrays.  The 6 tests that passed decode no planted file: they read the stems as raw PCM and check no sample, or they end before a decode.  So the other experiments of the plan (the release profile, `WASM_BINDGEN_NO_DEBUG`, the features of `engine`, the order of the tests) were not needed.
+
 ## Decision log
 
 * 2026-11-11, maintainer: the answers to questions 5 to 8 of the parent plan (see "The decisions that M2 follows").
@@ -258,6 +268,7 @@ Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises). 
 * 2026-11-11, agent: step 8 fails the marker "no tests to run!" only in a `web-test` with no filter.  Reason: the runner prints the marker also when the filter removes each test of a binary, so a filtered run cannot tell the two apart.  CI and each acceptance run have no filter.
 * 2026-11-11, agent: step 8 keeps `-p engine` out of the browser-test command of `THIRD-PARTY.md`.  Reason: the command and the shipped command share one package list in `third_party_args`, and `engine`'s crate run adds only test crates and the stretch features (`cute-dsp`, `timestretch` and their dependencies, `oxideav-aac`), which the page does not ship.  DEPS-1 covers what ships; DEPS-1's pins and `Cargo.lock` cover these crates already.
 * 2026-11-11, agent: step 4 does not capture the output of a crate run.  Step 8 adds the capture, with its own tests.  Reason: step 4's acceptance is the summary only, and a small commit is easier to review.
+* 2026-11-11, agent: step 5 fixes `plant_at` in the test, and closes TD-95.  The new test reads a planted file back, and fails in Safari only, as Chrome writes a view correctly.  Reason: the macOS job of step 10 runs Safari, so it keeps the check in CI.
 
 ## Outcomes and retrospective
 
