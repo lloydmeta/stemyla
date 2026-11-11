@@ -183,7 +183,7 @@ The orchestrator committed it in `808aa66`.  No work.
 * [x] 2026-11-11: step 6, TD-93.  `chrome_gets_no_extra_variable_for_the_stem_worker` and `safari_gets_no_extra_variable_for_the_other_crates` first failed on their `assert_eq!` against a `run_vars` that gave `WASM_BINDGEN_NO_DEBUG=1` to each run.  `safari_turns_off_the_debug_glue_for_the_stem_worker` first failed on its `assert_eq!` against a `run_vars` that gave nothing.  A full Safari `web-test` then passed the two GPU tests, and the 13 tests of `decode-worker` (step 5).  `e2e selftest --browser safari` with the f16 weights passed (Surprises).
 * [x] 2026-11-11: step 7, TD-8, `STEMYLA_REQUIRE` in a wasm test.  `a_word_of_the_build_is_required_with_no_run_time_value` and `the_words_of_the_build_and_of_the_run_are_both_required` (`test-support`) first failed on their `assert_eq!` against a `claimed` that kept only the run-time value.  `a_chrome_arg_goes_after_the_autoplay_policy` (`xtask/src/web_test.rs`) first failed on its `assert_eq!` against a function that dropped the extra arguments.  In Chrome with `--disable-gpu` and `STEMYLA_REQUIRE=gpu`, `a_read_back_is_copied_into_wasm_memory_once` fails (Surprises).  `stem-worker` now takes `test-support`, so the fixture graph of `xtask check` (`the_fixture_graph_is_the_real_graph`) takes it too.
 * [x] 2026-11-11: step 8, TD-51.  `a_test_binary_with_no_wasm_test_is_found` first failed on `assert!(found_no_test(output))` against a stub that gave `false`.  `the_marker_fails_only_a_run_with_no_filter` first failed on `assert!(crate_run_passed(true, output, Some("the_length")))` against a function that ignored the filter.  Before the engine tests had the wasm attribute, a full Chrome `web-test` failed `engine` only, on "no tests to run!".  The planted `usize` product failed on wasm32 and passed natively (Surprises).  Chrome then passed every crate.  The Safari run is owed.
-* [ ] Step 9: the Safari flakes.
+* [x] 2026-11-11: step 9, the Safari flakes (Surprises).  `a_session_with_the_lock_key_set_true_is_locked`, `only_a_safaridriver_with_no_parent_is_stale`, `the_user_stays_active_for_the_limit_or_until_the_run_ends` and `a_binary_with_no_session_and_no_test_run_is_found` first failed on their asserts against stubs that gave `false`, an empty list or empty arguments.  `no_lock_key_or_a_false_one_is_unlocked` and `a_failed_test_is_not_a_session_that_did_not_start` first failed against stubs that gave `true`.  `a_stored_file_removed_after_it_was_opened_is_a_read_error` failed in 2 of 5 Safari `web-test` runs before the fix, and in none of 5 after.  The stalled-download case of `e2e storage` failed in 3 of 3 Safari runs before the fix, and in none of 4 after.  One failure is left, with TD-97: the page memory check of `e2e save`, in 1 of 3 runs after the fixes.
 * [ ] Step 10: the macOS job (TD-92).
 * [ ] Review rounds.
 
@@ -248,6 +248,31 @@ Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises). 
 * 2026-11-11, step 6, the full Safari `web-test` at `f6f1aa7` with `run_vars` (`m2/step6-safari-web-test.log`).  `web-test` printed the line of `WASM_BINDGEN_NO_DEBUG=1` for `stem-worker` only.  `app` passed its 216 tests, `decode-worker` 13, `stem-protocol` 31 and `engine` 18.  `stem-worker` passed 107 of 108: `a_read_back_is_copied_into_wasm_memory_once` and `an_f16_variant_the_browser_rejects_keeps_f32_weights` passed.  `a_stored_file_removed_after_it_was_opened_is_a_read_error` failed, the known flake of step 9.
 * 2026-11-11, step 6: `e2e selftest --browser safari --weights bs_roformer_sw.f16.safetensors`, on the release build of Trunk 0.22.1, passed in Safari 27.2 (`m2/step6-selftest-safari.log`).  The f16 start-up check passed, the model loaded in 11.8 s, and the worst stage was 69.4 dB.  So the release glue reads the missing `subgroupMinSize` with no error, and a user of Safari 27.2 gets a working GPU.  The draft wgpu issue (`m2/wgpu-issue-subgroup-min-size.md`) now names wasm-bindgen 0.2.130 and this result.  Its lines of wgpu 30.0.1 (935-936) and of `trunk` (884-885) are correct on 2026-11-11, and #10882 and #8819 are still open.
 
+* 2026-11-11, step 9, the measure at `de7ffa3`, in Safari 27.2 with the screen unlocked and `caffeinate -dimsu` running (`m2/flakes/`, `summary.txt`).  Each run used one copy of the xtask binary, so no build ran beside it.  `pmset` gave `UserIsActive 1` after each run, and no run left a `safaridriver`:
+
+  | Run | Failed runs | The test or the case | Cause |
+  | - | - | - | - |
+  | `web-test`, 5 runs | 1 and 4 | `a_stored_file_removed_after_it_was_opened_is_a_read_error` | Safari gives a stored `File`'s size at its first read; the test removed the file first, so the size was 0 |
+  | `e2e storage`, 3 runs | 1, 2 and 3 | "the stalled download times out" | WebKit bug 246069: the reply is "AbortError: Fetch is aborted", not the abort reason |
+  | `e2e smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `flac`, `save`, 3 runs each | none | | |
+
+  The step 6 run and the baseline at `95f5351` failed the same `web-test` test, so it failed in 4 of 7 full runs.
+* 2026-11-11, step 9, the experiments on the flaky test, each a crate run of `stem-worker` in Safari (logs `m2/flakes/probe*.log`):
+
+  | Experiment | The one change | Result |
+  | - | - | - |
+  | probe1 | a new test alone: 20 times, plant, `getFile()`, remove, read 9 bytes | NotFoundError each time, with no wait and after 1.1 s |
+  | probe2, 4 runs | the assert prints the error | 3 failed: "not a safetensors file: header too small", so `size` was under 8 |
+  | probe3, 4 runs | the test reads `size` after the removal | 3 failed, each with `size` 0 after the removal |
+  | probe4, 5 runs | the test reads `size` before the removal too | 5 passed |
+
+  So the cause is in WebKit: the size of a stored `File` comes at its first read.  The worker reads it just after `getFile()` (`init`), so the test now does too.
+* 2026-11-11, step 9: `caffeinate -u` alone holds its assertion 5 s only.  `caffeinate -u -t 600 -w <pid>` held `UserIsActive` after 8 s, and ended with the process `<pid>` (`m2/flakes/caffeinate-probe.sh`).  During a Safari `e2e storage`, `pmset -g assertions` showed "caffeinate asserting on behalf of Process ID" of xtask, for 14400 s.
+* 2026-11-11, step 9: `safaridriver` starts the XPC service `com.apple.WebDriver.HTTPService` as a child of `launchd`.  It ended with each run.
+
+* 2026-11-11, step 9, the measure after the fixes, with the same conditions (`m2/flakes/after/`).  Each of the 5 `web-test` runs passed each crate.  Each of the 3 runs of `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage` and `flac` passed.  Run 3 of `e2e save` failed one check: the AAC save of 1 minute grew the page's WebAssembly memory by 5,767,168 bytes, and of 10 minutes by 7,274,496 bytes, over the bound of 1 MiB.  Each growth of the 6 runs was near 5.8 MB or near 7.3 MB, for each format and length, so the two levels do not depend on the song.  The fixes of step 9 change no code of the page.  The cause is not known: TD-97.
+* 2026-11-11, step 9: in Chrome 157, the stem worker's tests `a_stored_file` passed, and `e2e storage` passed with "Error: no data from the server for 60 s".
+
 ## Decision log
 
 * 2026-11-11, maintainer: the answers to questions 5 to 8 of the parent plan (see "The decisions that M2 follows").
@@ -273,6 +298,13 @@ Safari runs owed: none.  The Safari baseline at 0.2.129 is missing (Surprises). 
 * 2026-11-11, agent: step 4 does not capture the output of a crate run.  Step 8 adds the capture, with its own tests.  Reason: step 4's acceptance is the summary only, and a small commit is easier to review.
 * 2026-11-11, agent: step 5 fixes `plant_at` in the test, and closes TD-95.  The new test reads a planted file back, and fails in Safari only, as Chrome writes a view correctly.  Reason: the macOS job of step 10 runs Safari, so it keeps the check in CI.
 * 2026-11-11, agent: step 6 sets `WASM_BINDGEN_NO_DEBUG=1` with `Command::env`, also when the caller set another value.  Reason: the crate run of `stem-worker` in Safari fails with the debug glue.
+* 2026-11-11, agent: step 9 fixes the flaky test, not the worker.  Reason: the worker reads the size just after `getFile()`, before another message can remove the file, so no user meets a size of 0.
+* 2026-11-11, agent: step 9 gives the abort reason in the worker (`download_to_opfs`), not only in the test.  Reason: a user of Safari saw "AbortError: Fetch is aborted" for a stalled download.  The fix is a workaround of WebKit bug 246069, so it is in TD-96 and `references/browser-quirks.md`.
+* 2026-11-11, agent: step 9 puts the causes outside the repo in one TD, TD-96: the locked screen, the idle user, a stale session and WebKit bug 246069.  Reason: Q8 asks for a TD for each such cause, and one entry keeps the Safari conditions together.
+* 2026-11-11, agent: step 9 holds `caffeinate -u -t 14400 -w <pid>` in `web-test` too, not only in `e2e`.  Reason: `app`'s tests of the audio output run in `web-test`, and Safari suspends the audio of an idle user there too.
+* 2026-11-11, agent: step 9 ends only a `safaridriver` whose parent is `launchd`.  Reason: a driver with a parent belongs to a run, maybe of the maintainer.  No run of the measure left a stale driver, so the second try of a session start was not seen.
+* 2026-11-11, agent: step 9 is one commit.  Reason: the fixes share the docs of Safari, and each has its own test or Safari run in Progress.
+* 2026-11-11, agent: step 9 leaves the memory check of `e2e save` as it is, with TD-97.  Reason: the cause of its two levels is not known, and the plan allows a TD for a failure left.  A wider bound would hide a real growth.
 
 ## Outcomes and retrospective
 

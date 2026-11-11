@@ -122,7 +122,7 @@ The browser-only behaviour is tested in a real browser.  CI runs these in headle
 cargo run -p xtask -- setup wasm-bindgen-cli
 ```
 
-and a browser's WebDriver: on macOS, Safari's, turned on once with `safaridriver --enable` and Develop > "Allow Remote Automation" in Safari; otherwise, or with `--browser chrome`, a ChromeDriver matching Chrome's major version ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)) in `CHROMEDRIVER` or on `PATH`.  Safari 27.0's safaridriver may fail with "timed out while connecting to a Safari instance"; use `--browser chrome` meanwhile.
+and a browser's WebDriver: on macOS, Safari's, turned on once with `safaridriver --enable` and Develop > "Allow Remote Automation" in Safari; otherwise, or with `--browser chrome`, a ChromeDriver matching Chrome's major version ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)) in `CHROMEDRIVER` or on `PATH`.  safaridriver starts no session while the screen is locked, so `web-test` and `e2e` with Safari on macOS then fail at once (`docs/references/local-browser-testing.md`).
 
 ```bash
 cargo run -p xtask -- web-test                  # browser storage, audio output, the workers, the resampler (wasm-bindgen-test)

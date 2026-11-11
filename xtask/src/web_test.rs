@@ -10,6 +10,10 @@
 //! In Safari, the crate run of `stem-worker` gets `WASM_BINDGEN_NO_DEBUG=1`,
 //! and `web-test` prints why (TD-93, [`run_vars`]).
 //!
+//! In Safari, it ends each stale `safaridriver` before each crate run.  If
+//! the session of a test binary did not start before a test ran, it runs
+//! that crate once more (`session_did_not_start`).  It runs no test again.
+//!
 //! It runs each crate, also after a crate fails.  Then it prints one line
 //! for each crate, and fails with the name of each crate that failed.
 //!
@@ -63,6 +67,8 @@ pub fn run(args: &[String]) -> Result<()> {
     if browser != Browser::Chrome && !chrome_args.is_empty() {
         bail!("--chrome-arg needs --browser chrome");
     }
+    crate::drivers::refuse_a_locked_screen(browser)?;
+    let _active = crate::drivers::keep_user_active(browser);
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
     let runs: [(&str, &[&str]); 5] = [
@@ -129,8 +135,20 @@ pub fn run(args: &[String]) -> Result<()> {
         if let Some(f) = &filter {
             cmd.args(["--", f]);
         }
-        let (success, output) =
+        if browser == Browser::Safari {
+            crate::drivers::end_stale_safari_sessions();
+        }
+        let (mut success, mut output) =
             run_and_keep(&mut cmd).with_context(|| format!("running cargo test for {package}"))?;
+        // Q8 of the tech debt rungs: only a session start is tried again.
+        if browser == Browser::Safari && !success && session_did_not_start(&output) {
+            println!(
+                "web-test: {package}: the Safari session did not start before a test ran; ending the stale sessions, and running {package} once more"
+            );
+            crate::drivers::end_stale_safari_sessions();
+            (success, output) = run_and_keep(&mut cmd)
+                .with_context(|| format!("running cargo test for {package} again"))?;
+        }
         if filter.is_none() && found_no_test(&output) {
             println!(
                 "web-test: {package}: a test binary has no wasm test (\"{NO_TESTS}\"); mark each test with wasm_bindgen_test"
@@ -204,6 +222,32 @@ fn summary(results: &[(&str, bool)]) -> Result<String, String> {
             failed.join(", ")
         ))
     }
+}
+
+/// The line that `wasm-bindgen-test-runner` prints when its WebDriver
+/// session did not start.
+const NO_SESSION: &str = "webdriver POST /session request failed";
+
+/// Whether a crate run failed because the WebDriver session of a test
+/// binary did not start, before any test of that binary ran.  Cargo prints
+/// one `Running ... .wasm)` line for each test binary, and the runner
+/// prints `running N tests` once its session started.  Cargo stops at the
+/// first test binary that fails, so a later binary did not run.
+fn session_did_not_start(output: &str) -> bool {
+    let binaries = output
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            line.starts_with("Running ") && line.ends_with(".wasm)")
+        })
+        .count();
+    let started = output
+        .lines()
+        .filter(|line| {
+            line.starts_with("running ") && (line.ends_with(" tests") || line.ends_with(" test"))
+        })
+        .count();
+    output.contains(NO_SESSION) && started < binaries
 }
 
 /// The line that `wasm-bindgen-test-runner` prints, and exits 0, when a
@@ -421,6 +465,44 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             [("WASM_BINDGEN_NO_DEBUG", "1")]
         );
         assert!(vars[0].why.contains("subgroupMinSize"), "{}", vars[0].why);
+    }
+
+    /// The output of a crate run of `app` whose second test binary had no
+    /// session, as Safari gave it on 2026-11-11 with a locked screen.
+    const NO_SESSION_IN_THE_SECOND_BINARY: &str = "     Running unittests src/lib.rs (target/wasm32-unknown-unknown/debug/deps/app-1.wasm)\n\
+         Running headless tests in Safari on `http://127.0.0.1:65014/`\n\
+         running 197 tests\n\
+         test result: ok. 197 passed; 0 failed; 0 ignored; 0 filtered out; finished in 202.20s\n\
+              Running tests/web.rs (target/wasm32-unknown-unknown/debug/deps/web-2.wasm)\n\
+         Running headless tests in Safari on `http://127.0.0.1:65028/`\n\
+         driver status: signal: 9 (SIGKILL)\n\
+         Error: webdriver POST /session request failed\n\
+         \n\
+         Caused by:\n\
+             http status: 500\n\
+         error: test failed, to rerun pass `-p app --test web`\n";
+
+    #[test]
+    fn a_binary_with_no_session_and_no_test_run_is_found() {
+        assert!(session_did_not_start(NO_SESSION_IN_THE_SECOND_BINARY));
+        let first = "     Running unittests src/lib.rs (target/wasm32-unknown-unknown/debug/deps/stem_worker-1.wasm)\n\
+                     Running headless tests in Safari on `http://127.0.0.1:65028/`\n\
+                     Error: webdriver POST /session request failed\n";
+        assert!(session_did_not_start(first));
+    }
+
+    #[test]
+    fn a_failed_test_is_not_a_session_that_did_not_start() {
+        let failed = "     Running unittests src/lib.rs (target/wasm32-unknown-unknown/debug/deps/stem_worker-1.wasm)\n\
+                      Running headless tests in Safari on `http://127.0.0.1:65028/`\n\
+                      running 108 tests\n\
+                      test web::tests::a_read_back_is_copied_into_wasm_memory_once ... FAIL\n\
+                      test result: FAILED. 107 passed; 1 failed; 0 ignored; 0 filtered out; finished in 34.52s\n";
+        assert!(!session_did_not_start(failed));
+        let session_lost_during_tests = "     Running unittests src/lib.rs (target/wasm32-unknown-unknown/debug/deps/app-1.wasm)\n\
+                                         running 1 test\n\
+                                         Error: webdriver POST /session request failed\n";
+        assert!(!session_did_not_start(session_lost_during_tests));
     }
 
     #[test]

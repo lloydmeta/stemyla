@@ -83,7 +83,7 @@
 
 use crate::drivers::Browser;
 use crate::serve;
-use crate::webdriver::{Driver, Session};
+use crate::webdriver::{Driver, Session, start_session};
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -244,6 +244,8 @@ impl Opts {
 
 pub fn run(args: &[String]) -> Result<()> {
     let o = Opts::parse(args)?;
+    crate::drivers::refuse_a_locked_screen(o.browser)?;
+    let _active = crate::drivers::keep_user_active(o.browser);
     if !o.dist.join("index.html").is_file() {
         bail!(
             "{} has no index.html (build the app first: cd app && trunk build --release)",
@@ -301,7 +303,6 @@ struct Page {
 impl Page {
     /// Starts the browser and opens `path` (relative to the server).
     fn open(o: &Opts, base: String, chrome_args: &[&str], path: &str) -> Result<Self> {
-        let driver = Driver::start(o.browser)?;
         let mut args: Vec<String> = chrome_args.iter().map(|s| s.to_string()).collect();
         if o.swiftshader {
             args.extend(SWIFTSHADER.iter().map(|s| s.to_string()));
@@ -313,7 +314,7 @@ impl Page {
         // draws with, unless it may fall back to SwiftShader.
         args.push("--enable-unsafe-swiftshader".into());
         args.push(format!("--window-size={},{}", VIEWPORT.0, VIEWPORT.1));
-        let session = Session::new(&driver, o.browser, &args)?;
+        let (driver, session) = start_session(o.browser, &args)?;
         let tries = session.set_viewport(VIEWPORT.0, VIEWPORT.1)?;
         let mut page = Self {
             session,

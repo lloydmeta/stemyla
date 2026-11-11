@@ -195,6 +195,28 @@ impl Drop for Driver {
     }
 }
 
+/// Starts a driver and a browser session.  If Safari's session does not
+/// start, it ends the stale sessions, and tries once more with a new
+/// driver.  It tries nothing else again (Q8 of the tech debt rungs).
+pub fn start_session(browser: Browser, args: &[String]) -> Result<(Driver, Session)> {
+    let driver = Driver::start(browser)?;
+    match Session::new(&driver, browser, args) {
+        Ok(session) => Ok((driver, session)),
+        Err(first) if browser == Browser::Safari => {
+            drop(driver);
+            eprintln!(
+                "the Safari session did not start ({first:#}); ending the stale sessions, and trying once more"
+            );
+            crate::drivers::end_stale_safari_sessions();
+            let driver = Driver::start(browser)?;
+            let session = Session::new(&driver, browser, args)
+                .with_context(|| format!("the first try failed too: {first:#}"))?;
+            Ok((driver, session))
+        }
+        Err(e) => Err(e),
+    }
+}
+
 /// A browser session, ended when dropped.
 pub struct Session {
     port: u16,

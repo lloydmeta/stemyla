@@ -76,7 +76,7 @@ iOS stops a tab whose memory passes 2 GB on an iPhone 17 Pro, however much memor
 
 * Why: a tab over the limit is killed with no error the page can catch.
 * Enforced by: in part.  `xtask e2e old-session` (CI `browser-tests` job) asserts the page's part after the restore of a session of the M4 layout.  The page's WebAssembly memory stays under 64 MB and does not grow with the song.  `xtask e2e memory-budget` (with the model, not in CI) asserts that the page and the workers do not grow with the song during an open and a separation.  `xtask e2e save` (CI `browser-tests` job, in Chrome) asserts that the page's JS heap during a save does not grow with the song, and stays within a fixed budget.  It asserts that a 10-minute save grows the page's WebAssembly memory by at most 1 MiB more than a 1-minute save (D11 of M8).  It also asserts that the stem worker's WebAssembly memory during a FLAC or an ALAC encode does not grow with the song.  On a Mac, it asserts the same during an AAC encode.  It bounds that memory during an MP3 encode.  `the_save_reader_holds_a_fixed_bound` (CI `test` job) bounds the slots of a save's reader to 10.5 MiB, for up to 28 lanes.  `docs/ARCHITECTURE.md` (memory on phones) names the rest of a save's memory.  Nothing asserts the whole tab's peak, GPU buffers included: the worker logs `memory: ...` after every chunk, and M10 of `plans/completed/stream-from-storage.md` adds the check.
-* Gaps: TD-11, TD-54, TD-58, TD-59.
+* Gaps: TD-11, TD-54, TD-58, TD-59, TD-97.
 
 ### MEM-5: browser-storage writes pass a whole array
 
@@ -146,7 +146,7 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 
 * Why: the most frequent review finding in this repo's history was a test that could not fail (`docs/harness.md`).
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.  CI's `test` job compares the UI snapshots in `app/tests/ui.rs` with the committed PNGs, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files.
-* Gaps: TD-8, TD-19, TD-29, TD-39, TD-43, TD-53, TD-60, TD-63, TD-65, TD-66, TD-92, TD-93.
+* Gaps: TD-8, TD-19, TD-29, TD-39, TD-43, TD-53, TD-60, TD-63, TD-65, TD-66, TD-92, TD-93, TD-96, TD-97.
 
 ### GIT-1: push only when asked, never to main or gh-pages; never publish or merge a PR
 

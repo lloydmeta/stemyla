@@ -5,9 +5,14 @@
 //! * Chrome: `$CHROMEDRIVER`, else `$CHROMEWEBDRIVER/chromedriver` (set on
 //!   GitHub's runners), else `chromedriver` on `PATH`.  It must match the
 //!   installed Chrome's major version.
+//!
+//! A Safari run on macOS checks the screen lock first, holds
+//! `caffeinate -u` while it runs, and ends each stale `safaridriver`
+//! (TD-96).
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
+use std::process::{Child, Command};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Browser {
@@ -68,6 +73,115 @@ impl Browser {
     }
 }
 
+/// The key of a console session in the plist of `ioreg -n Root -d1 -a`.
+/// macOS leaves it out while the screen is unlocked.
+const LOCK_KEY: &str = "<key>CGSSessionScreenIsLocked</key>";
+
+/// What `web-test` and `e2e` give when they refuse a Safari run.
+const LOCKED_TEXT: &str = "the screen is locked, and safaridriver cannot start a Safari session then: it waits, and gives \"The session timed out while connecting to a Safari instance\".  Unlock the screen, and run again (`ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked` gives nothing when it is unlocked)";
+
+/// Whether the plist of `ioreg -n Root -d1 -a` shows a locked screen: a
+/// session has the lock key, with the value `<true/>`.
+pub fn screen_is_locked(plist: &str) -> bool {
+    plist
+        .match_indices(LOCK_KEY)
+        .any(|(at, key)| plist[at + key.len()..].trim_start().starts_with("<true/>"))
+}
+
+/// Refuses a Safari run on macOS while the screen is locked, before a
+/// driver starts.  If `ioreg` gives no output, it says so, and goes on.
+pub fn refuse_a_locked_screen(browser: Browser) -> Result<()> {
+    if browser != Browser::Safari || !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    match Command::new("/usr/sbin/ioreg")
+        .args(["-n", "Root", "-d1", "-a"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            if screen_is_locked(&String::from_utf8_lossy(&out.stdout)) {
+                bail!("{LOCKED_TEXT}");
+            }
+        }
+        _ => eprintln!("the screen lock is not known: /usr/sbin/ioreg gave no output"),
+    }
+    Ok(())
+}
+
+/// The longest that [`keep_user_active`] holds its assertion: longer than
+/// any `web-test` or `e2e` run (`e2e save` may take 60 minutes in CI).
+const ACTIVE_LIMIT_S: u64 = 4 * 60 * 60;
+
+/// Holds the assertion that the user is active, and ends it when dropped.
+pub struct UserActive(Option<Child>);
+
+impl Drop for UserActive {
+    fn drop(&mut self) {
+        if let Some(child) = &mut self.0 {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// The arguments of `caffeinate` that declare the user active for `secs`,
+/// or until the process `pid` ends.  With no `-t`, `-u` holds only 5 s.
+fn user_active_args(pid: u32, secs: u64) -> [String; 5] {
+    [
+        "-u".to_string(),
+        "-t".to_string(),
+        secs.to_string(),
+        "-w".to_string(),
+        pid.to_string(),
+    ]
+}
+
+/// Safari keeps each `AudioContext` suspended while macOS reports the user
+/// idle (`references/browser-quirks.md`).  So a Safari run on macOS
+/// declares the user active with `caffeinate -u` while it runs.
+pub fn keep_user_active(browser: Browser) -> UserActive {
+    if browser != Browser::Safari || !cfg!(target_os = "macos") {
+        return UserActive(None);
+    }
+    let child = Command::new("/usr/bin/caffeinate")
+        .args(user_active_args(std::process::id(), ACTIVE_LIMIT_S))
+        .spawn();
+    if let Err(e) = &child {
+        eprintln!("caffeinate did not start ({e}), so Safari may keep its audio suspended");
+    }
+    UserActive(child.ok())
+}
+
+/// The pids of the `safaridriver`s in `ps -x -o pid=,ppid=,comm=` whose
+/// parent is gone (`launchd`, pid 1).  A runner or an `e2e` that was
+/// stopped leaves such a driver, and its session stays paired with Safari.
+pub fn stale_safaridrivers(ps: &str) -> Vec<u32> {
+    ps.lines()
+        .filter_map(|line| {
+            let mut fields = line.split_whitespace();
+            let pid = fields.next()?.parse().ok()?;
+            let parent = fields.next()?;
+            let command = fields.next()?;
+            (parent == "1" && command == "/usr/bin/safaridriver").then_some(pid)
+        })
+        .collect()
+}
+
+/// Ends each stale `safaridriver` of this user, so a new session can
+/// pair with Safari.  It ends no driver that a running program owns.
+pub fn end_stale_safari_sessions() {
+    let Ok(out) = Command::new("/bin/ps")
+        .args(["-x", "-o", "pid=,ppid=,comm="])
+        .output()
+    else {
+        return;
+    };
+    for pid in stale_safaridrivers(&String::from_utf8_lossy(&out.stdout)) {
+        eprintln!("ending the stale safaridriver {pid}, whose parent is gone");
+        let _ = Command::new("/bin/kill").arg(pid.to_string()).status();
+    }
+}
+
 fn chromedriver(
     explicit: Option<PathBuf>,
     ci_dir: Option<PathBuf>,
@@ -104,6 +218,46 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
+    }
+
+    /// The plist of `ioreg -n Root -d1 -a` around one console session.
+    fn console_session(lock: &str) -> String {
+        format!(
+            "<dict>\n\t<key>IOConsoleUsers</key>\n\t<array>\n\t\t<dict>\n\t\t\t<key>CGSSessionUniqueSessionUUID</key>\n\t\t\t<string>E80B4492-3CD3-41D8-A9D9-30110D947097</string>\n{lock}\t\t\t<key>kCGSSessionOnConsoleKey</key>\n\t\t\t<true/>\n\t\t\t<key>kCGSSessionUserNameKey</key>\n\t\t\t<string>lloyd</string>\n\t\t</dict>\n\t</array>\n</dict>\n"
+        )
+    }
+
+    #[test]
+    fn a_session_with_the_lock_key_set_true_is_locked() {
+        let plist = console_session("\t\t\t<key>CGSSessionScreenIsLocked</key>\n\t\t\t<true/>\n");
+        assert!(screen_is_locked(&plist));
+    }
+
+    #[test]
+    fn no_lock_key_or_a_false_one_is_unlocked() {
+        assert!(!screen_is_locked(&console_session("")));
+        let plist = console_session("\t\t\t<key>CGSSessionScreenIsLocked</key>\n\t\t\t<false/>\n");
+        assert!(!screen_is_locked(&plist));
+        assert!(!screen_is_locked(""));
+    }
+
+    #[test]
+    fn the_user_stays_active_for_the_limit_or_until_the_run_ends() {
+        assert_eq!(
+            user_active_args(4242, 14_400),
+            ["-u", "-t", "14400", "-w", "4242"]
+        );
+    }
+
+    #[test]
+    fn only_a_safaridriver_with_no_parent_is_stale() {
+        let ps = "  905     1 /usr/sbin/distnoted\n\
+                  50712 50699 /usr/bin/safaridriver\n\
+                  50713     1 /System/Library/PrivateFrameworks/WebDriver.framework/Versions/A/XPCServices/com.apple.WebDriver.HTTPService.xpc/Contents/MacOS/com.apple.WebDriver.HTTPService\n\
+                  50801     1 /usr/bin/safaridriver\n\
+                  50802     1 /Users/lloyd/bin/not-safaridriver\n";
+        assert_eq!(stale_safaridrivers(ps), [50801]);
+        assert_eq!(stale_safaridrivers(""), Vec::<u32>::new());
     }
 
     #[test]

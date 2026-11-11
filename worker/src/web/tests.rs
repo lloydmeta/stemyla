@@ -581,7 +581,10 @@ async fn a_stored_file_is_read_in_blocks() {
 
 /// Reset removing the file mid-load, say.  (A file rewritten after it was
 /// opened is a read error in Chrome, but Safari 27 reads the new bytes, so
-/// the hashed download is built from the bytes it hashed.)
+/// the hashed download is built from the bytes it hashed.)  The worker
+/// reads the size at the open (`init`), and so does this test.
+/// Safari 27.2 gives the size of a `File` at its first read, so a removed
+/// file whose size was not read can give 0 (`references/browser-quirks.md`).
 #[wasm_bindgen_test]
 async fn a_stored_file_removed_after_it_was_opened_is_a_read_error() {
     fresh().await;
@@ -592,11 +595,13 @@ async fn a_stored_file_removed_after_it_was_opened_is_a_read_error() {
             .expect("no error")
             .unchecked_into(),
     );
+    assert_eq!((&file).size(), TRUNCATED.len(), "the size at the open");
     opfs_remove(CACHE_NAME).await;
     let got = Store::from_source(&file).err().expect("not readable");
+    let text = got.to_string();
     assert!(
         matches!(LoadError::from(got), LoadError::Read(_)),
-        "a read error, so a stored model is kept, not removed as unusable"
+        "a read error, so a stored model is kept, not removed as unusable: {text}"
     );
 }
 

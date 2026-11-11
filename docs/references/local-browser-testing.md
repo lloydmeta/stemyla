@@ -4,18 +4,20 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 
 ## Which browser
 
-* Safari is the local default.  `safaridriver` failed every session for part of 2026-10-18 ("The session timed out while connecting to a Safari instance") and worked again later that day.  Try Safari first.  If a session times out, quit Safari and retry: on 2026-10-22, sessions timed out while Safari was open, also outside the sandbox, and worked once it was quit.  If they still time out, use `--browser chrome` and say in the PR that Safari is unverified.
+* Safari is the local default.  `safaridriver` starts no session while the screen is locked: it waits, then gives "The session timed out while connecting to a Safari instance" (2026-11-11, TD-96).  So `web-test` and `e2e` with Safari on macOS read the lock first, and fail at once with a clear error.  The check is `ioreg -n Root -d1 -a | grep -A1 CGSSessionScreenIsLocked`, which gives nothing when the screen is unlocked.  Do not quit Safari to clear a timeout.  If sessions time out with the screen unlocked, use `--browser chrome`, and say in the PR that Safari is unverified.
 * In Safari, `web-test` sets `WASM_BINDGEN_NO_DEBUG=1` for the crate run of `stem-worker` only, and prints why (TD-93).  To run that crate by hand in Safari, set it too.
-* A probe that leaves its WebDriver session open makes later sessions fail with "already paired with another WebDriver session".  End stale sessions before retrying.
+* A probe that leaves its WebDriver session open makes later sessions fail with "already paired with another WebDriver session".  `web-test` and `e2e` with Safari end each `safaridriver` whose parent is gone before they start.  If a session does not start, they end such drivers, and try the session start once more.  They try no test or scenario again (TD-96).  End a probe's session yourself.
+* `web-test` and `e2e` with Safari hold `caffeinate -u` while they run, so macOS does not report the user idle (TD-96).
 * Chrome needs a Chrome for Testing chromedriver of Chrome's major version, in `CHROMEDRIVER`.  Take the build for the CPU of the Mac: `mac-x64` for an Intel Mac, `mac-arm64` for Apple silicon ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)).  Keep it outside the repo and reuse it rather than downloading it again each session.  Chrome updates itself: on 2026-10-29 it went from 155 to 156 during a run, and chromedriver 155 still drove it, with a warning ("has not been tested with Chrome version 156").
 
 ## Known local failures
 
 Check `main` before treating any of these as a regression:
 
-* Safari keeps audio suspended while macOS reports the user idle (`references/browser-quirks.md`), so `e2e smoke` and `audio-resume` fail on any commit then.
-* In `e2e storage`, Safari fails two cases Chrome passes: the stalled-download case gets WebKit's "AbortError: Fetch is aborted" instead of the abort reason, and the `?model_url=` download case sometimes times out.
-* In a full Safari `web-test`, `an_output_left_behind_by_a_busy_page_is_replaced` logs "skipped: the audio context is suspended" because the test before it leaves the context suspended; run it alone with `--nocapture` to see it run.  `a_stored_file_removed_after_it_was_opened_is_a_read_error` is flaky in Safari; Chrome passes it.
+* Safari keeps audio suspended while macOS reports the user idle (`references/browser-quirks.md`), so `e2e smoke` and `audio-resume` fail on any commit then.  The `caffeinate -u` of `web-test` and `e2e` is to stop this, but nobody saw it with an idle user (TD-96).
+* In `e2e storage`, the `?model_url=` download case sometimes timed out in Safari 27.0.  It passed in each of 7 runs in Safari 27.2 on 2026-11-11.
+* `e2e save` can fail its check of the page's WebAssembly memory in Safari: 1 of 6 runs on 2026-11-11 (TD-97).
+* In a full Safari `web-test`, `an_output_left_behind_by_a_busy_page_is_replaced` logs "skipped: the audio context is suspended" because the test before it leaves the context suspended; run it alone with `--nocapture` to see it run.
 
 ## Downloads in tests
 

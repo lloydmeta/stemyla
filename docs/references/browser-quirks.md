@@ -59,3 +59,18 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  A planted WGSL
 
 * The code: `an_f16_variant_the_browser_rejects_keeps_f32_weights` takes the text of each browser, and still checks that the text names the compile failure (TD-93).
 * Rule: VERIFY-1.
+
+## Safari rejects an aborted fetch with its own error
+
+Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  `AbortController.abort(reason)` rejects the `fetch` and the reads of its body with "AbortError: Fetch is aborted", not with `reason`.  Chrome gives `reason`.  This is [WebKit bug 246069](https://bugs.webkit.org/show_bug.cgi?id=246069) (NEW).
+
+* The code: `download_to_opfs` in `worker/src/web.rs` gives the signal's reason when the signal is aborted, so a stalled download says "no data from the server for 60 s" in each browser (TD-96).
+* Rule: none.  `e2e storage` checks the text in each browser.
+
+## Safari gives the size of a stored `File` at its first read
+
+Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  A `File` from `getFile()` of an OPFS file gives its `size` at the first read of `size`, not at `getFile()`.  If the file is removed before that first read, `size` can be 0.  In 3 of 4 runs of the stem worker's tests, it was 0, and the test failed.  When the test read `size` before the removal, the test passed in 5 of 5 runs.  The read of the bytes of a removed file fails with NotFoundError.
+
+* The code: the worker reads the size of the stored model just after `getFile()`, before any other message can remove the file (`init` in `worker/src/web.rs`).  `a_stored_file_removed_after_it_was_opened_is_a_read_error` reads it there too.
+* Rule: VERIFY-1.
+

@@ -493,6 +493,23 @@ The save asks for 256,000 bit/s (`stem_protocol::AAC_ENCODER`).  Chromium's Wind
 
 * Fix: the maintainer decides.  One option is a fallback rate of 192 kbit/s with its own label.  Another is no AAC on Windows, as today.
 
+### TD-96: the Safari tests depend on the Mac's session and on WebKit
+
+This entry concerns VERIFY-1.  The causes are outside the repo (step 9 of `plans/active/tech-debt-rungs-m2.md`, Q8 of `plans/active/tech-debt-rungs.md`).
+
+* A locked screen: `safaridriver` then starts no session, and gives "The session timed out while connecting to a Safari instance".  `web-test` and `e2e` with Safari on macOS read `CGSSessionScreenIsLocked` from `ioreg` first, and fail at once with a clear error (`refuse_a_locked_screen` in `xtask/src/drivers.rs`).  Fix: none in view; a person unlocks the screen.
+* An idle user: Safari keeps each `AudioContext` suspended while macOS reports the user idle (`references/browser-quirks.md`).  `web-test` and `e2e` with Safari hold `caffeinate -u` for their run (`keep_user_active`).  Nobody saw the fix with an idle user, since `caffeinate -dimsu` ran for the whole of M2.  Fix: a run with no other `caffeinate`, with the user idle.
+* A stale session: a `safaridriver` whose parent is gone keeps its session paired with Safari.  `web-test` and `e2e` end such a driver first.  Only a session start is tried once more: `e2e` in `start_session`, and `web-test` when `session_did_not_start` holds.  No run of M2 left a stale driver, so nobody saw the second try.  Fix: none; the second try is the handling.
+* WebKit bug 246069 ([Use AbortSignal.reason in Fetch code](https://bugs.webkit.org/show_bug.cgi?id=246069), NEW on 2026-11-11): Safari 27.2 rejects an aborted fetch with its own `AbortError`.  The worker gives the abort reason in its place (`download_to_opfs` in `worker/src/web.rs`).  Fix: remove the workaround when WebKit gives the reason.
+
+### TD-97: the page's memory check of `e2e save` failed once in Safari
+
+This entry concerns VERIFY-1 and MEM-4.
+
+D11 of `e2e save` checks that a 10-minute save grows the page's WebAssembly memory by at most 1 MiB more than a 1-minute save (`WASM_BOUND_BYTES` in `xtask/src/e2e/save.rs`).  On 2026-11-11, in Safari 27.2, 6 runs gave 30 such pairs.  One failed: the AAC save of 1 minute grew the memory by 5,767,168 bytes, and of 10 minutes by 7,274,496 bytes.  Each growth was near 5.8 MB or near 7.3 MB, for each length and each format.  So the measure has two levels that do not depend on the length of the song, and the check fails when the 1-minute save takes the low level and the 10-minute save the high one.  The cause of the two levels is not known.  The logs are in the step 9 Surprises of `plans/active/tech-debt-rungs-m2.md`.
+
+* Fix: find what grows the page's memory by about 1.5 MB in some saves only, before the save starts or during it.  Then measure from a page where it has already grown, or remove the growth.  Do not widen the bound before the cause is known.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
