@@ -498,9 +498,8 @@ pub fn start(
 
 /// Browser tests (`cargo run -p xtask -- web-test`).  `xtask web-test`
 /// starts Chrome with no user-gesture rule for audio, so [`audio`] runs
-/// there.  Safari keeps audio suspended while macOS reports the user idle
-/// (`docs/references/browser-quirks.md`), so the tests check the audio
-/// clock in Chrome only.
+/// there.  In `web-test`, Safari holds back each audio context of the page
+/// (TD-96), so the tests check the audio clock in Chrome only.
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,6 +530,13 @@ export function st_spy_off() {
 export function st_cfg_get(cfg, key) { return cfg[key]; }
 export function st_in_chrome() { return navigator.userAgent.includes("Chrome/"); }
 export function st_suspend_later(ctx, ms) { if (ctx) setTimeout(() => ctx.suspend(), ms); }
+export async function st_plain_context_state(ms) {
+  const ctx = new AudioContext();
+  await new Promise((r) => setTimeout(r, ms));
+  const state = ctx.state;
+  await ctx.close();
+  return state;
+}
 export async function st_scratch_exists() {
   try { await (await navigator.storage.getDirectory()).getDirectoryHandle("streamtest"); return true; }
   catch (e) { return false; }
@@ -542,7 +548,23 @@ export async function st_scratch_exists() {
         fn st_cfg_get(cfg: &JsValue, key: &str) -> JsValue;
         fn st_in_chrome() -> bool;
         fn st_suspend_later(ctx: &JsValue, ms: u32);
+        /// The state of a new `AudioContext` of the page after `ms`.
+        async fn st_plain_context_state(ms: u32) -> JsValue;
         async fn st_scratch_exists() -> JsValue;
+    }
+
+    /// Safari holds back each audio context of the page in `web-test`: the
+    /// runner gives `safaridriver` no capabilities, so the page gets
+    /// Safari's autoplay rule (TD-96).  A run on the timer clock while a new
+    /// context of the page runs is a fault, and fails the test.
+    async fn skip_as_the_browser_holds_audio_back(line: &str) {
+        let plain = st_plain_context_state(300).await.as_string();
+        assert_eq!(
+            plain.as_deref(),
+            Some("suspended"),
+            "the run took the timer clock, but a new audio context runs: {line}"
+        );
+        console_log!("skipped: the audio context is suspended");
     }
 
     fn field(s: &Settings, key: &str) -> Option<f64> {
@@ -613,9 +635,10 @@ export async function st_scratch_exists() {
                     l.contains("clock audio at "),
                     "web-test runs Chrome with audio allowed: {l}"
                 );
-            } else if l.contains("clock timer") {
-                console_log!("skipped: the audio context is suspended");
             }
+        }
+        if let Some(timer) = playback.iter().find(|l| l.contains("clock timer")) {
+            skip_as_the_browser_holds_audio_back(timer).await;
         }
         for l in &playback {
             if l.contains(" ms block every ") {
@@ -722,7 +745,7 @@ export async function st_scratch_exists() {
                 !st_in_chrome(),
                 "web-test runs Chrome with audio allowed: {first}"
             );
-            console_log!("skipped: the audio context is suspended");
+            skip_as_the_browser_holds_audio_back(first).await;
             return;
         }
         assert!(

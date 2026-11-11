@@ -59,12 +59,12 @@ const SKIP_ALLOWLIST: &[(&str, &str, &str)] = &[
     (
         "app/tests/web_output.rs",
         "skipped: the audio context is suspended",
-        "a suspended audio context is not a need of STEMYLA_REQUIRE: the test asserts that the browser is not Chrome, and CI runs Chrome",
+        "a suspended audio context is not a need of STEMYLA_REQUIRE: Safari holds it back in web-test (TD-96), and CI's macos job runs Safari, so the test skips there; it fails in Chrome, and fails when a new audio context of the page runs",
     ),
     (
         "app/src/streamtest.rs",
         "skipped: the audio context is suspended",
-        "a suspended audio context is not a need of STEMYLA_REQUIRE: the test asserts the audio clock in Chrome, and CI runs Chrome",
+        "a suspended audio context is not a need of STEMYLA_REQUIRE: Safari holds it back in web-test (TD-96), and CI's macos job runs Safari, so the test skips there; it asserts the audio clock in Chrome, and fails when a new audio context of the page runs",
     ),
 ];
 
