@@ -1,6 +1,8 @@
 # 0030: the memory check of `e2e save` counts the page's heap
 
-Status: proposed (2026-11-11, by the agent, in step 11 of M2 of `plans/active/tech-debt-rungs.md`)
+Status: rejected (2026-11-11, by the maintainer: "writing a custom allocator is insane overengineering"; proposed on 2026-11-11 by the agent, in step 11 of M2 of `plans/active/tech-debt-rungs.md`)
+
+The maintainer's answer: "I think you should simply measure and choose some kind of sane tolerance.  If it _really_ really makes no sense (prove why), then we can think again.  And avoid this kind of unjustifiable overengineering."  So D11 keeps the growth of the page's WebAssembly memory, and `WASM_BOUND_BYTES` is 3 MiB, from the spread measured in step A (TD-97, closed).  The text below is the proposal as it was.
 
 ## Context
 
@@ -25,7 +27,7 @@ The check counts the page's Rust heap (`app/src/heap_count.rs`).  The counter is
 
 * The check no longer fails because of the allocator's layout.  A buffer in a save that grows with the song's length shows in the peak in full.
 * The check does not see a growth of the memory that comes from the layout alone, with the same requests.  TD-97 keeps that gap.  In step A, such a growth did not grow with the song's length.
-* The check measures from the save's start, after the click of the menu's item.  The short buffer of about 4 MB that the Save menu's draw makes is no longer in the measure.  TD-98 records it as a cost of MEM-4.
+* The check measures from the save's start, after the click of the menu's item.  The short buffer of about 4 MB that the Save menu's draw makes is no longer in the measure.  The proposal recorded it in a new TD, as a cost of MEM-4.
 * Each allocation of the page does two relaxed atomic operations more: an add and a maximum, or a subtraction.  The counter allocates nothing and waits for nothing (RT-1).
 * A `realloc` that moves a block counts only its new size.  For a moment, the old and the new block are both held.  So the peak is low by at most the old size of a moved block.
 * Only one save's measure is kept.  A save that starts while an earlier save waits for its encode starts the peak again.  Then the earlier save's line gives the peak since the later save's start.

@@ -47,14 +47,8 @@
 //! `docs/plans/completed/m4a.md`).  Each AAC M4A passes [`aac_checks`].
 //!
 //! Checks of D11 (a save that does not wait for the UI frame): for each
-//! format, a 10-minute save's peak of the page's Rust heap is at most
-//! [`WASM_BOUND_BYTES`] above a 1-minute save's.  The page counts its heap
-//! with a counting allocator (`app::heap_count`, decision 0030).  At a
-//! save's start, the peak starts again from the live bytes.  At the offer,
-//! the page logs the peak above them ([`heap_line`]).  The growth of the
-//! page's WebAssembly memory is logged, not checked.  It depends on where
-//! the allocator finds free blocks, so in Safari it had two levels for
-//! the same requests (TD-97).  The 10-minute WAV save
+//! format, a 10-minute save grows the page's WebAssembly memory by at most
+//! [`WASM_BOUND_BYTES`] (3 MiB) more than a 1-minute save.  The 10-minute WAV save
 //! takes fewer animation frames than a quarter of its blocks, with the
 //! animation frames throttled to about 4 a second.  Each save's longest
 //! slice, and its longest end of a read, which the page logs, are at most
@@ -104,13 +98,19 @@ pub(super) const ENCODE_BOUND_BYTES: f64 = ONE_MIB;
 /// its MP3, plus [`ONE_MIB`].
 pub(super) const MP3_FACTOR: f64 = 4.0;
 const ONE_MIB: f64 = 1_048_576.0;
-/// D11: how much more a 10-minute save's peak of the page's Rust heap may
-/// be than a 1-minute save's, in bytes.  The save's reader holds 3 spans
+/// D11: how much more a 10-minute save may grow the page's WebAssembly
+/// memory than a 1-minute save, in bytes.  The save's reader holds 3 spans
 /// of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the song's
-/// length.  So the two saves need the same heap.  In step A of
-/// `plans/active/tech-debt-rungs-m2-td97.md`, the two peaks differed by
-/// at most 2.3 KB in 114 saves, in Safari and Chrome.
-pub(super) const WASM_BOUND_BYTES: f64 = ONE_MIB;
+/// length.  So the two saves need the same memory.  But the growth depends
+/// on where the allocator finds free blocks, so in Safari it spreads by up
+/// to 1,900,544 bytes for the same requests (TD-97, step A of
+/// `plans/active/tech-debt-rungs-m2-td97.md`).  3 MiB is 1 MiB above the
+/// worst pair of single growths seen (2,097,152 bytes).  The 9 minutes
+/// more fail when a save grows the memory by more than 3,145,728 / 9 =
+/// 349,525 bytes a minute of song.  A minute of 16-bit stereo at 44.1 kHz
+/// is 10,584,000 bytes, so a save that keeps more than about 1/30 of the
+/// song's 16-bit audio fails.
+pub(super) const WASM_BOUND_BYTES: f64 = 3.0 * ONE_MIB;
 /// The limit of the `e2e save` step in CI's `browser-tests` job
 /// (`timeout-minutes`), in seconds.  It is the longest that every wait of a
 /// run can take (finding 3-1 of review round 3 of M8).  So a run that
@@ -336,12 +336,8 @@ pub(super) struct Save {
     /// in bytes.
     pub worker: Option<(f64, f64)>,
     /// The growth of the page's WebAssembly memory during the save, in
-    /// bytes.  It is logged, not checked: it depends on the allocator's
-    /// layout (TD-97).
+    /// bytes.
     pub wasm: Option<f64>,
-    /// The peak of the page's Rust heap in the save, above its live bytes
-    /// at the save's start, in bytes, from the page's line ([`heap_line`]).
-    pub heap_peak: Option<f64>,
     /// The page's animation frames (`requestAnimationFrame` callbacks)
     /// from the click of the menu item to the offer.
     pub frames: Option<u64>,
@@ -364,17 +360,6 @@ pub(super) fn encode_line(line: &str) -> Option<(f64, f64)> {
     let after = number_after(rest, " to ")?;
     let file = number_after(rest, ", file ")?;
     Some((after - before, file))
-}
-
-/// The peak of the page's Rust heap in a save above its live bytes at the
-/// save's start, and those live bytes, from the page's line `save: <name>:
-/// heap peak <peak> bytes above <start> bytes at the save's start, page
-/// wasm <bytes> bytes` (decision 0030).
-pub(super) fn heap_line(line: &str) -> Option<(f64, f64)> {
-    let rest = &line[line.find(": heap peak ")?..];
-    let peak = number_after(rest, ": heap peak ")?;
-    let start = number_after(rest, " bytes above ")?;
-    Some((peak, start))
 }
 
 /// The save of `kind` and `seconds` among `saves`.
@@ -400,14 +385,14 @@ pub(super) fn formats(aac: bool) -> impl Iterator<Item = (&'static str, &'static
 pub(super) fn save_checks(saves: &[Save], aac: bool) -> Vec<(bool, String)> {
     let mut checks = Vec::new();
     for (kind, extension, _) in formats(aac) {
-        let peak = |seconds| find(saves, kind, seconds).and_then(|s| s.heap_peak);
-        let (short_peak, long_peak) = (peak(SECONDS[0]), peak(SECONDS[1]));
+        let wasm = |seconds| find(saves, kind, seconds).and_then(|s| s.wasm);
+        let (short_wasm, long_wasm) = (wasm(SECONDS[0]), wasm(SECONDS[1]));
         checks.push((
-            short_peak
-                .zip(long_peak)
+            short_wasm
+                .zip(long_wasm)
                 .is_some_and(|(s, l)| l - s <= WASM_BOUND_BYTES),
             format!(
-                "{kind}: the 10-minute save's peak of the page's Rust heap is at most {WASM_BOUND_BYTES} bytes above the 1-minute save's ({short_peak:?} and {long_peak:?} bytes)"
+                "{kind}: the 10-minute save grows the page's WebAssembly memory by at most {WASM_BOUND_BYTES} bytes more than the 1-minute save ({short_wasm:?} and {long_wasm:?} bytes)"
             ),
         ));
         for seconds in SECONDS {
@@ -1302,11 +1287,10 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     let names = in_page(&mut p, SAVE_NAMES, json!([]), SCRIPT_WAIT_S)?;
     for s in &saves {
         p.note(&format!(
-            "save: {} {} s: JS heap measure {:?} MB; Rust heap peak {:?} bytes; WebAssembly growth {:?} bytes (logged, not checked); worker growth and file {:?}",
+            "save: {} {} s: JS heap measure {:?} MB; WebAssembly growth {:?} bytes; worker growth and file {:?}",
             s.kind,
             s.seconds,
             s.heap.map(|h| h / MB),
-            s.heap_peak,
             s.wasm,
             s.worker
         ));
@@ -1482,11 +1466,6 @@ pub(super) fn slice_of(log: &[String]) -> Option<f64> {
     log.iter().find_map(|l| slice_line(l))
 }
 
-/// The heap peak of the first save logged in `log` ([`heap_line`]).
-pub(super) fn heap_of(log: &[String]) -> Option<f64> {
-    log.iter().find_map(|l| heap_line(l)).map(|(peak, _)| peak)
-}
-
 /// The longest end of a read of the first save logged in `log`.
 pub(super) fn read_end_of(log: &[String]) -> Option<f64> {
     log.iter().find_map(|l| read_end_line(l))
@@ -1583,7 +1562,6 @@ fn save_once(p: &mut Page, o: &Opts, (kind, row): (&str, usize), seconds: u32) -
         offered,
         worker,
         wasm: growth(wasm_before, wasm_after),
-        heap_peak: heap_of(&p.log[mark..]),
         frames: offered_frames(&offered_line),
         slice_ms: slice_of(&p.log[mark..]),
         read_end_ms: read_end_of(&p.log[mark..]),
@@ -1668,19 +1646,12 @@ mod tests {
             )),
             worker,
             wasm: Some(f64::from(seconds) * 100.0),
-            heap_peak: Some(SAFARI_SAVE_PEAK),
             frames: Some(160),
             slice_ms: Some(6.0),
             read_end_ms: Some(2.0),
             readings: Some(full_writes(seconds) + 2),
         }
     }
-
-    /// The peak of the page's Rust heap in a save in Safari, above its live
-    /// bytes at the click of the menu's item, for 1 and for 10 minutes: the
-    /// WAV saves of `m2/td97/measure/safari-1.log` (step A of
-    /// `plans/active/tech-debt-rungs-m2-td97.md`).
-    const SAFARI_SAVE_PEAK: f64 = 9_343_550.0;
 
     /// A run that passes: flat page measures, a flat FLAC encode, and MP3
     /// encodes of 3.5 times their files.
@@ -1774,104 +1745,56 @@ mod tests {
         assert_eq!(failing(&wrong).len(), 1);
     }
 
-    /// D11: a 10-minute save's peak of the page's Rust heap may be at most
-    /// the bound above a 1-minute save's.  The memory's growth is not
-    /// checked (TD-97).
+    /// D11: a 10-minute save may grow the page's WebAssembly memory by at
+    /// most the bound more than a 1-minute save.
     #[test]
-    fn the_heap_check_bounds_the_peak_of_the_long_save() {
+    fn the_wasm_check_bounds_the_growth_of_the_long_save() {
         let mut at_bound = good();
-        at_bound[1].heap_peak = Some(SAFARI_SAVE_PEAK + WASM_BOUND_BYTES);
+        at_bound[1].wasm = Some(6_000.0 + WASM_BOUND_BYTES);
         assert!(failing(&at_bound).is_empty(), "{:?}", failing(&at_bound));
         let mut over = good();
-        over[3].heap_peak = Some(SAFARI_SAVE_PEAK + WASM_BOUND_BYTES + 1.0);
+        over[3].wasm = Some(6_001.0 + WASM_BOUND_BYTES);
         let failed = failing(&over);
         assert_eq!(failed.len(), 1, "{failed:?}");
-        assert!(failed[0].starts_with("flac: the 10-minute save's peak"));
+        assert!(failed[0].starts_with("flac: the 10-minute save grows"));
         let mut missing = good();
-        missing[4].heap_peak = None;
+        missing[4].wasm = None;
         assert_eq!(failing(&missing).len(), 1);
         // A read-ahead that grows with the song: 2 blocks of 3 lanes for
         // each of the 1,615 blocks of 10 minutes.
         let mut growing = good();
-        growing[1].heap_peak = Some(SAFARI_SAVE_PEAK + 1_615.0 * 2.0 * 16_384.0 * 8.0 * 3.0);
+        growing[1].wasm = Some(1_615.0 * 2.0 * 16_384.0 * 8.0 * 3.0);
         assert_eq!(failing(&growing).len(), 1);
-        let mut grown_memory = good();
-        grown_memory[1].wasm = Some(1e9);
-        assert!(
-            failing(&grown_memory).is_empty(),
-            "{:?}",
-            failing(&grown_memory)
-        );
     }
 
-    /// The page's heap line gives the peak above the start, and the start.
+    /// TD-97: in Safari, the growth of a save has two levels, about 1.9 MB
+    /// apart, whatever the song's length.  The pairs of 1 and 10 minutes
+    /// that failed the bound of 1 MiB pass: MP3 of CI run 43008561411, AAC
+    /// of step 9 of `plans/completed/tech-debt-rungs-m2.md`, and the
+    /// extremes of single growths in step A of
+    /// `plans/active/tech-debt-rungs-m2-td97.md`.  One byte more than the
+    /// bound above the 1-minute save fails.
     #[test]
-    fn a_heap_line_gives_the_peak_above_the_start() {
-        let line = "[11.9s] @4418.0 console.info: [app] app/src/lib.rs:590: save: lloyd - mix.wav: heap peak 9343550 bytes above 18726635 bytes at the save's start, page wasm 31588352 bytes";
-        assert_eq!(heap_line(line), Some((9_343_550.0, 18_726_635.0)));
-        assert_eq!(
-            heap_line("save: lloyd - mix.wav: longest slice 4.0 ms, longest read end 3.0 ms"),
-            None
-        );
-        assert_eq!(
-            heap_line("save: x: heap peak many bytes above 1 bytes at the save's start"),
-            None
-        );
-        let log = vec![
-            "[1.0s] click the wav item at (100, 168)".to_string(),
-            line.to_string(),
+    fn the_two_level_pairs_of_safari_pass_and_one_byte_more_fails() {
+        let pairs = [
+            (5_636_096.0, 7_536_640.0),
+            (5_767_168.0, 7_274_496.0),
+            (5_505_024.0, 7_602_176.0),
         ];
-        assert_eq!(heap_of(&log), Some(9_343_550.0));
-        assert_eq!(heap_of(&log[..1]), None);
-    }
-
-    /// TD-97: the memory's growth has two levels in Safari, about 1.9 MB
-    /// apart, for the same requests of the page.  CI run 43008561411 grew
-    /// it by 5,636,096 bytes in the MP3 save of 1 minute and 7,536,640 in
-    /// the save of 10 minutes.  Step 9 of `plans/completed/tech-debt-rungs-m2.md`
-    /// gave 5,767,168 and 7,274,496 for AAC.  No save at the low level came
-    /// in step A, so this models the two layouts of its Surprises from the
-    /// WAV saves of `m2/td97/measure/safari-1.log` (a high 1-minute and a
-    /// high 10-minute save).  (a) The page start left 1,900,544 bytes more
-    /// memory, so `before` is higher and the high-water mark is the same.
-    /// (b) The buffers fit better, so the high-water mark is lower by as
-    /// much.  In both, the page asks for the same heap.  The old measure
-    /// fails each pair; the heap's peak passes them.
-    #[test]
-    fn a_growth_by_layout_alone_passes_the_heap_check() {
-        let gap = 1_900_544.0;
-        let long = growth(Some(24_182_784.0), Some(31_653_888.0));
-        let layouts = [
-            ("a", growth(Some(24_313_856.0 + gap), Some(31_588_352.0))),
-            ("b", growth(Some(24_313_856.0), Some(31_588_352.0 - gap))),
-        ];
-        for (layout, short) in layouts {
-            let (s, l) = short.zip(long).expect("both growths");
-            assert!(l - s > WASM_BOUND_BYTES, "{layout}: {s} and {l}");
+        for (short, long) in pairs {
             let mut saves = good();
-            saves[0].wasm = short;
-            saves[1].wasm = long;
+            saves[6].wasm = Some(short);
+            saves[7].wasm = Some(long);
             assert!(
                 failing(&saves).is_empty(),
-                "{layout}: {:?}",
+                "{short} and {long}: {:?}",
                 failing(&saves)
             );
-        }
-    }
-
-    /// MEM-4: a 10-minute save whose heap peak is 1 MiB and one 64 KiB
-    /// page above the 1-minute save's fails, for each format.
-    #[test]
-    fn a_heap_peak_that_grows_with_the_song_fails() {
-        for (i, kind) in ["wav", "flac", "mp3", "alac"].into_iter().enumerate() {
-            let mut saves = good();
-            saves[2 * i + 1].heap_peak = Some(SAFARI_SAVE_PEAK + WASM_BOUND_BYTES + 65_536.0);
+            saves[7].wasm = Some(short + WASM_BOUND_BYTES + 1.0);
             let failed = failing(&saves);
-            assert_eq!(failed.len(), 1, "{kind}: {failed:?}");
+            assert_eq!(failed.len(), 1, "{failed:?}");
             assert!(
-                failed[0].starts_with(&format!(
-                    "{kind}: the 10-minute save's peak of the page's Rust heap"
-                )),
+                failed[0].starts_with("alac: the 10-minute save grows"),
                 "{failed:?}"
             );
         }
@@ -2898,12 +2821,12 @@ mod tests {
             failed[1].starts_with("aac, 600 s: the JS heap measure"),
             "{failed:?}"
         );
-        let mut peak = good_aac();
-        peak[9].heap_peak = Some(SAFARI_SAVE_PEAK + WASM_BOUND_BYTES + 1.0);
-        let failed = failing_with(&peak, true);
+        let mut wasm = good_aac();
+        wasm[9].wasm = Some(6_001.0 + WASM_BOUND_BYTES);
+        let failed = failing_with(&wasm, true);
         assert_eq!(failed.len(), 1, "{failed:?}");
         assert!(
-            failed[0].starts_with("aac: the 10-minute save's peak"),
+            failed[0].starts_with("aac: the 10-minute save grows"),
             "{failed:?}"
         );
         let mut slice = good_aac();
