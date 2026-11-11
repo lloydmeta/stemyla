@@ -176,7 +176,7 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
   * [x] 2026-11-11: the measure tools, in a worktree outside the repo (`m2/td97/measure-tree`, patch `m2/td97/measure.patch`).  No part is committed, so no test is owed.  They are the sampler, the stamps, the events, the finalizer count, a count of the Rust heap, a log of the font atlas, and the two controls.
   * [x] 2026-11-11: 2 Chrome runs and the 2 Chrome controls, 9 Safari measure runs (6 full runs, 2 of them controls of a 15 s idle; 1 run under load that stopped; 2 runs with no late read), 2 Safari page controls, and 3 Safari runs of HEAD.  Each log is in `m2/td97/measure/`.  The table is in Surprises.
   * [x] 2026-11-11: no save at the low level in 114 Safari saves (step A item 8).  The plan says to stop and report.  Step A stops here, and steps B and C wait for the team leader.
-* [ ] Step B: the fix, with its tests.  The team leader chose option 1 on 2026-11-11 (Decision log).
+* [x] Step B: the fix, with its tests.  The team leader chose option 1 on 2026-11-11 (Decision log).
   * [x] 2026-11-11: `app/src/heap_count.rs` counts the page's Rust heap on wasm32.  The page logs the heap line at each offer of the storage path.  `save_checks` compares the peaks; the memory's growth is logged.  Decision 0030 (`proposed`), TD-97 narrowed, TD-98 new.  Each new test failed first on an assert:
     * `the_count_follows_each_call_and_keeps_the_peak`: against a `restart_peak` that did not set the peak, `assert_eq!(heap.peak(), 200)` got 4000.
     * `a_refused_allocation_counts_nothing`: against an `alloc` that counted a null pointer, the counts were (64, 64), not (0, 0).
@@ -186,7 +186,19 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
     * `a_heap_peak_that_grows_with_the_song_fails`: against the old `save_checks`, a peak 1 MiB and 64 KiB higher gave no failure (`left: 0, right: 1`).
     * `the_wasm_check_bounds_the_growth_of_the_long_save` became `the_heap_check_bounds_the_peak_of_the_long_save`.  It also asserts that a large memory growth alone passes.
   * [x] 2026-11-11: one Chrome run of the new build passed (`m2/td97/accept/chrome-pre.log`).  The peaks were 7,647,356 to 7,647,369 bytes, the same for 1 and 10 minutes to 0 bytes in each format.  Each heap line's start plus its peak is the absolute peak of step A's `chrome-2` (25,973,059 for WAV).  The live bytes at the save's start are about 1.7 MB above those at the item's click, so the step A peak above the click is 1.7 MB higher.
-* [ ] Step C: 6 Safari runs in a row and one Chrome run pass.
+* [x] Step C: 6 Safari runs in a row and one Chrome run pass.
+  * [x] 2026-11-11, at `af135fb`: 6 runs of `e2e save --browser safari` in a row passed each check, with the lock read before each (`m2/td97/accept/safari-1.log` to `safari-6.log`).  None hung.  `e2e save --browser chrome` passed (`m2/td97/accept/chrome-1.log`).  The 12 Safari values of the new measure of each format, the heap's peak above its live bytes at the save's start, in bytes:
+
+| Format | The 12 peaks (6 runs, 60 s and 600 s) | Span | The old growths, 60 s / 600 s, of the 6 runs | Old pairs over 1 MiB |
+| - | - | - | - | - |
+| WAV | 7,647,361 each | 0 | 7,471,104 / 7,340,032; 7,471,104 / 7,405,568; 7,340,032 / 7,471,104; 7,405,568 / 7,208,960; 7,340,032 / 7,340,032; 7,274,496 / 7,471,104 | 0 |
+| FLAC | 7,647,360 each | 0 | 7,340,032 / 7,405,568; 7,405,568 / 7,471,104; 7,405,568 / 7,340,032; 7,405,568 / 7,471,104; 7,340,032 / 7,208,960; 7,274,496 / 7,536,640 | 0 |
+| ALAC | 7,647,356 each | 0 | 7,208,960 / 7,340,032; 7,536,640 / 7,340,032; 7,536,640 / 7,208,960; 7,471,104 / 7,405,568; 7,471,104 / 7,340,032; 7,274,496 / 7,471,104 | 0 |
+| MP3 | 7,647,369 each | 0 | 7,405,568 / 7,536,640; 7,340,032 / 7,536,640; 7,471,104 / 7,274,496; 7,340,032 / 7,536,640; 7,340,032 / 7,274,496; 7,340,032 / 7,208,960 | 0 |
+| AAC | 7,647,365 each | 0 | 7,405,568 / 7,471,104; 7,274,496 / 7,340,032; 7,340,032 / 7,274,496; 7,340,032 / 7,471,104; 7,405,568 / 7,274,496; 7,405,568 / 7,274,496 | 0 |
+
+  * Levels: before the fix, step 9 and CI had 7 low saves in 70 (old measure).  In step A, 0 in 114 Safari saves.  In step C, the old growth (logged) had 0 low saves in 60; the new measure has one value for each format, in each run, in both browsers.  The Chrome run gave the same 5 peaks.  The values of step C span 0 bytes, so they are within 1 MiB.  But no low save came in step C either, so step C does not show the new check on a page at the low level.  Step B's model test covers that case.
+  * [x] 2026-11-11: `cargo run -p xtask -- check --tier push` and `cargo build -p xtask` passed (`m2/td97/check-push.log`).
 * [ ] Step D: the review rounds.
 
 ## Surprises and discoveries
