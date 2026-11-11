@@ -163,21 +163,58 @@ The team leader runs `/review-rounds b94f5bc <round> "<criteria>"` from round 1,
 
 ## Progress
 
-* [ ] 2026-11-11: this plan, after review by a `Plan` agent (round 1: 4 blockers, 5 should-fix and 3 nits; round 2: 4 should-fix; each fixed).
+* [x] 2026-11-11: this plan, after review by a `Plan` agent (round 1: 4 blockers, 5 should-fix and 3 nits; round 2: 4 should-fix; each fixed).
 * [ ] Step A: measure, with the table in Surprises.
+  * [x] 2026-11-11: the measure tools, in a worktree outside the repo (`m2/td97/measure-tree`, patch `m2/td97/measure.patch`).  No part is committed, so no test is owed.  They are the sampler, the stamps, the events, the finalizer count, a count of the Rust heap, a log of the font atlas, and the two controls.
+  * [x] 2026-11-11: 2 Chrome runs, 9 Safari measure runs (7 full runs, 2 of them controls of a 15 s idle; 1 run under load that stopped; 2 runs with no late read), 2 page controls, and 3 Safari runs of HEAD.  Each log is in `m2/td97/measure/`.  The table is in Surprises.
+  * [x] 2026-11-11: no save at the low level in 114 Safari saves (step A item 8).  The plan says to stop and report.  Step A stops here, and steps B and C wait for the team leader.
 * [ ] Step B: the fix, with its tests.
 * [ ] Step C: 6 Safari runs in a row and one Chrome run pass.
 * [ ] Step D: the review rounds.
 
 ## Surprises and discoveries
 
-* None yet.
+* 2026-11-11, the CI log of run 43008561411 (job 130482081111), read again.  The page lines of the low MP3 save of 1 minute are the same as the lines of the high saves.  Its line `store: session ... is current` comes before `separator: no model cached in this browser`, but the high AAC save of 1 minute has the same order.  The log gives the growth of each save only, not the memory before and after.  So it cannot tell a higher memory before the save from a lower memory after it.  Each save clicked the item 0.8 to 1.4 s after the click of Save, and the run took 167 s to its last save.
+* 2026-11-11, the measure (step A).  The sampler reads `memory.buffer.byteLength` each 0.25 s.  Events read it, the finalizer count, and the Rust heap's live bytes and peak, at each stage.  A temporary counting allocator in the page gives the Rust heap.  In bytes, over each log:
+
+| Log | Saves | Growth (old measure) | Memory before | Memory after (high-water) | Growth with the menu open (L5) | Growth from the item's click | Rust heap peak above its live bytes at `before` | Finalizer frees |
+| - | - | - | - | - | - | - | - | - |
+| `chrome-1` | 10 | 7,274,496 to 7,602,176 | 21,954,560 to 22,151,168 | 29,360,128 to 29,687,808 | 1,835,008 to 2,162,688 | 5,242,880 to 5,701,632 | not measured | 0 |
+| `chrome-2` | 10 | 7,274,496 to 7,602,176 | 22,020,096 to 22,151,168 | 29,425,664 to 29,622,272 | 1,835,008 to 2,031,616 | 5,308,416 to 5,636,096 | 9,395,484 to 9,397,752 | 0 |
+| `safari-1` | 10 | 7,143,424 to 7,471,104 | 24,117,248 to 24,313,856 | 31,391,744 to 31,719,424 | 1,703,936 to 2,031,616 | 5,242,880 to 5,505,024 | 9,396,504 to 9,397,752 | 0 |
+| `safari-2` | 10 | 7,208,960 to 7,602,176 | 24,117,248 to 24,313,856 | 31,522,816 to 31,719,424 | 1,835,008 to 2,097,152 | 5,373,952 to 5,570,560 | 9,396,504 to 9,397,752 | 0 |
+| `safari-3` | 10 | 7,143,424 to 7,471,104 | 24,117,248 to 24,313,856 | 31,391,744 to 31,719,424 | 1,835,008 to 1,966,080 | 5,242,880 to 5,505,024 | 9,396,504 to 9,397,752 | 0 |
+| `safari-4` | 10 | 7,274,496 to 7,602,176 | 24,117,248 to 24,313,856 | 31,457,280 to 31,719,424 | 1,835,008 to 2,031,616 | 5,373,952 to 5,636,096 | 9,396,600 to 9,397,752 | 0 |
+| `safari-control-idle15-1` | 10 | 7,143,424 to 7,602,176 | 24,117,248 to 24,313,856 | 31,457,280 to 31,784,960 | 1,638,400 to 2,031,616 | 5,308,416 to 5,767,168 | 9,396,600 to 9,397,752 | 0 |
+| `safari-control-idle15-2` | 10 | 7,143,424 to 7,602,176 | 24,117,248 to 24,313,856 | 31,457,280 to 31,719,424 | 1,835,008 to 2,097,152 | 5,308,416 to 5,636,096 | 9,396,504 to 9,397,752 | 0 |
+| `safari-5-loaded12` | 4 | 7,274,496 to 7,471,104 | 24,182,784 to 24,313,856 | 31,588,352 to 31,653,888 | 1,835,008 to 1,966,080 | 5,439,488 to 5,505,024 | 9,396,600 to 9,397,752 | 0 |
+| `safari-6-v3` | 10 | 7,208,960 to 7,602,176 | 24,117,248 to 24,313,856 | 31,457,280 to 31,719,424 | 1,835,008 to 2,097,152 | 5,177,344 to 5,636,096 | 9,396,504 to 9,397,752 | 0 |
+| `safari-7-v3` | 10 | 7,274,496 to 7,602,176 | 24,117,248 to 24,313,856 | 31,457,280 to 31,784,960 | 1,703,936 to 2,097,152 | 5,308,416 to 5,636,096 | 9,396,504 to 9,397,752 | 0 |
+
+* Levels: each of the 104 measured saves is at the high level, in both browsers.  The 30 saves of the 3 Safari runs of HEAD (`safari-head-<n>`, no measure) are at the high level too, from 7,208,960 to 7,536,640.  So the measure did not remove the low level: HEAD shows none today either.  Step 9 had 6 low saves in 60, and CI 1 in 10.  At 1 in 10, no low save in 134 has a chance of about 1 in 1,000,000.  So the condition that made the low level is not present on the Mac today.  In step 9, the 5 low saves of run 3 came in 2 groups (4 saves in a row, then 1).  Safari's log shows no change of page visibility in that run.
+* L1, the start-up of the page: no growth from the first sample (0.25 s after the page loads) to `before`, in each save and in the 4 page controls of 20 s.  The memory at 0.25 s is the memory at `before` (24.1 to 24.3 MB in Safari, 21.95 to 22.15 MB in Chrome).  A 15 s idle in place of 3 s gives the same values.  The data does not support L1.
+* L4, the collector: the wrapper of `FinalizationRegistry` counted no finalizer call on any page, also in Chrome after each `gc()`.  So no Rust object waits for the collector to be freed.  The data does not support L4.
+* L5, the Save menu: in each save, the memory grows by 1.6 to 2.2 MB about 0.1 to 0.2 s after the click of Save, with the menu open.  The Rust heap then gets a peak 3,958,034 to 3,958,130 bytes above its live bytes in Safari (3,906,842 to 3,907,958 in Chrome), and keeps only 51,934 to 53,050 bytes.  So the menu's draw makes a short buffer of about 4 MB.  The font atlas does not change after the page start (16,384 by 64 pixels in Safari at 2 pixels a point, 16,384 by 32 in Chrome).  So the buffer is not a growth of the atlas.  The gap of the old levels, 1.5 to 1.9 MB, is about the size of this growth.  So a low save can be one where the menu's buffer fits into free memory, but no low save came to show it.
+* L2 and L3: the live bytes of the Rust heap at `before` are the same in each page of one length, to about 100 bytes (18,673,585 to 18,673,681 for 1 minute, 18,674,793 to 18,674,889 for 10 minutes, in Safari).  The save's peak above them is the same for 1 and 10 minutes, to 2.3 KB (9,395,484 to 9,397,752 bytes, in both browsers).  So the page asks for the same memory in each save.  The growth of the memory differs by up to 458,752 bytes between saves with the same requests.  That is the allocator's layout: the place of each free block that the page start and the menu leave.  Chrome and Safari give the same structure, about 2.2 MB more memory in Safari.
+* The old measure is the high-water mark after the save less the memory before it.  The high-water mark depends on which free blocks the allocator has when the save starts.  The Rust heap's peak does not.
+* A run under load (12 processes of `yes` on 12 CPUs) stopped at the ALAC save of 1 minute: "the save offered no file within its cap of 60 s".  Its 4 saves before were at the high level.  So load alone did not give the low level, and full load breaks the run.
+* The build cross-talk: the worktree of the measure and the repo shared one `target/`.  Cargo's unit hashes do not hold the path of a workspace member.  So `cargo build -p xtask` and `trunk build` in the repo gave the worktree's code, with no rebuild, until each source file was touched.  The 3 HEAD runs came after that rebuild (`strings target/debug/xtask` and `app_bg.wasm` hold no measure code).  The later measure build used its own `target-measure/`.
+* Why no fix of the measure is proven yet: a low save has about 1.8 MB less growth with the same requests.  Two layouts can give that.  (a) The page start left more free memory at `before`, so the high-water mark after the save is the same.  (b) The menu's buffer and the save's buffers fit better into the same free memory, so the high-water mark after the save is lower.  No low save came to tell (a) from (b).
+* The options for step B, for the team leader:
+  * Option 1 (the agent's recommendation): measure the Rust heap's peak in the save, above its live bytes at the save's start.  The page counts its heap with a counting global allocator on wasm32, and gives the 2 values to `e2e save`.  It does not depend on the layout, so (a) and (b) give one value.  Today, 1 and 10 minutes differ by at most 2.3 KB, so the bound of 1 MiB stays.  The cost is a change to the page, so a decision record (`proposed`).  It does not see a growth by fragmentation alone, so the memory's growth stays in the log.
+  * Option 2: compare the high-water marks after the two saves (`wasm_after`), not the growths.  It needs no change to the page.  Today they spread by 393,216 bytes in Safari.  It holds for (a), and fails for (b).
+  * Option 3: read `wasm_before` with the menu open (the plan's L5 candidate).  The save's growth then depends on whether the menu's buffer grew the memory.  So the two levels can stay, for (a) and for (b).
+  * Option 4: measure more, for a low save.  The conditions of step 9 are not known.  The maintainer may have used the Mac then, which the rules forbid now.
+  * Step B's acceptance asks for samples of a low save.  With option 1 or 2, the test inputs can model (a) and (b) from the measured values.  The CI pair and the step 9 pair stay in the test's doc.  That changes the acceptance, so it needs the team leader.
 
 ## Decision log
 
 * 2026-11-11, maintainer: fix TD-97 now; make the `macos` job a required check after it (step 12 of the parent plan).
 * 2026-11-11, agent: measure first, then choose the fix.  Reason: the cause is not known, and a fix of the measure that hides a real growth breaks MEM-4.
 * 2026-11-11, agent: the acceptance adds one level for each format across the 6 Safari runs.  Reason: 6 passes in a row came about 1 time in 3 before any fix (plan review round 1).
+* 2026-11-11, agent: the measure tools stay in a worktree outside the repo, with a patch.  Reason: the counting allocator and the log of the font atlas change the page, and step A commits no tool that has no test.
+* 2026-11-11, agent: 2 of the 9 Safari measure runs read the samples just after the offer, with no idle of 3 s after it.  Reason: to keep the time between pages of HEAD, in case the idle removed the low level.  They gave the same levels.
+* 2026-11-11, agent: step A stops after 9 Safari measure runs with no low save (step A item 8).  Steps B and C wait for the team leader.  Reason: step B's test needs samples of a low save, and the plan says to report then.
 
 ## Outcomes and retrospective
 
