@@ -7,6 +7,9 @@
 //! output of each crate run while it prints it, and fails a crate run
 //! whose test binary has no wasm test, unless a filter is given.
 //!
+//! In Safari, the crate run of `stem-worker` gets `WASM_BINDGEN_NO_DEBUG=1`,
+//! and `web-test` prints why (TD-93, [`run_vars`]).
+//!
 //! It runs each crate, also after a crate fails.  Then it prints one line
 //! for each crate, and fails with the name of each crate that failed.
 //!
@@ -116,6 +119,13 @@ pub fn run(args: &[String]) -> Result<()> {
                 chrome_capabilities(&root, &chrome_args)?,
             );
         }
+        for var in run_vars(browser, package) {
+            println!(
+                "web-test: {package}: {}={}, since {}",
+                var.name, var.value, var.why
+            );
+            cmd.env(var.name, var.value);
+        }
         if let Some(f) = &filter {
             cmd.args(["--", f]);
         }
@@ -140,6 +150,32 @@ pub fn run(args: &[String]) -> Result<()> {
             "{lines}\nbrowser tests failed in {browser:?}; if no test ran, check the driver: {}",
             browser.setup_hint()
         ),
+    }
+}
+
+/// An extra environment variable of one crate run, and why `web-test`
+/// sets it.
+#[derive(Debug, PartialEq, Eq)]
+struct RunVar {
+    name: &'static str,
+    value: &'static str,
+    why: &'static str,
+}
+
+/// TD-93: Safari 27.2 gives no `GPUAdapterInfo.subgroupMinSize`, and the
+/// debug glue of the runner asserts that wgpu reads a number.
+const NO_DEBUG: RunVar = RunVar {
+    name: "WASM_BINDGEN_NO_DEBUG",
+    value: "1",
+    why: "Safari 27.2 gives no GPUAdapterInfo.subgroupMinSize, and the runner's debug glue asserts a number (TD-93)",
+};
+
+/// The extra variables of the crate run of `package` in `browser`.
+fn run_vars(browser: Browser, package: &str) -> Vec<RunVar> {
+    if browser == Browser::Safari && package == "stem-worker" {
+        vec![NO_DEBUG]
+    } else {
+        Vec::new()
     }
 }
 
@@ -363,6 +399,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             None
         ));
         assert!(!crate_run_passed(false, output, Some("the_length")));
+    }
+
+    #[test]
+    fn chrome_gets_no_extra_variable_for_the_stem_worker() {
+        assert_eq!(run_vars(Browser::Chrome, "stem-worker"), []);
+    }
+
+    #[test]
+    fn safari_gets_no_extra_variable_for_the_other_crates() {
+        for package in ["app", "decode-worker", "stem-protocol", "engine"] {
+            assert_eq!(run_vars(Browser::Safari, package), [], "{package}");
+        }
+    }
+
+    #[test]
+    fn safari_turns_off_the_debug_glue_for_the_stem_worker() {
+        let vars = run_vars(Browser::Safari, "stem-worker");
+        assert_eq!(
+            vars.iter().map(|v| (v.name, v.value)).collect::<Vec<_>>(),
+            [("WASM_BINDGEN_NO_DEBUG", "1")]
+        );
+        assert!(vars[0].why.contains("subgroupMinSize"), "{}", vars[0].why);
     }
 
     #[test]

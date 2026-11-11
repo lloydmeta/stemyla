@@ -5,6 +5,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 ## Which browser
 
 * Safari is the local default.  `safaridriver` failed every session for part of 2026-10-18 ("The session timed out while connecting to a Safari instance") and worked again later that day.  Try Safari first.  If a session times out, quit Safari and retry: on 2026-10-22, sessions timed out while Safari was open, also outside the sandbox, and worked once it was quit.  If they still time out, use `--browser chrome` and say in the PR that Safari is unverified.
+* In Safari, `web-test` sets `WASM_BINDGEN_NO_DEBUG=1` for the crate run of `stem-worker` only, and prints why (TD-93).  To run that crate by hand in Safari, set it too.
 * A probe that leaves its WebDriver session open makes later sessions fail with "already paired with another WebDriver session".  End stale sessions before retrying.
 * Chrome needs a Chrome for Testing chromedriver of Chrome's major version, in `CHROMEDRIVER`.  Take the build for the CPU of the Mac: `mac-x64` for an Intel Mac, `mac-arm64` for Apple silicon ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)).  Keep it outside the repo and reuse it rather than downloading it again each session.  Chrome updates itself: on 2026-10-29 it went from 155 to 156 during a run, and chromedriver 155 still drove it, with a warning ("has not been tested with Chrome version 156").
 

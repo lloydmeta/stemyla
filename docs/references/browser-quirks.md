@@ -50,7 +50,7 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-10, with WebCodecs 
 
 Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  `GPUAdapterInfo.subgroupMinSize` is `undefined`, and wgpu reads it as a number.
 
-* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in a Safari `web-test` (TD-93).  With `WASM_BINDGEN_NO_DEBUG=1`, both pass.  The f16 test then needs the text of the next entry.
+* The code: the debug glue of `wasm-bindgen-test-runner` asserts the number, so two GPU tests fail in Safari.  So `web-test` sets `WASM_BINDGEN_NO_DEBUG=1` for the crate run of `stem-worker` in Safari (TD-93), and both pass.  The f16 test then needs the text of the next entry.  The release build has no such assert: `e2e selftest --browser safari` passed on 2026-11-11.
 * Rule: VERIFY-1.
 
 ## WebKit words a WGSL compile error in its own way

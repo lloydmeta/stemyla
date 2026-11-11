@@ -475,17 +475,15 @@ The worker's probe measures the encoder's delay through `AudioDecoder`, so it as
 
 * Fix: a CI runner with an AAC encoder, such as `macos-latest`, that runs the real-encode test and `e2e save`.
 
-### TD-93: two GPU tests fail in a Safari 27.2 `web-test`
+### TD-93: a Safari `web-test` turns off the debug glue of the stem worker
 
 This entry concerns VERIFY-1.
 
-`an_f16_variant_the_browser_rejects_keeps_f32_weights` and `a_read_back_is_copied_into_wasm_memory_once` (`worker/src/web/tests.rs`) fail in `web-test --browser safari` on Safari 27.2.  wgpu reads `GPUAdapterInfo.subgroupMinSize`, and Safari 27.2 gives `undefined` (`references/browser-quirks.md`).  `wasm-bindgen-test-runner` makes debug glue, unless `WASM_BINDGEN_NO_DEBUG` is set.  That glue asserts a number, and the test fails.  Both fail the same way at `69e63db`, before M4 of `plans/completed/m4a.md`.  Chrome passes both.  The GPU code runs in the stem worker.  Its release build has no debug glue and no such assert.  No test shows what a user of Safari 27.2 sees when the worker opens the GPU.
+wgpu 30.0.1 reads `GPUAdapterInfo.subgroupMinSize` as a number, and Safari 27.2 gives `undefined` (`references/browser-quirks.md`).  The debug glue of `wasm-bindgen-test-runner` asserts a number.  So `an_f16_variant_the_browser_rejects_keeps_f32_weights` and `a_read_back_is_copied_into_wasm_memory_once` (`worker/src/web/tests.rs`) failed in a Safari `web-test`.  Since M2 of `plans/active/tech-debt-rungs.md`, `web-test` sets `WASM_BINDGEN_NO_DEBUG=1` for the crate run of `stem-worker` in Safari only, and prints why (`run_vars` in `xtask/src/web_test.rs`).  Both tests then pass in Safari 27.2 (2026-11-11).  The variable turns off each debug assert of that crate run, not only this one.
 
-A second cause hid behind the first.  On 2026-11-11, with `WASM_BINDGEN_NO_DEBUG=1`, the read-back test passed in Safari 27.2.  The f16 test then failed on its assert of the compile text.  WebKit's WGSL compiler says "Expected a Identifier", and the test wanted "pars", from Chrome's Tint.  The test now takes the text of each browser, and still checks that the text names the compile failure (finding 2-2 of review round 2 of M4).  With `WASM_BINDGEN_NO_DEBUG=1`, both tests then passed in Safari 27.2, and both passed in Chrome 157.
+The release build of the stem worker has no debug glue.  On 2026-11-11, `xtask e2e selftest --browser safari` with the f16 weights passed in Safari 27.2 on an Apple M2 Pro: the worker opened the GPU, and the worst stage was 69.4 dB.  So a user of Safari 27.2 gets a working GPU.
 
-`xtask e2e selftest --browser safari` runs the release build of the stem worker on the GPU.  So it would show what a user of Safari 27.2 sees.  It needs the model, and nobody ran it on Safari 27.2 in M4.
-
-* Fix: a wgpu release that reads `subgroupMinSize` as optional.  Until then, run the two tests in Safari with `WASM_BINDGEN_NO_DEBUG=1`.  It turns off each debug assert of the run, not only this one.
+* Fix: a wgpu release that reads `subgroupMinSize` as optional.  Then remove `NO_DEBUG` from `run_vars`.  A draft wgpu issue is with the maintainer, near [gfx-rs/wgpu#10882](https://github.com/gfx-rs/wgpu/issues/10882).
 
 ### TD-94: Chrome on Windows has no AAC encoder at 256 kbit/s
 
