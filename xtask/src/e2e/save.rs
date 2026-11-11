@@ -101,19 +101,19 @@ const ONE_MIB: f64 = 1_048_576.0;
 /// D11: how much more a 10-minute save may grow the page's WebAssembly
 /// memory than a 1-minute save, in bytes.  The save's reader holds 3 spans
 /// of 65,536 frames of each lane (`SAVE_AHEAD`), whatever the song's
-/// length.  So the two saves need the same memory.  But the growth depends
-/// on where the allocator finds free blocks, so in Safari it has two
-/// levels for the same requests (TD-97; step A of
+/// length.  So the two saves need the same memory.  But in Safari the
+/// growth has two levels, whatever the length (TD-97).  Step A of
 /// `plans/active/tech-debt-rungs-m2-td97.md` saw the same requests in each
-/// measured save).  The largest pair seen is +1,900,544 bytes (MP3 of CI
-/// run 43008561411).  The extremes of single growths, 5,505,024 (step 9)
-/// and 7,602,176, give a worst pair of 2,097,152 bytes; 3 MiB is 1 MiB
-/// above it.  A minute of 16-bit stereo at 44.1 kHz is 10,584,000 bytes.
-/// At one level, the 9 minutes more fail above 3,145,728 / 9 = 349,525
-/// bytes a minute: a save that keeps about 1/30 of the song's 16-bit
-/// audio.  In the worst layout seen (1-minute high, 10-minute low), they
-/// fail above (3,145,728 + 2,097,152) / 9 = 582,542 bytes a minute: about
-/// 1/18 of it.
+/// measured save, all at the high level.  So the allocator's layout is the
+/// likely cause; the bound does not depend on the cause.  The largest pair
+/// seen is +1,900,544 bytes (MP3 of CI run 43008561411).  The extremes of
+/// single growths seen, 5,505,024 (step 9) and 7,602,176, are 2,097,152
+/// bytes apart; 3 MiB is 1 MiB above that.  A minute of 16-bit stereo at
+/// 44.1 kHz is 10,584,000 bytes.  At one level, the 9 minutes more fail
+/// above 3,145,728 / 9 = 349,525 bytes a minute: a save that keeps about
+/// 1/30 of the song's 16-bit audio.  In the worst layout of those extremes
+/// (1-minute high, 10-minute low), they fail above (3,145,728 + 2,097,152)
+/// / 9 = 582,542 bytes a minute: about 1/18 of it.
 pub(super) const WASM_BOUND_BYTES: f64 = 3.0 * ONE_MIB;
 /// The limit of the `e2e save` step in CI's `browser-tests` job
 /// (`timeout-minutes`), in seconds.  It is the longest that every wait of a
@@ -1805,13 +1805,15 @@ mod tests {
         }
     }
 
-    /// MEM-4, with literal values so that a wider bound fails the test: a
-    /// 10-minute save that keeps a part of the song's 16-bit audio fails.
-    /// A minute of 16-bit stereo at 44.1 kHz is 10,584,000 bytes.  At one
-    /// level (5,636,096 for both lengths), keeping 1/30 of the 9 minutes
-    /// more adds 3,175,200 bytes.  In the worst layout seen (1-minute high
-    /// at 7,602,176, 10-minute low at 5,505,024), keeping 1/18 adds
-    /// 5,292,000 bytes, so the 10-minute save grows by 3,194,848 bytes more.
+    /// MEM-4, with literal values: a 10-minute save that keeps a part of
+    /// the song's 16-bit audio fails.  So a bound wide enough to pass a save
+    /// that keeps 1/30 of the song fails this test.  A minute of 16-bit
+    /// stereo at 44.1 kHz is 10,584,000 bytes.  At one level (5,636,096 for
+    /// both lengths), keeping 1/30 of the 9 minutes more adds 3,175,200
+    /// bytes.  The worst layout of the extremes of single growths seen has
+    /// the 1-minute save high (7,602,176) and the 10-minute save low
+    /// (5,505,024).  There, keeping 1/18 adds 5,292,000 bytes.  So the
+    /// 10-minute save grows by 3,194,848 bytes more.
     #[test]
     fn a_save_that_keeps_a_part_of_the_song_fails() {
         let pairs = [(5_636_096.0, 8_811_296.0), (7_602_176.0, 10_797_024.0)];

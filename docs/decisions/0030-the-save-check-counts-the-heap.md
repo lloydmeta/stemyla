@@ -2,7 +2,7 @@
 
 Status: rejected (2026-11-11, by the maintainer: "writing a custom allocator is insane overengineering"; proposed on 2026-11-11 by the agent, in step 11 of M2 of `plans/active/tech-debt-rungs.md`)
 
-The maintainer's answer: "I think you should simply measure and choose some kind of sane tolerance.  If it _really_ really makes no sense (prove why), then we can think again.  And avoid this kind of unjustifiable overengineering."  So D11 keeps the growth of the page's WebAssembly memory, and `WASM_BOUND_BYTES` is 3 MiB, from the spread measured in step 9, in CI run 43008561411 and in steps A and C (TD-97, closed).  The text below is the proposal as it was.
+The maintainer's answer: "I think you should simply measure and choose some kind of sane tolerance.  If it _really_ really makes no sense (prove why), then we can think again.  And avoid this kind of unjustifiable overengineering."  So D11 keeps the growth of the page's WebAssembly memory.  `WASM_BOUND_BYTES` is 3 MiB, from the spread measured in step 9, in CI run 43008561411 and in steps A and C (TD-97, closed).  The text below is the proposal as it was.
 
 ## Context
 
