@@ -42,6 +42,8 @@ The triage of the entries that M4A (PR #43) added, on 2026-11-11, at `ee3728e`:
 | Upstream or design | TD-79, TD-80, TD-86, TD-90 | Each waits for a reference digest, a Symphonia change, or a design. |
 | Left for a later rung | TD-7, TD-53, TD-57, TD-64, TD-66 | The old rung 2 entries that are not Safari or tools (Decision log, 2026-11-11). |
 
+M2 added two entries (step 9).  Each is left for a later rung.  TD-96 has its causes outside the repo.  TD-97 waits for the cause of a growth of the page's memory.
+
 The facts of the tools on 2026-11-11, from crates.io:
 
 * Trunk: the pin is 0.21.14, and the latest is 0.22.1 (2026-10-26).  Step 3 of M2 moved the pin to 0.22.1.  0.22.0 locks the dist folder, and keeps the lock file there ([v0.22.0](https://github.com/trunk-rs/trunk/releases/tag/v0.22.0)).
@@ -89,7 +91,7 @@ The branch is `tech-debt/2026-11-11`, from `main` at `ee3728e`.  On 2026-11-11 t
 #### Maintainer steps
 
 * None that blocks the run.  Safari has Develop > Allow Remote Automation on.  The weights for `e2e selftest` are on this Mac, outside the repo (ASSET-1).
-* After the run: file the draft wgpu issue of step 6, if it is still wanted.  Make the macOS job a required check after a few green runs.
+* After the run: file the draft wgpu issue of step 6, if it is still wanted.  Make the macOS job a required check after a few green runs, and after the fix of TD-97, since TD-97 can fail the job.
 
 #### Preflight
 
@@ -227,6 +229,7 @@ Each step is one commit with its own test, so a revert of one commit undoes one 
 * 2026-11-11, agent: step 4 goes before step 2, so the Safari baseline of every crate comes before the new wasm-bindgen.  Step 2 waits as a patch in the orchestrator's scratchpad, `m2/step2-wasm-bindgen-0.2.130.patch`.
 * 2026-11-11, agent: M2's agent decisions are in the Decision log of `plans/completed/tech-debt-rungs-m2.md`.  Among them: the Safari timeouts came from the locked screen; step 2 keeps caret requirements (`SETTLED_CRATES`); step 10 adds the need `aac` to `STEMYLA_REQUIRE`; the `macos` job installs Trunk with `xtask setup`.
 * 2026-11-11, agent: the branch `tech-debt/2026-11-11` moved by fast-forward from `ff633a3` to `ee3728e`, so that M2 starts with TD-92 to TD-95 in the register.
+* 2026-11-11, agent: the intent review of M2, round 1, found 3 significant should-fix findings.  I1-1: the PR body now holds the draft wgpu issue, as TD-93 says.  I1-2: the CI result of the code head goes in Progress.  I1-3: the Safari skip of `an_output_left_behind_by_a_busy_page_is_replaced` goes to the team, with review round 6.  The nits I1-4 and I1-6 are fixed in the PR body and the triage.
 
 ## Outcomes and retrospective
 
