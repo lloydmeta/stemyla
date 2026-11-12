@@ -214,12 +214,12 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
   | Part of Safari's loss | Evidence | Share of `v64`'s loss |
   | - | - | - |
-  | WebKit sets workgroup memory to zero with thread 0, byte by byte | Chrome's MSL with WebKit's zero-init and clamps, timed through Metal: 1.49 times at K 256, 1.13 at K 1,024 | the emulation's estimate: 64 % at K 256, 30 % at K 1,024.  Other estimates at K 256: 55 % (Step 3's fit), about 34 % (`v64-g4`), about 26 % (the `wg10k` control) |
+  | WebKit sets workgroup memory to zero with thread 0, byte by byte | Chrome's MSL with WebKit's zero-init and clamps, timed through Metal: 1.49 times at K 256, 1.13 at K 1,024 | the emulation's estimate: 64 % at K 256, 30 % at K 1,024.  Other estimates at K 256: 55 % (Step 3's fit), about 34 % (`v64-g4`), about 26 % (the `wg10k` control).  The `v64-g4` estimate assumes that `v64-g4`'s own extra cost is the same in both browsers.  Safari's time with `v64-g4` did not go down (1.014 to 1.033 times `v64`).  The browser ratio fell because Chrome got about 1.20 times slower |
   | Bounds clamps | 2 % to 5 % in each browser (`v64-clamp2`, robustness off in Chrome) | in the row above |
   | A K loop about 1.35 times slower | Step 3's fit; not given by any tested form | the rest; most of fused attention's 1.52 |
   | Ruled out | barriers, `unpack2x16float`, the GPU's state, the thread maximum of Safari's MSL, a load of 64 registers; fast math and the loop guard by source | |
 
-  Two variants are slower than `v64` in both browsers.  An unrolled inner loop: 1.49 to 1.93.  128 x 128 with 8 x 8 for each thread: 1.30 to 1.86.  Four tiles for each workgroup (`v64-g4`) is slower in Chrome (1.20), with no effect in Safari.  `s64`'s 10 times in Safari is its loop-indexed private array: with constant indices it runs at `i64`'s rate.  Time-axis attention in Safari: fused 3.47 s for each chunk, split 3.53 s; in Chrome 2.29 s and 1.85 s.
+  Two variants are slower than `v64` in both browsers.  An unrolled inner loop: 1.49 to 1.93.  128 x 128 with 8 x 8 for each thread: 1.30 to 1.86.  Four tiles for each workgroup (`v64-g4`) is slower in Chrome (1.20), and not faster in Safari (1.014 to 1.033).  `s64`'s 10 times in Safari is its loop-indexed private array: with constant indices it runs at `i64`'s rate.  Time-axis attention in Safari: fused 3.47 s for each chunk, split 3.53 s; in Chrome 2.29 s and 1.85 s.
 
 ## Decision log
 
