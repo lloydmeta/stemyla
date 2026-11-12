@@ -179,7 +179,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * [x] Plan review round 1 (2026-11-13): 9 should-fix and 4 nits, each applied.
 * [x] Plan review round 2 (2026-11-13): 5 should-fix and 3 nits, each applied.
 * [x] Step 1 (2026-11-13): the sources.  `m3/sources.md` gives each fact with its file, lines and commit.  The table is in Surprises.
-* [ ] Step 2: the scratch worktree and its harness.
+* [x] Step 2 (2026-11-13): the scratch worktree and its harness, on `scratch/m3-variants` (`9a30c16`, `4cd30a2`, `047fbb8`).  The six matmul variants (with f16) and `attention-u` pass `every_kernel_fits_the_default_limits`, `sources_are_complete` and `workgroup_memory_within_defaults`.  `STEMYLA_REQUIRE=gpu,f16 cargo test --release --test kernels` passes natively (19 tests, `check_kernels_accepts_all` included).  `Gpu::check_kernels` accepted each variant in Safari 27.2 and Chrome 157 (`runs/smoke-*/bench.log`).  `attention-u` matches `attention_cpu` natively (relative error 6.4e-8).
 * [ ] Step 3: the controls.
 * [ ] Step 4: matmul variants.
 * [ ] Step 5: the clamp's cost, alone.
@@ -214,6 +214,11 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
 * 2026-11-13, agent (team leader), plan review round 1: `v64-2d` and `v64-bk32` are replaced by `v64-u`, `v64-clamp2` and `v64-bar`.  Why: the 2D form has the same number of clamps as an unrolled 1D form, and BK 32 without a pad adds 4-way bank conflicts (`bank_conflicts` in `lib.rs`).  Each new variant changes one thing.
 * 2026-11-13, agent (team leader), plan review round 1: Chrome's toggles run before the native test, which runs only if they do not settle the cost.  Why: the toggles need no new pipeline code.
+
+* 2026-11-13, agent (implementer), Step 2: three more controls run in every page beside FMA and copy.  `fma64` is the FMA control with 64 chains of 32, the same FMAs with 64 live values.  `wg10k` declares v64's 10 KiB of workgroup memory and does almost no work, at v64's grid on `freq qkv` (2,064 workgroups).  `wg0` is the same with no workgroup memory.  Why: Step 1 found two differences that FMA and copy do not test.  Safari sets workgroup memory to zero with one thread, byte by byte.  Safari gives Metal no thread maximum, which can limit the registers of each thread.
+* 2026-11-13, agent (implementer), Step 2: `v128-u` is timed in the set of Step 4, and its figure is read only if `v64-u` shows an effect.  Why: a second set costs more than one more kernel in the first set.
+* 2026-11-13, agent (implementer), Step 2: on the scratch branch, calibration chooses only among the four kernels of `main`, so split attention uses the same matmul as on `main`.  A build with `M3_SHAPES` set times only the shapes that it names.
+* 2026-11-13, agent (implementer), Step 2: `attention-u` is built now: fused attention with each loop over `kk` and `k` unrolled, so each read of `buf` and `red` there is a loop-invariant base plus a constant.  Step 6 times it only if Step 4 supports the unrolled form.
 
 ## Outcomes and retrospective
 
