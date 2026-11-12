@@ -178,7 +178,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
 * [x] Plan review round 1 (2026-11-13): 9 should-fix and 4 nits, each applied.
 * [x] Plan review round 2 (2026-11-13): 5 should-fix and 3 nits, each applied.
-* [ ] Step 1: the sources.
+* [x] Step 1 (2026-11-13): the sources.  `m3/sources.md` gives each fact with its file, lines and commit.  The table is in Surprises.
 * [ ] Step 2: the scratch worktree and its harness.
 * [ ] Step 3: the controls.
 * [ ] Step 4: matmul variants.
@@ -190,7 +190,21 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-11-13, Step 1: the compiler sources, read on 2026-11-13 at WebKit `5447ffbd5817eb8a1de9c0540bb8a6fe37db555d`, Dawn `85b7901759827252adf542adf7a1d2858515b12e`, Chromium `dafa2a921b73b46a0cd9c687b3ae7724ce7983c2` (each `main`, 2026-11-12) and naga, wgpu-hal and wgpu-types 30.0.1.  Safari 27.2 and Chrome 157 ship from release branches, which can differ from `main`.  The full list with line numbers is `m3/sources.md`.  The implementer read the two WebKit facts in the last two rows again in the raw files.
+
+  | Access or code | WebKit (Safari) | Tint (Chrome) | naga 30.0.1 |
+  | - | - | - | - |
+  | Fixed-size array, runtime index (private, function, workgroup) | `a[__wgslMin(i, N - 1)]` (`WGSL/BoundsCheck.cpp:220-261`) | `a[min(i, N - 1)]`; integer range analysis removes it when it proves `i <= N - 1` (`robustness.cc:233-290`, on by default in Chromium: `gpu/config/gpu_finch_features.cc:329-330`) | `a.inner[min(i, N - 1)]` |
+  | Constant index into a fixed-size array | no clamp | no clamp | no clamp |
+  | Runtime-sized storage array | clamp to `arrayLength - 1`, also for a constant index | clamp to `arrayLength - 1` | clamp from `_buffer_sizes` |
+  | Vector | always a clamp, also for a constant index on a non-constant vector | a clamp, removed when proved | a clamp |
+  | Turn the clamps off | no option (`WGSL/WGSL.cpp:147`) | `disable_robustness` | `bounds_checks = false` |
+  | Loop guard | Apple8 (M2 Pro): a counter that is not `volatile` and never changes, so it folds away; Apple9 and later: a `volatile` counter (`MetalFunctionWriter.cpp:92-95`, `425-433`) | only on a loop that it cannot prove finite | on every loop (`force_loop_bounding`) |
+  | Metal math | `MTLMathModeRelaxed`, fast functions (`WebGPU/ShaderModule.mm:47-72`) | `math_mode(relaxed)` on macOS 15 and later | Metal default |
+  | Workgroup memory set to zero | thread 0 alone writes each byte, in a loop, then one barrier (`GlobalVariableRewriter.cpp:2552-2594`, `2666-2786`; `MetalFunctionWriter.cpp:1081-1095`) | each thread writes a part, then one barrier (`zero_init_workgroup_memory.cc:136-185`) | thread 0 writes each variable with `= {}`, then one barrier |
+  | `[[max_total_threads_per_threadgroup]]` | not written, and not set on the pipeline descriptor (`MetalFunctionWriter.cpp:1787-1791`, `WebGPU/ComputePipeline.mm:43-55`) | written from the workgroup size (`printer.cc:428-434`) | written from the workgroup size |
+
+  So the clamp has the same form in both browsers.  Three differences remain: Chrome removes the clamps that it can prove, Safari sets workgroup memory to zero with one thread, byte by byte, and Safari gives Metal no maximum number of threads.
 
 ## Decision log
 
