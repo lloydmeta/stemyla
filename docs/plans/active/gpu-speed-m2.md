@@ -60,8 +60,9 @@ The state at the start, on 2026-11-12, at commit `91923ae` on branch `gpu-speed/
 * Run: one new browser session that opens the song, loads the model, calibrates and separates once.
 * Chunk median: the median of the times of chunks 2 to N of one run, from the `chunk k/N: X s` lines.  Chunk 1 is left out: it is the warm-up of M1.
 * Key: the browser name (`safari` or `chrome`), the adapter text, and the host's chip (`sysctl -n machdep.cpu.brand_string`, for example `Apple M2 Pro`; `unknown` where the command fails).  The baselines file has at most one entry for each key.  The adapter text alone is the same on each Apple silicon Mac (`apple metal-3`, `apple apple apple`).
-* Baseline: the median of the chunk medians of the runs of an update, for one key.
-* Tolerance: a percentage above the baseline.  A gated run fails when its chunk median is more than the baseline times (1 + tolerance / 100).
+* Chunk lower quartile: the lower quartile of the times of chunks 2 to N of one run, by nearest rank: sort the times, and take the value at index floor((n - 1) / 4).  For 10 chunks, that is the third fastest.  The gate reads it, not the chunk median (Decision log, Step 5).
+* Baseline: the median of the chunk lower quartiles of the runs of an update, for one key.
+* Tolerance: a percentage above the baseline.  A gated run fails when its chunk lower quartile is more than the baseline times (1 + tolerance / 100).
 
 ## Plan of work
 
@@ -139,7 +140,7 @@ Each in the commit of the step that makes it true (DOC-1):
 * `docs/invariants.md`, GPU-3, "Enforced by" (Step 4): `e2e perf` refuses a fallback or SwiftShader adapter as a pass or a baseline.  The `model loaded`, `selftest` and `bench` lines name the adapter and `isFallbackAdapter`.
 * `docs/tech-debt.md`, TD-10 (Step 1, then Step 4): the log part of its fix is done.  Left: nothing ties a new default kernel to a pass on a named real GPU; the PR still names it.
 * `CLAUDE.md` (Step 4, through the orchestrator): no new line.  The comment of the `check --tier push` line names the gate, for example `# before each push and each review round: the fmt, clippy, test, docs-check and Trunk lines; the perf gate when STEMYLA_PERF_WEIGHTS names the model`.  The line `e2e <scenario>` already covers `e2e perf`.
-* `.claude/rules/gpu.md` (Step 4, through the orchestrator): one bullet: "Speed: `e2e perf` gates each chunk's median time against `xtask/perf-baselines.json`.  Lower a baseline only with `--update-baselines` from 5 runs or more."
+* `.claude/rules/gpu.md` (Step 4, through the orchestrator): one bullet: "Speed: `e2e perf` gates the lower quartile of the chunk times against `xtask/perf-baselines.json`.  Lower a baseline only with `--update-baselines` from 5 runs or more."
 * Parent plan (through the orchestrator, at the checkpoint before review round 1): a Surprises line with the baselines, the spread, the tolerance and the cost of a flip of each browser, and the profile groups.
 
 ### Before review round 1
@@ -190,7 +191,9 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * `only_the_perf_gate_runs_a_browser_test` (renamed from `check_never_runs_the_browser_or_publish`) at its last `assert_eq!` (line 2151, left `[]`).
   * `tier_commit_adds_no_perf_gate_line` passed with that stub.  With a second stub that did not read `asked`, it failed at `assert_eq!(gated, plain)` (line 2123, left a plan with the gate lines).
   * `check --tier push --dry-run` with `STEMYLA_PERF_WEIGHTS` set prints the two run lines after the Trunk line, Chrome first.  Without it, it prints the skip line.
-* [ ] Step 5: the baselines, measured.
+* [ ] Step 5: the baselines, measured (2026-11-12).
+  * 5.1 at `7265b9e` gave tolerances of 22 % and 28 % on the chunk median (Surprises), over the 20 % limit of 5.4.  The team leader chose the chunk lower quartile (Decision log).
+  * First failures of the change: `the_lower_quartile_is_the_value_at_a_quarter_by_nearest_rank` at `assert_eq!(lower_quartile(&ten), 4.8)` (`perf.rs:571`, left 0.0), with a stub that gave 0.0.  With the tests on the lower quartile and the gate still on the median, `the_gate_fails_only_over_the_bound` failed at `assert!(text.contains(part))` (`perf.rs:823`, "chunk lower quartile 5.50 s: chunk median 4.70 s, ...").  `an_entry_holds_the_runs_and_the_median_of_their_lower_quartiles` failed at `assert_eq!(e.baseline, 5.0)` (`perf.rs:904`, left 4.7).
 * [ ] Step 6: the docs and the debt.
 * [ ] Before review round 1.
 * [ ] Review rounds.
@@ -200,6 +203,16 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, plan: M1's logs at `0c56d0a` give the adapter texts `apple metal-3` (Chrome 157) and `apple apple apple` (Safari 27.2).  Neither names the chip.
 * 2026-11-12, Step 3: `GPUAdapterInfo.isFallbackAdapter` is `false` in Safari 27.2 and in Chrome 157.0.8103.51 on the M2 Pro: both `model loaded` lines give `fallback adapter no`.
 * 2026-11-12, Step 3: one trial run in each browser, before the baselines.  Chrome: chunk median 4.70 s, 52.1 s in all, 1.33 TFLOP/s, `matmul v64,v64, attention freq`.  Safari 27.2: chunk median 7.50 s, 82.2 s in all, 0.83 TFLOP/s, `matmul v64,i64, attention fused`.  So Safari's calibration chose `i64` for the small products in this run, not `v64` as in M1's logs (small: `i64` 1.20 s, `v64` 1.16 s there).  The near choice flips between runs.
+* 2026-11-12, Step 5.1, at `7265b9e`: `e2e perf --runs 5 --update-baselines`, Chrome then Safari.  Key `Apple M2 Pro` for both; fallback adapter `no` in each run.
+  * Chrome 157.0.8103.51, `apple metal-3`, `matmul v64,v64, attention freq` in all 5 runs.  Chunk medians in order: 4.75, 5.20, 4.70, 4.70, 4.70 s.  Baseline 4.70 s, spread (5.20 - 4.70) / 4.70 = 10.6 %, tolerance 22 %.
+  * Safari 27.2, `apple apple apple`.  Runs 1, 2, 3 and 5 chose `matmul v64,v64, attention fused`; run 4 chose `matmul v64,i64, attention fused`.  Chunk medians in order: 7.40, 7.40, 8.40, 7.50, 7.40 s.  Baseline 7.40 s, spread 13.5 %, tolerance 28 %.
+  * No drift with the order: the slow runs are run 2 (Chrome) and run 3 (Safari).
+  * Both tolerances are over 20 %, so Step 5.4 stops for a decision.
+  * The chunk times have two levels.  Most chunks are at a floor (Chrome 4.7 s, Safari 7.4 s), and others are 5 % to 25 % slower, in groups.  For example, Chrome run 2 had chunks 2 to 11 of 4.7, 5.7, 4.7, 4.7, 5.4, 5.6, 5.2, 4.7, 5.2 and 5.9 s.  A run's median rises when more than half of its chunks are slow.
+  * Other statistics of the same runs, by the same tolerance rule: the minimum of chunks 2 to N gives 4.7 s in each Chrome run and 7.4 s in each Safari run, so a tolerance of 10 %.  The lower quartile gives Chrome 4.7 s in each run (10 %), and Safari 7.4, 7.4, 7.8, 7.4, 7.4 s (10.8 %, so 11 %).
+  * The one natural flip (Safari run 4, `v64,i64`) had a median 1.4 % over the baseline.
+  * Wall time for each update: Chrome 350 s, Safari 505 s.  That includes the debug `xtask` and `long_song`.
+  * One `ps` sample during the Chrome runs gave WindowServer 48 % CPU; no other process was over 4 %.  The agent session ran beside each run, as it does in a push check.
 
 ## Decision log
 
@@ -224,6 +237,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 
 * 2026-11-12, agent (implementer): GPU-3's "Enforced by" names the test `never_a_pass_names_each_reason`, not the function `never_a_pass`.  Why: `docs-check` reads each name in that line as a test name.
 * 2026-11-12, agent (implementer): the skip line of the perf gate shows `--browser chrome|safari --weights $STEMYLA_PERF_WEIGHTS`.  Why: one skip line stands for both run lines.
+* 2026-11-12, agent (team leader), Step 5: the gate, the baseline, `tolerance_pct`, `update_refusal` and the "faster than the baseline" note read the chunk lower quartile, not the chunk median.  `PerfResult` keeps the chunk median.  The other rules stay: at least 10 %, 2 x the slowest run's excess, and a Decision log line over 20 %.  Why: the noise only adds time, and a slower kernel moves every chunk, the floor too.  Under one-sided noise, a low quantile is the robust estimate ([Chen and Revels, "Robust benchmarking in noisy environments", 2016](https://arxiv.org/abs/1608.04295)).  The lower quartile, not the minimum, so that one fast chunk cannot move it.  The 5 runs of 5.1: Chrome 22 % on the median against 10 % on the lower quartile; Safari 28 % against 11 %.
 
 ## Outcomes and retrospective
 

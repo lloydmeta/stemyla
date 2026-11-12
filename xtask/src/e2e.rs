@@ -77,12 +77,12 @@
 //!   (`--weights`; M2 of `docs/plans/active/gpu-speed.md`, `e2e/perf.rs`).
 //!   Each run writes `<out>/perf-<browser>-<n>.json`: the browser and its
 //!   version, the adapter and its `isFallbackAdapter`, the kernels, the
-//!   time of each chunk, the median of chunks 2 to N, the whole time and
-//!   the matmul rate.  With `--query profile=1`, it adds the GPU time in
-//!   four groups.  The key of a baseline in `xtask/perf-baselines.json` is
-//!   the browser, the adapter text and the host's chip (`sysctl`).  A run
-//!   fails when its chunk median is over the key's baseline by more than
-//!   the tolerance.  With no baseline it is not gated; `--gate` makes that
+//!   time of each chunk, the median and the lower quartile of chunks 2 to
+//!   N, the whole time and the matmul rate.  With `--query profile=1`, it
+//!   adds the GPU time in four groups.  The key of a baseline in
+//!   `xtask/perf-baselines.json` is the browser, the adapter text and the
+//!   host's chip (`sysctl`).  A run fails when its chunk lower quartile is
+//!   over the key's baseline by more than the tolerance.  With no baseline it is not gated; `--gate` makes that
 //!   a failure.  A fallback or SwiftShader adapter, `--swiftshader`,
 //!   `--headed`, f32 weights, or a query that sets `chunk`, `overlap`,
 //!   `mm`, `attn` or `weights` is never a pass: `--gate` and
@@ -2121,7 +2121,8 @@ fn perf(o: &Opts) -> Result<()> {
                 let file = o.out.join(format!("perf-{browser}-{n}.json"));
                 std::fs::write(&file, serde_json::to_string_pretty(&result)?)?;
                 p.note(&format!(
-                    "perf: {browser} {version}, run {n}: chunk median {:.2} s, whole {:.1} s, {:.2} TFLOP/s, kernels {}, {} weights, adapter {} (fallback adapter {}); {}",
+                    "perf: {browser} {version}, run {n}: chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, {:.2} TFLOP/s, kernels {}, {} weights, adapter {} (fallback adapter {}); {}",
+                    result.chunk_lower_quartile,
                     result.chunk_median,
                     result.whole_secs,
                     result.tflops,

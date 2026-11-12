@@ -3,10 +3,14 @@
 //! profile run in four groups; the reasons that a run is never a pass;
 //! the gate; and the baselines file, `xtask/perf-baselines.json`.
 //!
-//! The chunk median is the median of the times of chunks 2 to N of one
-//! run.  Chunk 1 is the warm-up.  A baseline is the median of the chunk
-//! medians of the runs of an update.  A run fails the gate when its chunk
-//! median is more than the baseline times (1 + tolerance / 100).
+//! The chunk lower quartile is the lower quartile of the times of chunks 2
+//! to N of one run, by nearest rank ([`lower_quartile`]).  Chunk 1 is the
+//! warm-up.  The result also gives the chunk median.  A baseline is the
+//! median of the chunk lower quartiles of the runs of an update.  A run
+//! fails the gate when its chunk lower quartile is more than the baseline
+//! times (1 + tolerance / 100).  Interference only adds time to a chunk,
+//! and a slower kernel adds time to each chunk, so a low quantile is the
+//! figure that the noise moves least.
 
 use super::{Opts, chunk_done, number_after};
 use serde::{Deserialize, Serialize};
@@ -58,6 +62,9 @@ pub(super) struct PerfResult {
     pub chunks: Vec<f64>,
     /// The median of chunks 2 to N.
     pub chunk_median: f64,
+    /// The lower quartile of chunks 2 to N ([`lower_quartile`]): the
+    /// figure that the gate and the baselines read.
+    pub chunk_lower_quartile: f64,
     /// The whole separation, in seconds.
     pub whole_secs: f64,
     /// The matmul rate of the whole separation, in TFLOP/s.
@@ -86,7 +93,7 @@ pub(super) struct Run {
     /// 1 for the first run of the update.
     pub order: u32,
     pub kernels: String,
-    pub chunk_median: f64,
+    pub chunk_lower_quartile: f64,
 }
 
 /// The baseline of one key.
@@ -100,7 +107,7 @@ pub(super) struct Entry {
     /// The short SHA of `HEAD` at the update.
     pub commit: String,
     pub runs: Vec<Run>,
-    /// The median of the runs' chunk medians, in seconds.
+    /// The median of the runs' chunk lower quartiles, in seconds.
     pub baseline: f64,
     pub tolerance_pct: f64,
     /// The reason of a raise over the old tolerance, or empty.
@@ -132,6 +139,15 @@ fn median(values: &[f64]) -> f64 {
     } else {
         sorted[mid]
     }
+}
+
+/// The lower quartile of `values`, by nearest rank: the value at index
+/// floor((n - 1) / 4) of the sorted values.  For 10 values, the third
+/// fastest.  `values` must not be empty.
+fn lower_quartile(values: &[f64]) -> f64 {
+    let mut sorted = values.to_vec();
+    sorted.sort_by(f64::total_cmp);
+    sorted[(sorted.len() - 1) / 4]
 }
 
 /// The time of each chunk, chunk 1 first, from the `chunk k/N: X s`
@@ -217,6 +233,7 @@ pub(super) fn perf_result(
         kernels: kernels.to_string(),
         weights: weights.to_string(),
         chunk_median: median(&chunks[1..]),
+        chunk_lower_quartile: lower_quartile(&chunks[1..]),
         chunks,
         whole_secs,
         tflops,
@@ -347,9 +364,10 @@ pub(super) fn gate(result: &PerfResult, baseline: &Entry) -> Verdict {
     }
     let tol = baseline.tolerance_pct;
     let bound = baseline.baseline * (1.0 + tol / 100.0);
-    let margin = bound - result.chunk_median;
+    let margin = bound - result.chunk_lower_quartile;
     let mut text = format!(
-        "chunk median {:.2} s, baseline {:.2} s, tolerance {tol:.0} %, bound {bound:.2} s, margin {margin:.2} s ({:.1} % of the baseline)",
+        "chunk lower quartile {:.2} s (chunk median {:.2} s), baseline {:.2} s, tolerance {tol:.0} %, bound {bound:.2} s, margin {margin:.2} s ({:.1} % of the baseline)",
+        result.chunk_lower_quartile,
         result.chunk_median,
         baseline.baseline,
         100.0 * margin / baseline.baseline
@@ -368,28 +386,28 @@ pub(super) fn gate(result: &PerfResult, baseline: &Entry) -> Verdict {
             theirs.join("; ")
         ));
     }
-    if result.chunk_median < baseline.baseline * (1.0 - tol / 100.0) - EPSILON {
+    if result.chunk_lower_quartile < baseline.baseline * (1.0 - tol / 100.0) - EPSILON {
         text.push_str("\nfaster than the baseline by more than the tolerance: update the baseline");
     }
-    if result.chunk_median > bound + EPSILON {
+    if result.chunk_lower_quartile > bound + EPSILON {
         Verdict::Fail(text)
     } else {
         Verdict::Pass(text)
     }
 }
 
-/// The tolerance of a baseline from the chunk medians of its runs: the
+/// The tolerance of a baseline from the chunk lower quartiles of its runs: the
 /// larger of 10 and 2 x (slowest - baseline) / baseline x 100, rounded up
-/// to a whole percent.  It refuses fewer than [`MIN_RUNS`] medians.
-pub(super) fn tolerance_pct(medians: &[f64]) -> Result<f64, String> {
-    if medians.len() < MIN_RUNS {
+/// to a whole percent.  It refuses fewer than [`MIN_RUNS`] runs.
+pub(super) fn tolerance_pct(quartiles: &[f64]) -> Result<f64, String> {
+    if quartiles.len() < MIN_RUNS {
         return Err(format!(
             "{} runs: a tolerance needs {MIN_RUNS} or more",
-            medians.len()
+            quartiles.len()
         ));
     }
-    let base = median(medians);
-    let slowest = medians.iter().copied().fold(f64::MIN, f64::max);
+    let base = median(quartiles);
+    let slowest = quartiles.iter().copied().fold(f64::MIN, f64::max);
     let spread = 2.0 * (slowest - base) / base * 100.0;
     // Round off float noise first, so 12.000000000000002 gives 12.
     let spread = ((spread * 1e6).round() / 1e6).ceil();
@@ -416,8 +434,8 @@ pub(super) fn new_entry(
     if !results.iter().all(same) {
         return Err("the runs differ in browser, adapter or browser version".into());
     }
-    let medians: Vec<f64> = results.iter().map(|r| r.chunk_median).collect();
-    let tolerance_pct = tolerance_pct(&medians)?;
+    let quartiles: Vec<f64> = results.iter().map(|r| r.chunk_lower_quartile).collect();
+    let tolerance_pct = tolerance_pct(&quartiles)?;
     Ok(Entry {
         key: Key {
             browser: first.browser.clone(),
@@ -433,10 +451,10 @@ pub(super) fn new_entry(
             .map(|(r, order)| Run {
                 order,
                 kernels: r.kernels.clone(),
-                chunk_median: r.chunk_median,
+                chunk_lower_quartile: r.chunk_lower_quartile,
             })
             .collect(),
-        baseline: median(&medians),
+        baseline: median(&quartiles),
         tolerance_pct,
         raise: raise.to_string(),
     })
@@ -533,8 +551,8 @@ mod tests {
     /// Asserts, for a full log of a run with no profile lines:
     /// * the browser, its version, the adapter text and the fallback value;
     /// * the kernels and the weight format of the `kernels:` line;
-    /// * the time of each chunk, the chunk median, the whole time and the
-    ///   matmul rate;
+    /// * the time of each chunk, the chunk median, the chunk lower
+    ///   quartile, the whole time and the matmul rate;
     /// * no profile groups.
     #[test]
     fn a_full_log_gives_each_value() {
@@ -547,14 +565,34 @@ mod tests {
         assert_eq!(r.weights, "f16");
         assert_eq!(r.chunks, [5.3, 4.7, 4.6, 4.8]);
         assert_eq!(r.chunk_median, 4.7);
+        assert_eq!(r.chunk_lower_quartile, 4.6);
         assert_eq!(r.whole_secs, 52.0);
         assert_eq!(r.tflops, 1.33);
         assert_eq!(r.groups, None);
     }
 
     /// Asserts:
+    /// * 10 values give the third fastest;
+    /// * one of the 10 made much faster (4.7 s to 1.0 s) does not move it;
+    /// * 3 values give the fastest, 1 value gives itself;
+    /// * 5 values give the second fastest.
+    #[test]
+    fn the_lower_quartile_is_the_value_at_a_quarter_by_nearest_rank() {
+        let ten = [5.9, 4.7, 5.7, 4.8, 4.7, 5.4, 5.6, 5.2, 4.9, 5.2];
+        assert_eq!(lower_quartile(&ten), 4.8);
+        let mut outlier = ten;
+        outlier[1] = 1.0;
+        assert_eq!(lower_quartile(&outlier), 4.8);
+        assert_eq!(lower_quartile(&[7.4, 8.2, 7.9]), 7.4);
+        assert_eq!(lower_quartile(&[7.4]), 7.4);
+        assert_eq!(lower_quartile(&[3.0, 1.0, 5.0, 2.0, 4.0]), 2.0);
+    }
+
+    /// Asserts:
     /// * the median of chunks 2 to 4 (9.0, 4.0, 5.0, 6.0) is 5.0, not 5.5;
     /// * the median of chunks 2 to 5 (9.0, 4.0, 6.0, 5.0, 7.0) is 5.5;
+    /// * the lower quartile of chunks 2 to 4 (1.0, 4.0, 5.0, 6.0) is 4.0,
+    ///   not 1.0;
     /// * `chunks` keeps chunk 1.
     #[test]
     fn the_chunk_median_leaves_chunk_1_out() {
@@ -563,6 +601,8 @@ mod tests {
         assert_eq!(r.chunks[0], 9.0);
         let r = result_of(&log_of(&[9.0, 4.0, 6.0, 5.0, 7.0])).unwrap();
         assert_eq!(r.chunk_median, 5.5);
+        let r = result_of(&log_of(&[1.0, 4.0, 5.0, 6.0])).unwrap();
+        assert_eq!(r.chunk_lower_quartile, 4.0);
     }
 
     /// Asserts that a log fails, with a message that holds the given text,
@@ -735,7 +775,7 @@ mod tests {
                 .map(|order| Run {
                     order,
                     kernels: "matmul v64,v64, attention freq".into(),
-                    chunk_median: baseline,
+                    chunk_lower_quartile: baseline,
                 })
                 .collect(),
             baseline,
@@ -753,67 +793,78 @@ mod tests {
         }
     }
 
-    fn with_median(chunk_median: f64) -> PerfResult {
+    /// The sample run with `chunk_lower_quartile`, and its chunk median
+    /// of 4.7 s.
+    fn with_quartile(chunk_lower_quartile: f64) -> PerfResult {
         PerfResult {
-            chunk_median,
+            chunk_lower_quartile,
             ..sample()
         }
     }
 
     /// Asserts, with a baseline of 5.0 s and a tolerance of 10 %:
-    /// * a median of 5.5 s (the bound) passes, and the text gives the
-    ///   median, the baseline, the tolerance and the margin;
-    /// * a median of 5.51 s fails;
+    /// * a chunk lower quartile of 5.5 s (the bound) passes, and the text
+    ///   gives the chunk lower quartile, the baseline, the tolerance and the
+    ///   margin;
+    /// * a chunk lower quartile of 5.51 s fails, with a chunk median of
+    ///   4.7 s;
     /// * a run with profile groups is not gated, with the reason;
     /// * a run of a new browser version passes, with a line on the version;
     /// * a run of other kernels passes, with a line on the kernels;
-    /// * a median of 4.49 s passes, with the line to update the baseline;
-    /// * a median of 4.5 s passes with no such line.
+    /// * a chunk lower quartile of 4.49 s passes, with the line to update
+    ///   the baseline;
+    /// * a chunk lower quartile of 4.5 s passes with no such line.
     #[test]
     fn the_gate_fails_only_over_the_bound() {
         let base = entry(5.0, 10.0);
-        let (kind, text) = told(gate(&with_median(5.5), &base));
+        let (kind, text) = told(gate(&with_quartile(5.5), &base));
         assert_eq!(kind, "pass", "5.5 s: {text}");
-        for part in ["5.50 s", "5.00 s", "10 %", "margin 0.00 s"] {
+        for part in [
+            "chunk lower quartile 5.50 s",
+            "baseline 5.00 s",
+            "10 %",
+            "margin 0.00 s",
+        ] {
             assert!(text.contains(part), "{part}: {text}");
         }
-        let (kind, text) = told(gate(&with_median(5.51), &base));
+        let (kind, text) = told(gate(&with_quartile(5.51), &base));
         assert_eq!(kind, "fail", "5.51 s: {text}");
         let profiled = PerfResult {
             groups: Some(Groups::default()),
-            ..with_median(9.0)
+            ..with_quartile(9.0)
         };
         let (kind, text) = told(gate(&profiled, &base));
         assert_eq!(kind, "not gated", "a profile run: {text}");
         assert!(text.contains("profile"), "{text}");
         let newer = PerfResult {
             version: "158.0.7100.0".into(),
-            ..with_median(5.0)
+            ..with_quartile(5.0)
         };
         let (kind, text) = told(gate(&newer, &base));
         assert_eq!(kind, "pass", "a new version: {text}");
         assert!(text.contains("158.0.7100.0"), "{text}");
         let other = PerfResult {
             kernels: "matmul v64,v64, attention fused".into(),
-            ..with_median(5.0)
+            ..with_quartile(5.0)
         };
         let (kind, text) = told(gate(&other, &base));
         assert_eq!(kind, "pass", "other kernels: {text}");
         assert!(text.contains("attention fused"), "{text}");
-        let (kind, text) = told(gate(&with_median(4.49), &base));
+        let (kind, text) = told(gate(&with_quartile(4.49), &base));
         assert_eq!(kind, "pass", "4.49 s: {text}");
         assert!(text.contains("update the baseline"), "{text}");
-        let (kind, text) = told(gate(&with_median(4.5), &base));
+        let (kind, text) = told(gate(&with_quartile(4.5), &base));
         assert_eq!(kind, "pass", "4.5 s: {text}");
         assert!(!text.contains("update the baseline"), "{text}");
     }
 
     /// Asserts:
-    /// * 5 equal medians give 10;
-    /// * a slowest median 6 % over the median of 5 gives 12;
-    /// * a slowest median 4 % over gives 10 (8 is under 10);
-    /// * a slowest median 6.1 % over gives 13 (12.2, rounded up);
-    /// * 4 medians are refused.
+    /// Each value is one run's chunk lower quartile.  Asserts:
+    /// * 5 equal values give 10;
+    /// * a slowest value 6 % over the median of 5 gives 12;
+    /// * a slowest value 4 % over gives 10 (8 is under 10);
+    /// * a slowest value 6.1 % over gives 13 (12.2, rounded up);
+    /// * 4 values are refused.
     #[test]
     fn the_tolerance_is_twice_the_spread_and_at_least_10() {
         assert_eq!(tolerance_pct(&[5.0; 5]), Ok(10.0));
@@ -825,18 +876,18 @@ mod tests {
 
     /// Asserts, for 5 runs:
     /// * the entry's key, version, date, commit and raise reason;
-    /// * each run's order, kernels and chunk median, in the order of the
+    /// * each run's order, kernels and chunk lower quartile, in the order of the
     ///   runs;
-    /// * the baseline is the median of the chunk medians, and the
+    /// * the baseline is the median of the chunk lower quartiles, and the
     ///   tolerance is `tolerance_pct` of them.
     ///
     /// Asserts that it refuses a run with profile groups, and runs of two
     /// adapters.
     #[test]
-    fn an_entry_holds_the_runs_and_their_median() {
+    fn an_entry_holds_the_runs_and_the_median_of_their_lower_quartiles() {
         let runs: Vec<PerfResult> = [5.0, 5.3, 4.9, 5.1, 5.0]
             .into_iter()
-            .map(with_median)
+            .map(with_quartile)
             .collect();
         let e = new_entry(&runs, "Apple M2 Pro", "2026-11-12", "242db28", "").unwrap();
         assert_eq!(e.key, key());
@@ -846,8 +897,8 @@ mod tests {
             ("2026-11-12", "242db28")
         );
         assert_eq!(e.raise, "");
-        let medians: Vec<f64> = e.runs.iter().map(|r| r.chunk_median).collect();
-        assert_eq!(medians, [5.0, 5.3, 4.9, 5.1, 5.0]);
+        let quartiles: Vec<f64> = e.runs.iter().map(|r| r.chunk_lower_quartile).collect();
+        assert_eq!(quartiles, [5.0, 5.3, 4.9, 5.1, 5.0]);
         let orders: Vec<u32> = e.runs.iter().map(|r| r.order).collect();
         assert_eq!(orders, [1, 2, 3, 4, 5]);
         assert!(

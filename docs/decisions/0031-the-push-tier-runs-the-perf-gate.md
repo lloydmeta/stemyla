@@ -4,7 +4,7 @@ Status: proposed (2026-11-12, by the agent, in Step 4 of `plans/active/gpu-speed
 
 ## Context
 
-Decision 0026 says that `xtask check --tier push` runs no `e2e` scenario, because CI runs the browser tests.  M2 of `plans/active/gpu-speed.md` adds `xtask e2e perf`, which separates the 1-minute synthetic song and gates the median time of each chunk against `xtask/perf-baselines.json`.  The gate needs a real GPU, the model file and an unlocked screen.  CI has no GPU and no model (ASSET-1), so CI cannot run it.  M3 to M6 change the kernels and the worker, and a later change must not make separation slower without a failure.
+Decision 0026 says that `xtask check --tier push` runs no `e2e` scenario, because CI runs the browser tests.  M2 of `plans/active/gpu-speed.md` adds `xtask e2e perf`, which separates the 1-minute synthetic song and gates the lower quartile of the chunk times against `xtask/perf-baselines.json`.  The gate needs a real GPU, the model file and an unlocked screen.  CI has no GPU and no model (ASSET-1), so CI cannot run it.  M3 to M6 change the kernels and the worker, and a later change must not make separation slower without a failure.
 
 ## Options
 
@@ -28,3 +28,4 @@ B.
 * A machine without the variable prints the skip line, and runs as before.  CI does not set it.
 * GIT-2 in `invariants.md`, `CLAUDE.md` and `.claude/rules/gpu.md` change in the same commit (DOC-1).
 * The gate's tolerance comes from at least 5 runs in each browser, and is never under 10 % (`xtask/src/e2e/perf.rs`).
+* The gate reads the chunk lower quartile, not the chunk median.  Interference only adds time to a chunk, and a slower kernel adds time to each chunk.  On 5 runs in each browser, the median gave a tolerance of 22 % (Chrome) and 28 % (Safari), and the lower quartile 10 % and 11 % (`plans/active/gpu-speed-m2.md`, Step 5).
