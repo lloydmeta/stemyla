@@ -17,7 +17,8 @@ Decision 0026 says that `xtask check --tier push` runs no `e2e` scenario, becaus
 B.
 
 * `with_perf_gate` in `xtask/src/check.rs` adds the gate only when tier `push` is asked, not when a strict path moves a commit up to tier `push`.
-* With a changed path in `roformer/`, `roformer-gpu/` or `worker/`, a workspace file, or no path known, and `STEMYLA_PERF_WEIGHTS` set: two lines after the Trunk build, `cargo run -p xtask -- e2e perf --gate --browser chrome --weights <model>`, then the same with `--browser safari`.
+* The gate runs when `STEMYLA_PERF_WEIGHTS` is set and a path can change the speed.  Such a path is in `roformer/`, `roformer-gpu/` or `worker/`, or is a workspace file, or no path is known.
+* Then two lines come after the Trunk build: `cargo run -p xtask -- e2e perf --gate --browser chrome --weights <model>`, then the same with `--browser safari`.
 * With those paths and no `STEMYLA_PERF_WEIGHTS`: one skip line that says that the perf gate did not run.  Else one skip line with the reason of the paths.
 * An agent sets `STEMYLA_PERF_WEIGHTS` (and `CHROMEDRIVER`) for the push check before a review round and before a push, on the maintainer's M2 Pro, whose baselines the file holds.
 * A browser that cannot run fails its own line: `e2e` fails with no `CHROMEDRIVER`, and on a locked screen.

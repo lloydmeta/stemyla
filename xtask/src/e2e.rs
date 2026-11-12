@@ -82,14 +82,17 @@
 //!   adds the GPU time in four groups.  The key of a baseline in
 //!   `xtask/perf-baselines.json` is the browser, the adapter text and the
 //!   host's chip (`sysctl`).  A run fails when its chunk lower quartile is
-//!   over the key's baseline by more than the tolerance.  With no baseline it is not gated; `--gate` makes that
-//!   a failure.  A fallback or SwiftShader adapter, `--swiftshader`,
-//!   `--headed`, f32 weights, or a query that sets `chunk`, `overlap`,
-//!   `mm`, `attn` or `weights` is never a pass: `--gate` and
-//!   `--update-baselines` fail it.  `--update-baselines` with `--runs 5` or
-//!   more writes the key's baseline.  It refuses a raise over the old
-//!   tolerance with the same browser version, unless `--raise "<reason>"`
-//!   gives the reason.
+//!   over the key's baseline by more than the tolerance.  With no baseline,
+//!   it is not gated; `--gate` makes that a failure.  A profile run is
+//!   never gated, also with `--gate`.  A fallback or SwiftShader adapter,
+//!   `--swiftshader`, `--headed` in Chrome, f32 weights, or a query that
+//!   sets `chunk`, `overlap`, `max_elems`, `mm`, `attn` or `weights` is
+//!   never a pass: `--gate` and `--update-baselines` fail it.
+//!   `--update-baselines` with `--runs 5` or more writes the key's
+//!   baseline.  In an update, a run over the old bound gives a note, and
+//!   `update_refusal` decides: it refuses a raise over the old tolerance
+//!   with the same browser version, unless `--raise "<reason>"` gives the
+//!   reason.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -165,7 +168,8 @@ pub struct Opts {
     pub hashes: Option<String>,
     /// `perf`: the number of runs, each in a new browser profile.
     pub runs: usize,
-    /// `perf`: a run with no baseline, or that can never pass, fails.
+    /// `perf`: a run with no baseline, or that is never a pass, fails.  A
+    /// profile run is not gated, also with this option.
     pub gate: bool,
     /// `perf`: the runs write the baseline of their key.
     pub update_baselines: bool,
@@ -2049,56 +2053,35 @@ fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<
     Ok(from)
 }
 
-/// The tokens of the time axis and of the frequency axis at the default
-/// chunk: the frames of a chunk and the bands.
-fn perf_axes() -> (usize, usize) {
-    let frames = roformer::CHUNK / roformer::HOP + 1;
-    let bands = roformer::band_groups().iter().map(|g| g.count).sum();
-    (frames, bands)
-}
-
-/// The name of `browser` in a key and a file name.
-fn browser_name(browser: Browser) -> &'static str {
-    match browser {
-        Browser::Chrome => "chrome",
-        Browser::Safari => "safari",
-    }
-}
-
-/// The first line of a command's output, trimmed, or `unknown`.
-fn command_text(program: &str, args: &[&str]) -> String {
-    std::process::Command::new(program)
-        .args(args)
-        .output()
-        .ok()
-        .filter(|out| out.status.success())
-        .and_then(|out| {
-            String::from_utf8(out.stdout)
-                .ok()
-                .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
-        })
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".into())
-}
-
 /// `e2e perf`: separates the 1-minute song of `memory-budget` at the
 /// default chunk, `--runs` times, each in a new browser profile.  Each
 /// run writes `<out>/perf-<browser>-<n>.json` and is gated against the
 /// baseline of its key (`perf.rs`).
 fn perf(o: &Opts) -> Result<()> {
-    if o.update_baselines && o.runs < perf::MIN_RUNS {
-        bail!("--update-baselines needs --runs {} or more", perf::MIN_RUNS);
+    if let Some(refusal) = perf::runs_refusal(o.runs, o.update_baselines) {
+        bail!("perf: {refusal}");
     }
     let path = perf::baselines_path();
     let baselines =
         perf::read_baselines(&std::fs::read_to_string(&path)?).map_err(anyhow::Error::msg)?;
+    for e in &baselines {
+        let problems = perf::entry_problems(e);
+        if !problems.is_empty() {
+            bail!(
+                "perf: the entry of {} in {} is not one that --update-baselines writes: {}",
+                e.key,
+                path.display(),
+                problems.join("; ")
+            );
+        }
+    }
     let mut mounts = vec![("/test/1/".to_string(), long_song(&o.out, 1)?)];
     let model = weights_mount(o, &mut mounts)?;
     let base = start_server(&o.dist, mounts, &["console.js"])?;
     let q = query(o, "");
-    let browser = browser_name(o.browser);
-    let chip = command_text("sysctl", &["-n", "machdep.cpu.brand_string"]);
-    let (frames, bands) = perf_axes();
+    let browser = perf::browser_name(o.browser);
+    let chip = perf::command_text("sysctl", &["-n", "machdep.cpu.brand_string"]);
+    let (frames, bands) = perf::perf_axes();
     let mut results = Vec::new();
     for n in 1..=o.runs {
         let mut p = Page::open(
@@ -2138,39 +2121,19 @@ fn perf(o: &Opts) -> Result<()> {
                         g.time_attention, g.freq_attention, g.linear, g.other, g.total
                     ));
                 }
-                let key = perf::Key {
-                    browser: browser.to_string(),
-                    adapter: result.adapter.clone(),
-                    chip: chip.clone(),
-                };
-                let claimed = o.gate || o.update_baselines;
-                match perf::never_a_pass(&result, o) {
-                    Some(reason) if claimed => {
-                        p.check(false, &format!("run {n} is never a pass: {reason}"));
-                    }
-                    Some(reason) => p.note(&format!("perf: not gated: {reason}")),
-                    None => match baselines.iter().find(|e| e.key == key) {
-                        None if o.gate => {
-                            p.check(false, &format!("no baseline for {key}: not gated"));
-                        }
-                        None => p.note(&format!("perf: no baseline for {key}: not gated")),
-                        Some(entry) => match perf::gate(&result, entry) {
-                            perf::Verdict::Pass(text) => {
-                                p.note(&format!("perf: the gate passed: {text}"));
-                            }
-                            perf::Verdict::Fail(text) if o.update_baselines => {
-                                p.note(&format!(
-                                    "perf: over the old bound, for the update: {text}"
-                                ));
-                            }
-                            perf::Verdict::Fail(text) => {
-                                p.check(false, &format!("the gate: {text}"));
-                            }
-                            perf::Verdict::NotGated(text) => {
-                                p.note(&format!("perf: not gated: {text}"));
-                            }
-                        },
-                    },
+                let key = perf::key_of(&result, &chip);
+                let never = perf::never_a_pass(&result, o);
+                let baseline = perf::entry_of(&baselines, &key);
+                match perf::outcome(
+                    &result,
+                    &key,
+                    never.as_deref(),
+                    baseline,
+                    o.gate,
+                    o.update_baselines,
+                ) {
+                    perf::Outcome::Note(text) => p.note(&format!("perf: {text}")),
+                    perf::Outcome::Fail(text) => p.check(false, &format!("run {n}: {text}")),
                 }
                 results.push(result);
             }
@@ -2178,12 +2141,12 @@ fn perf(o: &Opts) -> Result<()> {
         p.finish()?;
     }
     if o.update_baselines {
-        let date = command_text("date", &["+%Y-%m-%d"]);
-        let commit = command_text("git", &["rev-parse", "--short", "HEAD"]);
+        let date = perf::command_text("date", &["+%Y-%m-%d"]);
+        let commit = perf::command_text("git", &["rev-parse", "--short", "HEAD"]);
         let raise = o.raise.as_deref().unwrap_or_default();
         let entry =
             perf::new_entry(&results, &chip, &date, &commit, raise).map_err(anyhow::Error::msg)?;
-        let old = baselines.iter().find(|e| e.key == entry.key);
+        let old = perf::entry_of(&baselines, &entry.key);
         if let Some(refusal) = perf::update_refusal(old, &entry, raise) {
             bail!("perf: the update is refused: {refusal}");
         }

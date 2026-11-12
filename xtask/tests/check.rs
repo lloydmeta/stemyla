@@ -294,14 +294,16 @@ fn tier_push_with_no_origin_main_gives_a_warning_and_no_path() {
 
 /// The binary in `dir` with `args`, and the git config of [`GIT_ENV`].
 /// It has no `STEMYLA_REQUIRE`, so the GPU test line has its form of
-/// `CLAUDE.md`.
+/// `CLAUDE.md`, and no `STEMYLA_PERF_WEIGHTS`, so tier `push` prints the
+/// skip line of the perf gate.
 fn command(dir: &Path, args: &[&str], target: Option<&Path>) -> Command {
     let mut command = Command::new(env!("CARGO_BIN_EXE_xtask"));
     command
         .args(args)
         .current_dir(dir)
         .envs(GIT_ENV)
-        .env_remove("STEMYLA_REQUIRE");
+        .env_remove("STEMYLA_REQUIRE")
+        .env_remove("STEMYLA_PERF_WEIGHTS");
     if let Some(target) = target {
         command.env("CARGO_TARGET_DIR", target);
     }
@@ -413,7 +415,7 @@ check: skip: (cd app && trunk build --release) (tier push runs it)
 check: skip: cargo run -p xtask -- setup (it installs the dev tools; run it once, and after a pin changes)
 check: skip: cargo run -p xtask --release -- serve app/dist --port 8080 (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
 check: skip: cargo run -p xtask -- web-test (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
-check: skip: cargo run -p xtask -- e2e <scenario> (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026); tier push runs only the perf gate, e2e perf --gate, when asked with STEMYLA_PERF_WEIGHTS set (decision 0031))
+check: skip: cargo run -p xtask -- e2e <scenario> (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026).  Tier push runs the perf gate, e2e perf --gate, when asked with STEMYLA_PERF_WEIGHTS set (decision 0031))
 check: skip: cargo +nightly-2026-10-30 test -p roformer-gpu --doc (CI runs it; it needs the pinned nightly, and the stable doctest line runs the same doctests)
 check: skip: cargo run -p xtask --release -- publish (a person only (GIT-1))
 ";
@@ -470,6 +472,52 @@ fn the_dry_run_of_tier_push_with_no_origin_main_warns() {
         ),
         "{stdout}"
     );
+}
+
+/// Asserts, with `STEMYLA_PERF_WEIGHTS` set to a path with a space:
+/// * the dry run of tier `push`, with no path known, prints the run line
+///   of the perf gate in Chrome, then in Safari, right after the Trunk
+///   line, each with the path;
+/// * the dry run of tier `commit`, with a strict path in `worker/`, prints
+///   no line of the perf gate, run or skip.
+#[test]
+fn the_perf_gate_follows_the_variable_and_the_asked_tier() {
+    let model = "/models/a b/bs_roformer_sw.f16.safetensors";
+    let f = Fixture::committed("perf-gate");
+    let run = |args: &[&str]| {
+        let out = command(&f.repo, args, None)
+            .env("STEMYLA_PERF_WEIGHTS", model)
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(0), "{out:?}");
+        String::from_utf8_lossy(&out.stdout).to_string()
+    };
+    let push = run(&["check", "--tier", "push", "--dry-run"]);
+    let lines: Vec<&str> = push.lines().collect();
+    let trunk = lines
+        .iter()
+        .position(|l| l.starts_with("check: run: (cd app && trunk build --release)"));
+    let next: Vec<&str> = trunk.map_or(Vec::new(), |at| {
+        lines[at + 1..].iter().take(2).copied().collect()
+    });
+    let gate = |browser: &str| {
+        format!(
+            "check: run: cargo run -p xtask -- e2e perf --gate --browser {browser} --weights {model} ("
+        )
+    };
+    assert_eq!(next.len(), 2, "{push}");
+    assert!(next[0].starts_with(&gate("chrome")), "{push}");
+    assert!(next[1].starts_with(&gate("safari")), "{push}");
+    write(&f.repo.join("worker/src/web.rs"), "// x\n");
+    let commit = run(&["check", "--tier", "commit", "--dry-run"]);
+    let perf: Vec<&str> = commit
+        .lines()
+        .filter(|l| {
+            l.starts_with("check: run: cargo run -p xtask -- e2e perf")
+                || l.starts_with("check: skip: cargo run -p xtask -- e2e perf")
+        })
+        .collect();
+    assert_eq!(perf, Vec::<&str>::new(), "{commit}");
 }
 
 #[test]

@@ -14,7 +14,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 
 ## The perf gate
 
-`cargo run -p xtask -- check --tier push` runs `e2e perf --gate` in Chrome, then in Safari, when `STEMYLA_PERF_WEIGHTS` names the model file and the changed paths can change the speed (decision 0031).  Without the variable, it prints a skip line.
+`cargo run -p xtask -- check --tier push` can run `e2e perf --gate` in Chrome, then in Safari (decision 0031).  It runs them when `STEMYLA_PERF_WEIGHTS` names the model file and the changed paths can change the speed.  Without the variable, it prints a skip line.
 
 * Set `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` for the push check before a review round and before a push, on the M2 Pro whose baselines `xtask/perf-baselines.json` holds.
 * The gate adds about 3 minutes: one run in each browser (2.8 minutes on 2026-11-12: Chrome 70 s, Safari 99 s).

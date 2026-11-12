@@ -1036,6 +1036,40 @@ fn profile_labels_dispatches() {
     assert!(lines.last().unwrap().starts_with("profile: total GPU time"));
 }
 
+/// Asserts, on a profiling device, for one fused attention of 3
+/// sequences of 62 tokens:
+/// * the profile has the label `attention seq 62 x3`, with 1 dispatch;
+/// * no WebGPU error.
+///
+/// Skips when the adapter has no `timestamp-query`.
+#[test]
+fn profile_labels_attention_by_its_shape() {
+    let g = match pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance)) {
+        Ok(g) => g,
+        Err(e) => return skip(Need::Gpu, &e),
+    };
+    if !g.profiling() {
+        return skip(Need::Timestamps, "adapter without timestamp-query");
+    }
+    let (seq, nseq) = (62, 3);
+    let tokens = seq * nseq;
+    let qkv = g.upload("qkv", &rand(tokens * 1536, 7));
+    let o = g.buffer("o", tokens * 512);
+    let mut r = g.rec();
+    r.attention(&qkv, None, &o, seq, nseq, 0.125);
+    r.submit();
+    pollster::block_on(g.done());
+    pollster::block_on(g.collect_profile()).unwrap();
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    let totals = g.take_profile();
+    assert_eq!(
+        totals.get("attention seq 62 x3").map(|v| v.0),
+        Some(1),
+        "{totals:?}"
+    );
+}
+
 /// The usual device never asks for optional features.
 #[test]
 fn plain_device_does_not_profile() {

@@ -559,6 +559,8 @@ Source: review round 3 of M4 on the branch `iphone-crashes-2026-10-25`, finding 
 
 The decode worker's messages (`stem_protocol::decode`, M5) refuse a missing or wrong field, so this entry concerns the stem worker's messages only.  `e2e_messages_use_protocol_types` checks each hand-written type against the union of both workers' kinds, so a decode kind in a script for the stem worker passes (review round 1 of M5, finding 1-16).  CI's `browser-tests` job does not run `e2e stored-stems`, `e2e worker-check` or `e2e weights`, since they need a GPU and the weights.  These three scenarios also write stem worker messages by hand.  When a change touches their messages, the agent runs the changed scenario on its machine's GPU with the local model file, and the PR names the run.  If no GPU or model file is there, the PR lists the scenario as not verified.
 
+Some log texts also cross between the worker and `xtask` by hand.  The worker's `gpu_text` (`worker/src/web.rs`) writes ", fallback adapter ", and `perf_result` and the fixture of its tests in `xtask/src/e2e/perf.rs` repeat it.  Nothing checks that the two texts are the same; the `wire-reviewer` agent checks them by hand.
+
 * Fix: fail decoding on a missing required field; a version in `Alive`.  Until then, the `wire-reviewer` agent looks for a field name or a default that one side changes and the other side does not.  It looks on each diff that routes it (TD-31).
 
 ### TD-45: the status of decision 0007 may not be a person's choice

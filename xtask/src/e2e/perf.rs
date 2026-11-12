@@ -13,6 +13,7 @@
 //! figure that the noise moves least.
 
 use super::{Opts, chunk_done, number_after};
+use crate::drivers::Browser;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -22,8 +23,15 @@ pub(super) const MIN_TOLERANCE_PCT: f64 = 10.0;
 /// The fewest runs that an update of a baseline takes.
 pub(super) const MIN_RUNS: usize = 5;
 
-/// The query keys that change what a run measures.
-const MEASURE_KEYS: [&str; 5] = ["chunk", "overlap", "mm", "attn", "weights"];
+/// The query keys (`stem_protocol::Settings::from_query`) that change the
+/// work of a separation or the kernel choice: the chunk, its overlap, the
+/// GPU step budget, the kernels and the weight format.  The other keys
+/// measure nothing here.  `step_limit` is only a time-out.  `bench`,
+/// `bench_rounds` and `bench_quick` set only `?bench`, which calibration
+/// does not read.  `gpu` picks the adapter, whose text is in the key.
+/// `selftest` and `model_url` do not change a separation.  `profile` is
+/// never gated ([`gate`]).
+const MEASURE_KEYS: [&str; 6] = ["chunk", "overlap", "max_elems", "mm", "attn", "weights"];
 
 /// A small slack for float compares of seconds and percents.
 const EPSILON: f64 = 1e-9;
@@ -278,7 +286,8 @@ fn axis(tokens: &[usize], frames: usize, bands: usize) -> Option<bool> {
 /// `len` is `frames`, a fused attention whose `seq` is `frames`.
 /// Frequency-axis attention: the same with `bands`.  Linear products:
 /// each other matmul.  Other: each other label.  `None` when the log has
-/// no `total GPU time` line.
+/// no `total GPU time` line.  It reads the labels of `matmul_label`,
+/// `softmax_label` and `attention_label` in `roformer-gpu/src/lib.rs`.
 pub(super) fn profile_groups(log: &[String], frames: usize, bands: usize) -> Option<Groups> {
     let total = log
         .iter()
@@ -329,8 +338,8 @@ pub(super) fn never_a_pass(result: &PerfResult, o: &Opts) -> Option<String> {
     if o.swiftshader {
         return Some("--swiftshader asks for a software adapter (GPU-3)".into());
     }
-    if o.headed {
-        return Some("--headed: the baselines are headless".into());
+    if o.headed && result.browser == "chrome" {
+        return Some("--headed: the Chrome baselines are headless".into());
     }
     if result.weights != "f16" {
         return Some(format!(
@@ -340,6 +349,7 @@ pub(super) fn never_a_pass(result: &PerfResult, o: &Opts) -> Option<String> {
     }
     let query = o.query.as_deref().unwrap_or_default();
     let set: Vec<String> = query
+        .trim_start_matches('?')
         .split('&')
         .filter_map(|pair| pair.split('=').next())
         .filter(|key| MEASURE_KEYS.contains(key))
@@ -406,12 +416,17 @@ pub(super) fn tolerance_pct(quartiles: &[f64]) -> Result<f64, String> {
             quartiles.len()
         ));
     }
+    Ok(tolerance_of(quartiles))
+}
+
+/// The rule of [`tolerance_pct`], for any number of values but none.
+fn tolerance_of(quartiles: &[f64]) -> f64 {
     let base = median(quartiles);
     let slowest = quartiles.iter().copied().fold(f64::MIN, f64::max);
     let spread = 2.0 * (slowest - base) / base * 100.0;
     // Round off float noise first, so 12.000000000000002 gives 12.
     let spread = ((spread * 1e6).round() / 1e6).ceil();
-    Ok(spread.max(MIN_TOLERANCE_PCT))
+    spread.max(MIN_TOLERANCE_PCT)
 }
 
 /// The entry of a key from the `results` of an update, in their order.
@@ -458,6 +473,130 @@ pub(super) fn new_entry(
         tolerance_pct,
         raise: raise.to_string(),
     })
+}
+
+/// The tokens of the time axis and of the frequency axis at the default
+/// chunk: the frames of a chunk and the bands.
+pub(super) fn perf_axes() -> (usize, usize) {
+    let frames = roformer::CHUNK / roformer::HOP + 1;
+    let bands = roformer::band_groups().iter().map(|g| g.count).sum();
+    (frames, bands)
+}
+
+/// The name of `browser` in a key and a file name.
+pub(super) fn browser_name(browser: Browser) -> &'static str {
+    match browser {
+        Browser::Chrome => "chrome",
+        Browser::Safari => "safari",
+    }
+}
+
+/// The first line of a command's output, trimmed, or `unknown`.
+pub(super) fn command_text(program: &str, args: &[&str]) -> String {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            String::from_utf8(out.stdout)
+                .ok()
+                .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// What the scenario does with one run: print a note, or fail the run.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Outcome {
+    Note(String),
+    Fail(String),
+}
+
+/// The key of `result` on a host with `chip`.
+pub(super) fn key_of(result: &PerfResult, chip: &str) -> Key {
+    Key {
+        browser: result.browser.clone(),
+        adapter: result.adapter.clone(),
+        chip: chip.to_string(),
+    }
+}
+
+/// The entry of `key` in `baselines`, if any.
+pub(super) fn entry_of<'a>(baselines: &'a [Entry], key: &Key) -> Option<&'a Entry> {
+    baselines.iter().find(|e| e.key == *key)
+}
+
+/// The reason to refuse `--runs` before any run, or `None`.
+pub(super) fn runs_refusal(runs: usize, update: bool) -> Option<String> {
+    if runs == 0 {
+        return Some("--runs 0 runs nothing".into());
+    }
+    if update && runs < MIN_RUNS {
+        return Some(format!(
+            "--update-baselines needs --runs {MIN_RUNS} or more, not {runs}"
+        ));
+    }
+    None
+}
+
+/// What the scenario does with `result`, whose key is `key`.  `never` is
+/// the reason of [`never_a_pass`], `baseline` the entry of the key,
+/// `gated` the option `--gate` and `update` the option
+/// `--update-baselines`.
+pub(super) fn outcome(
+    result: &PerfResult,
+    key: &Key,
+    never: Option<&str>,
+    baseline: Option<&Entry>,
+    gated: bool,
+    update: bool,
+) -> Outcome {
+    match (never, baseline) {
+        (Some(reason), _) if gated || update => Outcome::Fail(format!("never a pass: {reason}")),
+        (Some(reason), _) => Outcome::Note(format!("not gated: {reason}")),
+        (None, None) if gated => Outcome::Fail(format!("no baseline for {key}: not gated")),
+        (None, None) => Outcome::Note(format!("no baseline for {key}: not gated")),
+        (None, Some(entry)) => match gate(result, entry) {
+            Verdict::Pass(text) => Outcome::Note(format!("the gate passed: {text}")),
+            Verdict::Fail(text) if update => {
+                Outcome::Note(format!("over the old bound, for the update: {text}"))
+            }
+            Verdict::Fail(text) => Outcome::Fail(format!("the gate: {text}")),
+            Verdict::NotGated(text) => Outcome::Note(format!("not gated: {text}")),
+        },
+    }
+}
+
+/// The problems of one entry of the baselines file, or none: fewer than
+/// [`MIN_RUNS`] runs, a baseline that is not the median of the runs'
+/// chunk lower quartiles, or a tolerance that is not the rule's for them.
+pub(super) fn entry_problems(e: &Entry) -> Vec<String> {
+    let quartiles: Vec<f64> = e.runs.iter().map(|r| r.chunk_lower_quartile).collect();
+    let mut problems = Vec::new();
+    if e.runs.len() < MIN_RUNS {
+        problems.push(format!("{} runs, fewer than {MIN_RUNS}", e.runs.len()));
+    }
+    if !e.runs.is_empty() && (e.baseline - median(&quartiles)).abs() > EPSILON {
+        problems.push(format!(
+            "the baseline {} is not the median of the runs, {}",
+            e.baseline,
+            median(&quartiles)
+        ));
+    }
+    let want = if quartiles.is_empty() {
+        MIN_TOLERANCE_PCT
+    } else {
+        tolerance_of(&quartiles)
+    };
+    if (want - e.tolerance_pct).abs() > EPSILON {
+        problems.push(format!(
+            "the tolerance {} % is not the rule's {want} % for the runs",
+            e.tolerance_pct
+        ));
+    }
+    problems
 }
 
 /// The committed baselines file.
@@ -537,6 +676,7 @@ mod tests {
         }
         log.push(format!("{at}separation: 11242 GPU steps, longest 0.01 s (layer 9 frequency transformer, frames 880..968), 1.33 TFLOP/s on average (steps after the first of each kind)"));
         log.push(format!("{at}6 stems in 52.0 s"));
+        log.push(format!("{at}memory: page wasm 33 MB with the stems shown"));
         log
     }
 
@@ -554,9 +694,14 @@ mod tests {
     /// * the time of each chunk, the chunk median, the chunk lower
     ///   quartile, the whole time and the matmul rate;
     /// * no profile groups.
+    ///
+    /// The log has a `separator:` line after the `stems in` line, as the
+    /// page logs it.
     #[test]
     fn a_full_log_gives_each_value() {
-        let r = result_of(&log_of(&[5.3, 4.7, 4.6, 4.8])).unwrap();
+        let r = result_of(&log_of(&[5.3, 4.7, 4.6, 4.8]));
+        assert!(r.is_ok(), "{r:?}");
+        let r = r.unwrap();
         assert_eq!(r.browser, "chrome");
         assert_eq!(r.version, "157.0.7000.0");
         assert_eq!(r.adapter, "apple metal-3");
@@ -575,7 +720,8 @@ mod tests {
     /// * 10 values give the third fastest;
     /// * one of the 10 made much faster (4.7 s to 1.0 s) does not move it;
     /// * 3 values give the fastest, 1 value gives itself;
-    /// * 5 values give the second fastest.
+    /// * 5 values give the second fastest;
+    /// * 4 values (4.0, 1.0, 3.0, 2.0) give the fastest, 1.0.
     #[test]
     fn the_lower_quartile_is_the_value_at_a_quarter_by_nearest_rank() {
         let ten = [5.9, 4.7, 5.7, 4.8, 4.7, 5.4, 5.6, 5.2, 4.9, 5.2];
@@ -586,6 +732,7 @@ mod tests {
         assert_eq!(lower_quartile(&[7.4, 8.2, 7.9]), 7.4);
         assert_eq!(lower_quartile(&[7.4]), 7.4);
         assert_eq!(lower_quartile(&[3.0, 1.0, 5.0, 2.0, 4.0]), 2.0);
+        assert_eq!(lower_quartile(&[4.0, 1.0, 3.0, 2.0]), 1.0);
     }
 
     /// Asserts:
@@ -593,7 +740,8 @@ mod tests {
     /// * the median of chunks 2 to 5 (9.0, 4.0, 6.0, 5.0, 7.0) is 5.5;
     /// * the lower quartile of chunks 2 to 4 (1.0, 4.0, 5.0, 6.0) is 4.0,
     ///   not 1.0;
-    /// * `chunks` keeps chunk 1.
+    /// * `chunks` keeps chunk 1;
+    /// * a log of 2 chunks (5.0, 4.0) gives a chunk median of 4.0.
     #[test]
     fn the_chunk_median_leaves_chunk_1_out() {
         let r = result_of(&log_of(&[9.0, 4.0, 5.0, 6.0])).unwrap();
@@ -603,6 +751,8 @@ mod tests {
         assert_eq!(r.chunk_median, 5.5);
         let r = result_of(&log_of(&[1.0, 4.0, 5.0, 6.0])).unwrap();
         assert_eq!(r.chunk_lower_quartile, 4.0);
+        let r = result_of(&log_of(&[5.0, 4.0]));
+        assert_eq!(r.map(|r| r.chunk_median), Ok(4.0));
     }
 
     /// Asserts that a log fails, with a message that holds the given text,
@@ -650,8 +800,9 @@ mod tests {
     /// * the time-axis group holds the scores matmul, the P.v matmul, the
     ///   softmax and the fused attention of 1,151 tokens;
     /// * the frequency-axis group holds the same four of 62 tokens;
-    /// * the linear group holds a linear product and the gates' matmul
-    ///   (1151x8x256);
+    /// * the linear group holds a linear product, the gates' matmul
+    ///   (1151x8x256), and a matmul of 62 rows that is not attention
+    ///   (62x8x256);
     /// * the other group holds `rmsnorm` and `rope`;
     /// * the total is the `total GPU time` line, and equals the sum of
     ///   the four groups;
@@ -670,20 +821,21 @@ mod tests {
             profile_line("attention seq 62 x88", 128.0),
             profile_line("matmul 5456x1536x256 x1 v64 f16", 256.0),
             profile_line("matmul 1151x8x256 x1 v64 f16", 512.0),
+            profile_line("matmul 62x8x256 x1151 v64 f16", 4096.0),
             profile_line("rmsnorm", 1024.0),
             profile_line("rope", 2048.0),
         ];
-        log.push("[72.6s] separator: profile: total GPU time 4095.000 s".into());
-        log.push("[72.6s] separator: profile: GPU busy 4095.00 s of 4100.00 s of step wall time (0% waiting, submitting or between dispatches); one pass per dispatch while profiling".into());
+        log.push("[72.6s] separator: profile: total GPU time 8191.000 s".into());
+        log.push("[72.6s] separator: profile: GPU busy 8191.00 s of 8200.00 s of step wall time (0% waiting, submitting or between dispatches); one pass per dispatch while profiling".into());
         log.push(
             "[2.0s] separator: profile: this adapter has no timestamp-query; no GPU times".into(),
         );
         let g = profile_groups(&log, FRAMES, BANDS).unwrap();
         assert_eq!(g.time_attention, 15.0);
         assert_eq!(g.freq_attention, 240.0);
-        assert_eq!(g.linear, 768.0);
+        assert_eq!(g.linear, 4864.0);
         assert_eq!(g.other, 3072.0);
-        assert_eq!(g.total, 4095.0);
+        assert_eq!(g.total, 8191.0);
         assert_eq!(
             g.time_attention + g.freq_attention + g.linear + g.other,
             g.total
@@ -713,12 +865,16 @@ mod tests {
     /// * the fallback value `yes`;
     /// * an adapter text with `SwiftShader` (any case);
     /// * `--swiftshader`;
-    /// * `--headed`;
+    /// * `--headed` in Chrome;
     /// * f32 weights;
-    /// * a query with `chunk=`, `overlap=`, `mm=`, `attn=` or `weights=`.
+    /// * a query with `chunk=`, `overlap=`, `max_elems=`, `mm=`, `attn=` or
+    ///   `weights=`;
+    /// * the query `?chunk=16384`, with its `?`.
     ///
     /// Asserts that a run on `apple metal-3`, fallback `no`, f16 weights,
-    /// with no query or with `x=1`, gives no reason.
+    /// gives no reason with no query, with `x=1`, with each of
+    /// `step_limit=9`, `bench_rounds=1`, `bench_quick=1`, `bench=v64`,
+    /// `gpu=integrated` and `model_url=m`, and in Safari with `--headed`.
     #[test]
     fn never_a_pass_names_each_reason() {
         let fallback = PerfResult {
@@ -743,18 +899,38 @@ mod tests {
             ),
             (never_a_pass(&sample(), &opts(&["--headed"])), "--headed"),
             (never_a_pass(&f32, &none), "f16"),
+            (
+                never_a_pass(&sample(), &opts(&["--query", "?chunk=16384"])),
+                "chunk=",
+            ),
         ];
         for (reason, text) in cases {
             let reason = reason.unwrap_or_default();
             assert!(reason.contains(text), "{text}: {reason:?}");
         }
-        for key in ["chunk", "overlap", "mm", "attn", "weights"] {
+        for key in ["chunk", "overlap", "max_elems", "mm", "attn", "weights"] {
             let o = opts(&["--query", &format!("x=1&{key}=2")]);
             let reason = never_a_pass(&sample(), &o).unwrap_or_default();
             assert!(reason.contains(&format!("{key}=")), "{key}: {reason:?}");
         }
         assert_eq!(never_a_pass(&sample(), &none), None);
         assert_eq!(never_a_pass(&sample(), &opts(&["--query", "x=1"])), None);
+        for query in [
+            "step_limit=9",
+            "bench_rounds=1",
+            "bench_quick=1",
+            "bench=v64",
+            "gpu=integrated",
+            "model_url=m",
+        ] {
+            let reason = never_a_pass(&sample(), &opts(&["--query", query]));
+            assert_eq!(reason, None, "{query}");
+        }
+        let safari = PerfResult {
+            browser: "safari".into(),
+            ..sample()
+        };
+        assert_eq!(never_a_pass(&safari, &opts(&["--headed"])), None);
     }
 
     fn key() -> Key {
@@ -805,7 +981,7 @@ mod tests {
     /// Asserts, with a baseline of 5.0 s and a tolerance of 10 %:
     /// * a chunk lower quartile of 5.5 s (the bound) passes, and the text
     ///   gives the chunk lower quartile, the baseline, the tolerance and the
-    ///   margin;
+    ///   margin, and no line on the version or the kernels;
     /// * a chunk lower quartile of 5.51 s fails, with a chunk median of
     ///   4.7 s;
     /// * a run with profile groups is not gated, with the reason;
@@ -819,6 +995,7 @@ mod tests {
         let base = entry(5.0, 10.0);
         let (kind, text) = told(gate(&with_quartile(5.5), &base));
         assert_eq!(kind, "pass", "5.5 s: {text}");
+        assert!(!text.contains("is not the baseline's"), "{text}");
         for part in [
             "chunk lower quartile 5.50 s",
             "baseline 5.00 s",
@@ -858,7 +1035,6 @@ mod tests {
         assert!(!text.contains("update the baseline"), "{text}");
     }
 
-    /// Asserts:
     /// Each value is one run's chunk lower quartile.  Asserts:
     /// * 5 equal values give 10;
     /// * a slowest value 6 % over the median of 5 gives 12;
@@ -945,7 +1121,7 @@ mod tests {
 
     /// Asserts, for the committed `xtask/perf-baselines.json`:
     /// * it reads as a list of entries;
-    /// * each entry has a tolerance of at least 10 %;
+    /// * each entry has no `entry_problems`;
     /// * no value holds `/Users/`, `/home/` or `~/`.
     #[test]
     fn the_committed_baselines_hold_tolerances_and_no_machine_path() {
@@ -953,7 +1129,7 @@ mod tests {
         let entries = read_baselines(&text);
         assert!(entries.is_ok(), "{entries:?}");
         for e in entries.iter().flatten() {
-            assert!(e.tolerance_pct >= MIN_TOLERANCE_PCT, "{:?}", e.key);
+            assert_eq!(entry_problems(e), Vec::<String>::new(), "{}", e.key);
         }
         for path in ["/Users/", "/home/", "~/"] {
             assert!(!text.contains(path), "{path}");
@@ -966,6 +1142,7 @@ mod tests {
     /// * a baseline of 5.6 s is refused, and the reason names `--raise`;
     /// * the same 5.6 s passes with a new browser version, or with a
     ///   reason;
+    /// * the same 5.6 s is refused with a blank reason (`"  "`);
     /// * any baseline passes with no old entry.
     #[test]
     fn a_raise_over_the_tolerance_needs_a_reason() {
@@ -983,6 +1160,145 @@ mod tests {
             update_refusal(Some(&old), &entry(5.6, 10.0), "a slower kernel"),
             None
         );
+        assert!(update_refusal(Some(&old), &entry(5.6, 10.0), "  ").is_some());
         assert_eq!(update_refusal(None, &entry(9.0, 10.0), ""), None);
+    }
+
+    /// Asserts that `entry_problems`:
+    /// * finds none in an entry made by `new_entry` from 5 runs;
+    /// * finds 3 in a hand edit of that entry to a baseline of 6.5 s, a
+    ///   tolerance of 40 % and 1 run: too few runs, a baseline that is not
+    ///   the median of the runs, and a tolerance that is not
+    ///   `tolerance_pct` of them;
+    /// * finds 1 in an entry with a tolerance of 9 %.
+    #[test]
+    fn entry_problems_finds_a_hand_edit() {
+        let runs: Vec<PerfResult> = [5.0, 5.3, 4.9, 5.1, 5.0]
+            .into_iter()
+            .map(with_quartile)
+            .collect();
+        let good = new_entry(&runs, "Apple M2 Pro", "2026-11-12", "242db28", "").unwrap();
+        assert_eq!(entry_problems(&good), Vec::<String>::new());
+        let mut edited = good.clone();
+        edited.baseline = 6.5;
+        edited.tolerance_pct = 40.0;
+        edited.runs.truncate(1);
+        assert_eq!(
+            entry_problems(&edited).len(),
+            3,
+            "{:?}",
+            entry_problems(&edited)
+        );
+        let mut low = entry(5.0, 9.0);
+        low.raise = String::new();
+        assert_eq!(entry_problems(&low).len(), 1, "{:?}", entry_problems(&low));
+    }
+
+    /// Asserts the text of a key: browser, adapter text and chip.
+    #[test]
+    fn a_key_shows_its_three_parts() {
+        assert_eq!(key().to_string(), "chrome, apple metal-3, Apple M2 Pro");
+    }
+
+    /// Asserts:
+    /// * `perf_axes` gives 1,151 frames and 62 bands;
+    /// * `browser_name` gives `chrome` and `safari`;
+    /// * `command_text` gives the first line of the output, trimmed;
+    /// * `command_text` gives `unknown` for a command that prints a line
+    ///   and fails, and for a first line of spaces.
+    #[test]
+    fn the_scenario_helpers_give_their_values() {
+        assert_eq!(perf_axes(), (1151, 62));
+        assert_eq!(browser_name(Browser::Chrome), "chrome");
+        assert_eq!(browser_name(Browser::Safari), "safari");
+        assert_eq!(command_text("printf", &["  lloyd  \\nacme\\n"]), "lloyd");
+        assert_eq!(command_text("sh", &["-c", "echo acme; exit 1"]), "unknown");
+        assert_eq!(command_text("printf", &["   \\n"]), "unknown");
+    }
+
+    /// Asserts that `runs_refusal`:
+    /// * refuses `--runs 0`, also with `--update-baselines`;
+    /// * refuses 4 runs with `--update-baselines`;
+    /// * accepts 5 runs with `--update-baselines`, and 1 run without it.
+    #[test]
+    fn the_run_count_is_checked_before_any_run() {
+        assert!(runs_refusal(0, false).is_some());
+        assert!(runs_refusal(0, true).is_some());
+        assert!(runs_refusal(4, true).is_some());
+        assert_eq!(runs_refusal(5, true), None);
+        assert_eq!(runs_refusal(1, false), None);
+    }
+
+    /// Asserts that:
+    /// * `key_of` gives the browser and adapter of the run, and the chip;
+    /// * `entry_of` gives no entry for a Chrome run when the file holds only
+    ///   the Safari entry;
+    /// * `entry_of` gives the entry of its own key from a file of both;
+    /// * the key of an update's new entry finds its old entry.
+    #[test]
+    fn a_run_reads_only_the_entry_of_its_key() {
+        let chrome = entry(4.7, 10.0);
+        let mut safari = entry(7.4, 10.0);
+        safari.key.browser = "safari".into();
+        let run_key = key_of(&sample(), "Apple M2 Pro");
+        assert_eq!(run_key, key());
+        assert_eq!(entry_of(std::slice::from_ref(&safari), &run_key), None);
+        let both = [safari.clone(), chrome.clone()];
+        assert_eq!(entry_of(&both, &run_key), Some(&chrome));
+        let new_safari = entry(7.3, 10.0);
+        let new_safari = Entry {
+            key: safari.key.clone(),
+            ..new_safari
+        };
+        assert_eq!(entry_of(&both, &new_safari.key), Some(&safari));
+    }
+
+    /// The kind of an outcome, `note` or `fail`, and its text.
+    fn kind_of(o: Outcome) -> (&'static str, String) {
+        match o {
+            Outcome::Note(text) => ("note", text),
+            Outcome::Fail(text) => ("fail", text),
+        }
+    }
+
+    /// Asserts, with a baseline of 5.0 s and a tolerance of 10 %:
+    /// * a run that is never a pass fails with `--gate`, fails with
+    ///   `--update-baselines`, and gives a note with neither;
+    /// * a run with no baseline fails with `--gate`, and gives a note
+    ///   without it, with the key in the text;
+    /// * a run of 5.0 s gives the note "the gate passed";
+    /// * a run of 6.0 s fails, and gives a note with `--update-baselines`;
+    /// * a profile run of 9.0 s gives a note, also with `--gate`.
+    #[test]
+    fn each_outcome_follows_the_options() {
+        let base = entry(5.0, 10.0);
+        let k = key();
+        let run = with_quartile(5.0);
+        let never = Some("the adapter is a fallback adapter (GPU-3)");
+        let case = |r: &PerfResult, never, baseline, gated, update| {
+            kind_of(outcome(r, &k, never, baseline, gated, update))
+        };
+        assert_eq!(case(&run, never, Some(&base), true, false).0, "fail");
+        assert_eq!(case(&run, never, Some(&base), false, true).0, "fail");
+        assert_eq!(case(&run, never, Some(&base), false, false).0, "note");
+        let (kind, text) = case(&run, None, None, true, false);
+        assert_eq!(kind, "fail", "{text}");
+        assert!(
+            text.contains("chrome, apple metal-3, Apple M2 Pro"),
+            "{text}"
+        );
+        assert_eq!(case(&run, None, None, false, false).0, "note");
+        let (kind, text) = case(&run, None, Some(&base), true, false);
+        assert_eq!(kind, "note", "{text}");
+        assert!(text.contains("the gate passed"), "{text}");
+        let slow = with_quartile(6.0);
+        assert_eq!(case(&slow, None, Some(&base), true, false).0, "fail");
+        assert_eq!(case(&slow, None, Some(&base), false, false).0, "fail");
+        assert_eq!(case(&slow, None, Some(&base), false, true).0, "note");
+        let profiled = PerfResult {
+            groups: Some(Groups::default()),
+            ..with_quartile(9.0)
+        };
+        assert_eq!(case(&profiled, None, Some(&base), true, false).0, "note");
     }
 }

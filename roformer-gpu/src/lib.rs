@@ -2166,7 +2166,8 @@ enum Kernel {
 }
 
 /// The profile label of a matmul: its shape, batch and kernel, and `f16`
-/// for an f16 variant (f32 labels stay as they were).
+/// for an f16 variant (f32 labels stay as they were).  `profile_groups`
+/// in `xtask/src/e2e/perf.rs` reads it.
 fn matmul_label([m, n, k]: [usize; 3], batch: usize, tile: Tile, format: WeightFormat) -> String {
     let variant = match format {
         WeightFormat::F32 => "",
@@ -2176,12 +2177,14 @@ fn matmul_label([m, n, k]: [usize; 3], batch: usize, tile: Tile, format: WeightF
 }
 
 /// The profile label of a softmax: its rows and their length.
+/// `profile_groups` in `xtask/src/e2e/perf.rs` reads it.
 fn softmax_label(rows: usize, len: usize) -> String {
     format!("softmax {rows}x{len}")
 }
 
 /// The profile label of a fused attention: the tokens of each sequence
-/// and the number of sequences.
+/// and the number of sequences.  `profile_groups` in
+/// `xtask/src/e2e/perf.rs` reads it.
 fn attention_label(seq: usize, nseq: usize) -> String {
     format!("attention seq {seq} x{nseq}")
 }

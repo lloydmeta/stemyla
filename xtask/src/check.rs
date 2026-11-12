@@ -169,7 +169,7 @@ pub const DOC_NIGHTLY: &str = "nightly-2026-10-30";
 pub fn never_run() -> Vec<(Check, &'static str)> {
     const BROWSER: &str =
         "CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026)";
-    const E2E: &str = "CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026); tier push runs only the perf gate, e2e perf --gate, when asked with STEMYLA_PERF_WEIGHTS set (decision 0031)";
+    const E2E: &str = "CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026).  Tier push runs the perf gate, e2e perf --gate, when asked with STEMYLA_PERF_WEIGHTS set (decision 0031)";
     vec![
         (
             Check::root("cargo run -p xtask -- setup"),
