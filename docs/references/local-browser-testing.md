@@ -12,6 +12,16 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 * `web-test` and `e2e` with Safari hold `caffeinate -u` while they run, so macOS does not report the user idle (TD-96).
 * Chrome needs a Chrome for Testing chromedriver of Chrome's major version, in `CHROMEDRIVER`.  Take the build for the CPU of the Mac: `mac-x64` for an Intel Mac, `mac-arm64` for Apple silicon ([Chrome for Testing](https://googlechromelabs.github.io/chrome-for-testing/)).  Keep it outside the repo and reuse it rather than downloading it again each session.  Chrome updates itself: on 2026-10-29 it went from 155 to 156 during a run, and chromedriver 155 still drove it, with a warning ("has not been tested with Chrome version 156").
 
+## The perf gate
+
+`cargo run -p xtask -- check --tier push` runs `e2e perf --gate` in Chrome, then in Safari, when `STEMYLA_PERF_WEIGHTS` names the model file and the changed paths can change the speed (decision 0031).  Without the variable, it prints a skip line.
+
+* Set `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` for the push check before a review round and before a push, on the M2 Pro whose baselines `xtask/perf-baselines.json` holds.
+* The gate adds about 3.5 minutes: one run in each browser.
+* Keep the screen unlocked and do not use the Mac during the Safari run.  A locked screen fails the Safari line at once.
+* A Chrome update can stop the Chrome line until `CHROMEDRIVER` names a driver of the new version.  An old driver may still drive the new Chrome, with a warning.
+* The gate compares across browser versions, and prints a line when the version is not the baseline's.  After a browser update, measure again with `e2e perf --runs 5 --update-baselines`, and record both figures.
+
 ## Known local failures
 
 Check `main` before treating any of these as a regression:

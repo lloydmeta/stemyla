@@ -413,7 +413,7 @@ check: skip: (cd app && trunk build --release) (tier push runs it)
 check: skip: cargo run -p xtask -- setup (it installs the dev tools; run it once, and after a pin changes)
 check: skip: cargo run -p xtask --release -- serve app/dist --port 8080 (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
 check: skip: cargo run -p xtask -- web-test (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
-check: skip: cargo run -p xtask -- e2e <scenario> (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026))
+check: skip: cargo run -p xtask -- e2e <scenario> (CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026); tier push runs only the perf gate, e2e perf --gate, when asked with STEMYLA_PERF_WEIGHTS set (decision 0031))
 check: skip: cargo +nightly-2026-10-30 test -p roformer-gpu --doc (CI runs it; it needs the pinned nightly, and the stable doctest line runs the same doctests)
 check: skip: cargo run -p xtask --release -- publish (a person only (GIT-1))
 ";

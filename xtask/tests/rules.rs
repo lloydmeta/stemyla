@@ -1482,8 +1482,9 @@ fn claude_md_commands() -> Vec<String> {
 }
 
 /// Decision 0026: tier `push` runs the fmt, clippy, test, `docs-check` and
-/// Trunk build lines of `CLAUDE.md`'s Commands, and only those.  So a line
-/// that one of them adds or drops fails here.  Each line that no tier runs
+/// Trunk build lines of `CLAUDE.md`'s Commands (`lines`), and only those.
+/// The perf gate of decision 0031, which `with_perf_gate` adds, is not a
+/// line of `lines`.  So a line that one of them adds or drops fails here.  Each line that no tier runs
 /// (`never_run`) is also a line of the Commands.
 #[test]
 fn the_push_tier_runs_the_lines_of_claude_md() {

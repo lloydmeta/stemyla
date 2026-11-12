@@ -52,7 +52,7 @@ cargo +nightly-2026-10-30 test -p roformer-gpu --doc  # CI runs it; nightly chec
 STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release  # every kernel against the CPU, and f16 against f32; fails without a GPU, or without SHADER_F16_IN_F32 (then use gpu alone)
 cargo run -p xtask -- docs-check                # the map and docs match the code
 cargo run -p xtask -- check --tier commit       # before each commit: the checks that its changed paths need
-cargo run -p xtask -- check --tier push         # before each push and each review round: the fmt, clippy, test, docs-check and Trunk lines
+cargo run -p xtask -- check --tier push         # before each push and each review round: the fmt, clippy, test, docs-check and Trunk lines; the perf gate when STEMYLA_PERF_WEIGHTS names the model
 (cd app && trunk build --release)
 cargo run -p xtask --release -- serve app/dist --port 8080
 cargo run -p xtask -- web-test                  # browser tests (needs wasm-bindgen-cli; see README)

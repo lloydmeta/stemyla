@@ -183,7 +183,13 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * `the_browser_version_comes_from_the_capabilities` at `xtask/src/webdriver.rs:750` (left `""`, right `"157.0.7000.0"`).
   * On the first try, two tests stopped on an `expect_err` and a `let ... else { panic!() }`, not on an assert.  They now assert.
   * One run of `e2e perf` in each browser passed with no baseline (Surprises).
-* [ ] Step 4: the gate in `check --tier push`.
+* [x] Step 4: the gate in `check --tier push` (2026-11-12).  The orchestrator applied the change of `CLAUDE.md` and `.claude/rules/gpu.md` at the step checkpoint.  First failures, each in `xtask/src/check.rs`, with a stub that gave the plan unchanged:
+  * `the_push_tier_runs_the_perf_gate_in_chrome_then_safari` at `assert_eq!(next, want)` (line 2018, left the skips of `setup` and `serve` after the Trunk line).
+  * `without_the_model_the_perf_gate_is_one_skip_line` at `assert_eq!(reason, ...)` (line 2036, left the reason of `setup`).
+  * `a_docs_change_skips_the_perf_gate_for_its_paths` at `assert!(skipped)` (line 2070, the skip of `setup`).
+  * `only_the_perf_gate_runs_a_browser_test` (renamed from `check_never_runs_the_browser_or_publish`) at its last `assert_eq!` (line 2151, left `[]`).
+  * `tier_commit_adds_no_perf_gate_line` passed with that stub.  With a second stub that did not read `asked`, it failed at `assert_eq!(gated, plain)` (line 2123, left a plan with the gate lines).
+  * `check --tier push --dry-run` with `STEMYLA_PERF_WEIGHTS` set prints the two run lines after the Trunk line, Chrome first.  Without it, it prints the skip line.
 * [ ] Step 5: the baselines, measured.
 * [ ] Step 6: the docs and the debt.
 * [ ] Before review round 1.
@@ -215,6 +221,9 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, agent (implementer): a pure `new_entry` builds the entry of an update from its runs.  It refuses a profile run, and runs of more than one browser, adapter or browser version.  Why: the plan's rule "no reason from `never_a_pass`" does not cover a profile run, whose times are one pass for each dispatch.
 * 2026-11-12, agent (implementer): with `--update-baselines`, a run over the old bound prints the gate's text and does not fail.  `update_refusal` decides the update.  Why: a new browser version or a `--raise` reason can make a slower baseline correct.
 * 2026-11-12, agent (implementer): `memory_budget` and `perf` share two small functions, `open_song` and `load_and_separate`.  Each returns the log's mark that `memory_budget` used before, so its checks read the same lines.
+
+* 2026-11-12, agent (implementer): GPU-3's "Enforced by" names the test `never_a_pass_names_each_reason`, not the function `never_a_pass`.  Why: `docs-check` reads each name in that line as a test name.
+* 2026-11-12, agent (implementer): the skip line of the perf gate shows `--browser chrome|safari --weights $STEMYLA_PERF_WEIGHTS`.  Why: one skip line stands for both run lines.
 
 ## Outcomes and retrospective
 
