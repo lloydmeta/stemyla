@@ -1503,12 +1503,16 @@ fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
 /// weights): 3 runs of `memory-budget` in Chrome 157 and 3 in Safari 27.2
 /// gave 12 growths, each 57 MB.  The peak is 80.16 MB, so each headroom is
 /// -23.16 MB, with a spread of 0.  The worker logs whole MB, so a growth
-/// has an error of up to 1 MB.  The constant is the largest headroom plus
-/// that 1 MB, rounded up: -22 MB.  The smallest rise of the peak from a
-/// lost cut in the GPU half is 9.44 MB (cut 3: the whole normalised input,
-/// 89.60 MB against 80.16 MB).  The spread (0), the rounding (1.16 MB) and
-/// the error of the log (1 MB) sum to 2.16 MB, less than that rise.
-const WORKER_HEADROOM_MB: f64 = -22.0;
+/// has an error of up to 1 MB.  The noise is at most 2.16 MB: the spread,
+/// the log's error and the rounding to a whole MB.  The smallest rise of
+/// the peak from a lost cut in the GPU half is 9.44 MB (cut 3: the whole
+/// normalised input, 89.60 MB against 80.16 MB).  The margin above the
+/// measured headroom is midway between the two, so that the check is no
+/// nuisance (the maintainer, 2026-11-12): -23.16 + (2.16 + 9.44) / 2 =
+/// -17.36, rounded to -17 MB.  So the budget is 63.16 MB, 6.16 MB above
+/// the measured growth of 57 MB.  The noise (2.16 MB) does not fail it,
+/// and a lost cut 3 (57 + 9.44 = 66.44 MB) does.
+const WORKER_HEADROOM_MB: f64 = -17.0;
 
 /// MEM-4's budget for the tab during a separation, in MB: page wasm,
 /// worker wasm, decoder wasm and GPU live bytes.  It is the 1,100 MB of
@@ -3157,6 +3161,17 @@ mod tests {
         let (over, over_what) = working_set_check(Some(budget + 0.1), "x=1", &log);
         assert_eq!(over, Some(false), "0.1 MB over fails: {over_what}");
         assert!(what.contains("masks"), "it names the peak's phase: {what}");
+        // The measured growth of step 8 of M1, with the noise, passes.
+        // The same growth with a lost cut 3 fails.
+        let measured = 57.0;
+        let (ok, what) = working_set_check(Some(measured + 2.16), "", &log);
+        assert_eq!(
+            ok,
+            Some(true),
+            "the measured growth with its noise passes: {what}"
+        );
+        let (ok, what) = working_set_check(Some(measured + 9.44), "", &log);
+        assert_eq!(ok, Some(false), "a lost cut 3 fails: {what}");
         assert_eq!(
             working_set_check(None, "", &log).0,
             Some(false),
