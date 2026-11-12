@@ -16,6 +16,8 @@ use super::*;
 use encode::{EncodeOut, FLAC_BLOCK, MP3_BLOCK, OutFile, alac_end};
 use js_sys::{Object, Reflect};
 use m4a::FRAMES_PER_PACKET;
+use roformer::{band_groups, widest_band};
+use roformer_gpu::net::normalise_band;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use stem_protocol::{Encode, Encoded};
@@ -3223,7 +3225,8 @@ struct PhasePeaks {
 }
 
 /// A fake GPU half that holds in WebAssembly memory what the real one
-/// holds: the normalised input during the upload, and each mask of
+/// holds: one band of the normalised input during the upload, made by the
+/// real normalisation (`normalise_band`), and each mask of
 /// `[T, FEATURES]` floats, as `Gpu::read` copies it.  As a network, it
 /// runs the real CPU half ([`chunk_stems`]), and closes a phase at each
 /// boundary that it sees.  The upload phase runs from the chunk's start
@@ -3231,14 +3234,27 @@ struct PhasePeaks {
 /// between phase runs to the next chunk's start.
 struct FakeGpu {
     frames: usize,
+    /// The gains of the widest band, all 1.
+    gains: Vec<f32>,
     peaks: Rc<RefCell<PhasePeaks>>,
 }
 
 impl GpuHalf for FakeGpu {
     fn upload(&mut self, features: &[f32]) {
-        self.frames = features.len() / FEATURES;
-        let normalised = std::hint::black_box(vec![0.0f32; features.len()]);
-        drop(normalised);
+        let frames = features.len() / FEATURES;
+        self.frames = frames;
+        // As `Job::set_input`: one band at a time, in a buffer of the
+        // widest band.  The gains are in the model, not in the chunk's
+        // working set, so they are made before the separation.
+        let mut band = vec![0.0f32; frames * widest_band()];
+        for g in band_groups() {
+            for j in 0..g.count {
+                let rows = &mut band[..frames * g.width];
+                normalise_band(features, &g, j, &self.gains[..g.width], rows);
+                std::hint::black_box(rows);
+            }
+        }
+        drop(band);
         let peak = close_phase();
         self.peaks.borrow_mut().upload.push(peak);
     }
@@ -3309,6 +3325,7 @@ async fn a_chunk_of_the_default_length_holds_its_working_set() {
     }));
     let fake = FakeGpu {
         frames: 0,
+        gains: vec![1.0; widest_band()],
         peaks: Rc::clone(&peaks),
     };
     SENT.with_borrow_mut(|sent| {

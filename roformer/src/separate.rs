@@ -14,7 +14,7 @@ use burn::tensor::{Tensor, TensorData};
 #[cfg(feature = "burn")]
 use crate::model::BsRoformer;
 use crate::stft::{Spectrum, frames_for, istft_frames, stft};
-use crate::{BINS, CHANNELS, FEATURES, HOP, N_FFT, STEMS};
+use crate::{BINS, CHANNELS, FEATURES, HOP, N_FFT, STEMS, widest_band};
 
 /// Spectra of both channels and the network input `[T, FEATURES]`
 /// (row-major), per frame ordered (bin, channel, re/im).
@@ -165,12 +165,12 @@ pub fn working_set(chunk: usize, overlap: usize) -> WorkingSet {
                 &[chunk_input, spectra, features],
             ),
             moment(
-                "the normalisation in `Job::set_input`",
+                "a band's normalisation in `Job::set_input`",
                 &[
                     chunk_input,
                     spectra,
                     features,
-                    part("normalised input", frames * FEATURES * F32),
+                    part("band buffer", frames * widest_band() * F32),
                 ],
             ),
         ],
@@ -341,8 +341,9 @@ mod tests {
         assert_eq!(part(upload, "chunk input"), 4_710_400);
         assert_eq!(part(upload, "spectra"), 18_876_400);
         assert_eq!(part(upload, "features"), 18_876_400);
-        assert_eq!(part(upload, "normalised input"), 18_876_400);
-        assert_eq!(w.upload.bytes(), 94_312_400);
+        assert_eq!(part(upload, "normalised input"), 0, "cut 3");
+        assert_eq!(part(upload, "band buffer"), 2_375_664);
+        assert_eq!(w.upload.bytes(), 77_811_664);
 
         let masks = w.masks.largest();
         assert_eq!(part(masks, "chunk input"), 4_710_400);
@@ -367,7 +368,7 @@ mod tests {
         assert_eq!(part(read, "bytes of the span"), 4_710_400);
         assert_eq!(part(read, "span"), 4_710_400);
 
-        assert_eq!(w.peak().name, "upload");
+        assert_eq!(w.peak().name, "masks");
     }
 
     /// The sizes follow the chunk: a quarter of the default chunk at

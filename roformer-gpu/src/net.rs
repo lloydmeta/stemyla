@@ -14,6 +14,7 @@
 use roformer::weights::{Dtype, Store, WeightError};
 use roformer::{
     BandGroup, DEPTH, DIM, DIM_HEAD, FEATURES, FREQS_PER_BANDS, HEADS, HIDDEN, STEMS, band_groups,
+    widest_band,
 };
 
 use crate::{Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, Rec, View, Weight, WeightFormat};
@@ -401,6 +402,27 @@ fn rope_table(seq: usize) -> Vec<f32> {
     cos
 }
 
+/// The band-split RMSNorm of band `j` of group `g`, for each frame of
+/// `features` (`[T, FEATURES]`): the band's features of the frame,
+/// divided by their norm and multiplied by `gamma` (the band's gains times
+/// the square root of its width).  It writes the band's rows `[T, width]`
+/// to `out`, which holds exactly `T x g.width` floats.
+pub fn normalise_band(features: &[f32], g: &BandGroup, j: usize, gamma: &[f32], out: &mut [f32]) {
+    let w = g.width;
+    let t = features.len() / FEATURES;
+    assert_eq!(features.len(), t * FEATURES);
+    assert_eq!(gamma.len(), w);
+    assert_eq!(out.len(), t * w);
+    for f in 0..t {
+        let src = &features[f * FEATURES + g.offset + j * w..][..w];
+        let n = src.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+        let dst = &mut out[f * w..][..w];
+        for c in 0..w {
+            dst[c] = src[c] / n * gamma[c];
+        }
+    }
+}
+
 /// Buffers and steps for one chunk of `frames` STFT frames.
 pub struct Job<'a> {
     gpu: &'a Gpu,
@@ -499,26 +521,23 @@ impl<'a> Job<'a> {
     }
 
     /// Uploads the network input `[T, FEATURES]`, applying the band-split
-    /// RMSNorm on the CPU (each band normalised over its own width).
+    /// RMSNorm on the CPU (each band normalised over its own width).  It
+    /// normalises one band at a time into a buffer of the widest band, and
+    /// writes it to the GPU at the band's offset, so it holds one band,
+    /// not the whole input.
     pub fn set_input(&self, features: &[f32]) {
         let t = self.frames;
         assert_eq!(features.len(), t * FEATURES);
-        let mut out = vec![0.0f32; t * FEATURES];
+        let mut band = vec![0.0f32; t * widest_band()];
         for sg in &self.net.split {
             let (g, w) = (sg.g, sg.g.width);
             for j in 0..g.count {
-                let gamma = &sg.gamma[j * w..(j + 1) * w];
-                for f in 0..t {
-                    let src = &features[f * FEATURES + g.offset + j * w..][..w];
-                    let n = src.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
-                    let dst = &mut out[t * g.offset + (j * t + f) * w..][..w];
-                    for c in 0..w {
-                        dst[c] = src[c] / n * gamma[c];
-                    }
-                }
+                let rows = &mut band[..t * w];
+                normalise_band(features, &g, j, &sg.gamma[j * w..(j + 1) * w], rows);
+                self.gpu
+                    .write(&self.split_in, t * g.offset + j * t * w, rows);
             }
         }
-        self.gpu.write(&self.split_in, 0, &out);
     }
 
     /// Replaces the hidden state `[BANDS, T, DIM]` (to run single layers).
@@ -898,6 +917,72 @@ impl<'a> Job<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The normalised input `[count, T, width]` for each group, as
+    /// `Job::set_input` made it whole before it wrote one band at a
+    /// time: the reference for [`normalise_band`].
+    fn normalised_whole(features: &[f32], gammas: &[Vec<f32>]) -> Vec<f32> {
+        let t = features.len() / FEATURES;
+        let mut out = vec![0.0f32; t * FEATURES];
+        for (g, gamma) in band_groups().iter().zip(gammas) {
+            let w = g.width;
+            for j in 0..g.count {
+                let gamma = &gamma[j * w..(j + 1) * w];
+                for f in 0..t {
+                    let src = &features[f * FEATURES + g.offset + j * w..][..w];
+                    let n = src.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+                    let dst = &mut out[t * g.offset + (j * t + f) * w..][..w];
+                    for c in 0..w {
+                        dst[c] = src[c] / n * gamma[c];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A value in -1..1 from `k`, with no pattern.
+    fn noise(k: usize) -> f32 {
+        let h = (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+        (h % 2001) as f32 / 1000.0 - 1.0
+    }
+
+    /// Cut 3 of M1 of `plans/active/gpu-speed.md`: the bands of
+    /// `normalise_band`, put together at the offsets that
+    /// `Job::set_input` writes them to, equal the normalised input made
+    /// whole, bit for bit.  One frame of one band is all zeros, so the
+    /// floor of the norm is in the test.  The buffer of the widest band
+    /// holds each band.
+    #[test]
+    fn bands_normalised_one_at_a_time_equal_the_whole_input() {
+        let t = 37;
+        let mut features: Vec<f32> = (0..t * FEATURES).map(noise).collect();
+        let quiet = band_groups()[2];
+        features[5 * FEATURES + quiet.offset..][..quiet.width].fill(0.0);
+        let gammas: Vec<Vec<f32>> = band_groups()
+            .iter()
+            .map(|g| {
+                (0..g.count * g.width)
+                    .map(|k| 1.0 + noise(k + 11))
+                    .collect()
+            })
+            .collect();
+        let want = normalised_whole(&features, &gammas);
+        let mut got = vec![f32::NAN; t * FEATURES];
+        let mut band = vec![0.0f32; t * widest_band()];
+        for (g, gamma) in band_groups().iter().zip(&gammas) {
+            let w = g.width;
+            assert!(w <= widest_band(), "the buffer holds band group {g:?}");
+            for j in 0..g.count {
+                let rows = &mut band[..t * w];
+                normalise_band(&features, g, j, &gamma[j * w..(j + 1) * w], rows);
+                got[t * g.offset + j * t * w..][..t * w].copy_from_slice(rows);
+            }
+        }
+        for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(g.to_bits(), w.to_bits(), "float {k}");
+        }
+    }
 
     /// Without the scores buffer, a time-axis step takes 4 bands of a full
     /// chunk instead of 1 at the default budget.
