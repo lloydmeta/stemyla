@@ -1497,9 +1497,17 @@ fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
 /// at the default chunk and overlap with f16 weights.  It is the
 /// allocator's overhead, its fragmentation and the rounding to 64 KiB
 /// pages, less the heap that is free at the separation's start.  So it
-/// can be less than 0.  Before M1's cuts, in Chrome, the worker grew by
-/// 95 MB with a peak of 117.86 MB: -22.86 MB.  Step 8 of M1 measures it
-/// after the cuts.
+/// can be less than 0.
+///
+/// The proof (step 8 of M1, 2026-11-12, at the default chunk with f16
+/// weights): 3 runs of `memory-budget` in Chrome 157 and 3 in Safari 27.2
+/// gave 12 growths, each 57 MB.  The peak is 80.16 MB, so each headroom is
+/// -23.16 MB, with a spread of 0.  The worker logs whole MB, so a growth
+/// has an error of up to 1 MB.  The constant is the largest headroom plus
+/// that 1 MB, rounded up: -22 MB.  The smallest rise of the peak from a
+/// lost cut in the GPU half is 9.44 MB (cut 3: the whole normalised input,
+/// 89.60 MB against 80.16 MB).  The spread (0), the rounding (1.16 MB) and
+/// the error of the log (1 MB) sum to 2.16 MB, less than that rise.
 const WORKER_HEADROOM_MB: f64 = -22.0;
 
 /// MEM-4's budget for the tab during a separation, in MB: page wasm,
