@@ -24,7 +24,7 @@ B.
 
 ## Consequences
 
-* The push check takes about 3.5 minutes more: one run in each browser.  The screen stays unlocked, and the Mac stays unused, during the Safari run (`references/local-browser-testing.md`).
+* The push check takes about 3 minutes more: one run in each browser (2.8 minutes measured on 2026-11-12).  The screen stays unlocked, and the Mac stays unused, during the Safari run (`references/local-browser-testing.md`).
 * A machine without the variable prints the skip line, and runs as before.  CI does not set it.
 * GIT-2 in `invariants.md`, `CLAUDE.md` and `.claude/rules/gpu.md` change in the same commit (DOC-1).
 * The gate's tolerance comes from at least 5 runs in each browser, and is never under 10 % (`xtask/src/e2e/perf.rs`).

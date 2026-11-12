@@ -191,10 +191,10 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * `only_the_perf_gate_runs_a_browser_test` (renamed from `check_never_runs_the_browser_or_publish`) at its last `assert_eq!` (line 2151, left `[]`).
   * `tier_commit_adds_no_perf_gate_line` passed with that stub.  With a second stub that did not read `asked`, it failed at `assert_eq!(gated, plain)` (line 2123, left a plan with the gate lines).
   * `check --tier push --dry-run` with `STEMYLA_PERF_WEIGHTS` set prints the two run lines after the Trunk line, Chrome first.  Without it, it prints the skip line.
-* [ ] Step 5: the baselines, measured (2026-11-12).
+* [x] Step 5: the baselines, measured (2026-11-12).  Baselines at `1a79cdd`, committed in `d45ce3e`: Chrome 4.70 s, Safari 7.40 s, each with a tolerance of 10 %.  The forced flips, the push check with the gate, the profile groups and the selftests are in Surprises.
   * 5.1 at `7265b9e` gave tolerances of 22 % and 28 % on the chunk median (Surprises), over the 20 % limit of 5.4.  The team leader chose the chunk lower quartile (Decision log).
   * First failures of the change: `the_lower_quartile_is_the_value_at_a_quarter_by_nearest_rank` at `assert_eq!(lower_quartile(&ten), 4.8)` (`perf.rs:571`, left 0.0), with a stub that gave 0.0.  With the tests on the lower quartile and the gate still on the median, `the_gate_fails_only_over_the_bound` failed at `assert!(text.contains(part))` (`perf.rs:823`, "chunk lower quartile 5.50 s: chunk median 4.70 s, ...").  `an_entry_holds_the_runs_and_the_median_of_their_lower_quartiles` failed at `assert_eq!(e.baseline, 5.0)` (`perf.rs:904`, left 4.7).
-* [ ] Step 6: the docs and the debt.
+* [x] Step 6: the docs and the debt (2026-11-12).  Each doc changed in the commit of its step.  `xtask/src/e2e.rs` and `README.md` changed in Step 3 and with the lower quartile.  The perf gate section of `docs/references/local-browser-testing.md`, decision 0031, its `docs/README.md` line, 0026's "Amended by" line, GIT-2, GPU-3, `docs/working-with-agents.md` and TD-10 changed in Step 4.  TD-10 changed in Step 1 too.  The orchestrator applied the changes of `CLAUDE.md` and `.claude/rules/gpu.md` (Step 4, and the lower quartile).  The measured gate time (2.8 minutes) replaced "about 3.5 minutes" in Step 5.  The diff for the parent plan's Surprises is `m2/parent-surprises.diff` in the session's scratch folder.
 * [ ] Before review round 1.
 * [ ] Review rounds.
 
@@ -223,6 +223,12 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * Chrome `mm=v64,i64`: 4.70 s, 0 %.
   * Safari `attn=freq` (time axis split): 8.10 s in two runs, each with all 10 chunks at 8.0 to 8.1 s.  +0.70 s, 9.5 % over the baseline.  The bound is 7.40 x 1.10 = 8.14 s, so the margin is 0.04 s, under the log's 0.1 s step.
   * Safari `mm=v64,i64`: 7.40 s, 0 %.
+* 2026-11-12, Step 5.5, at `d45ce3e`: `check --tier push` with `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` set passed, 15 lines in 406.6 s.  The two gate lines ran after the GPU tests and the Trunk build.  Chrome: chunk lower quartile 4.70 s, bound 5.17 s, margin 0.47 s (10.0 %), line time 70.2 s.  Safari: 7.40 s, bound 8.14 s, margin 0.74 s (10.0 %), line time 99.4 s.  So the gate added 2.8 minutes.  The debug `xtask` and `long_song` fit in those line times, well under 30 s.
+* 2026-11-12, Step 5.6: one `e2e perf --query profile=1` run in each browser, GPU seconds by group (one pass for each dispatch, so not gated).
+  * Chrome: time-axis attention 20.03 s (43.6 %), frequency-axis attention 1.81 s (3.9 %), linear products 22.02 s (47.9 %), other 2.10 s (4.6 %); total 45.96 s.  Chunk lower quartile 5.00 s with profiling.
+  * Safari: time-axis attention 36.93 s (47.2 %), frequency-axis attention 2.73 s (3.5 %), linear products 35.32 s (45.2 %), other 3.20 s (4.1 %); total 78.18 s.  Chunk lower quartile 7.50 s with profiling.
+  * Chrome's time-axis group (20.03 s) matches the parent's Context (scores 7.7 s, P.v 7.8 s, softmax 4.4 s).
+* 2026-11-12, Step 5.7: `e2e selftest --weights <path>` passed in Chrome and Safari (worst stage 69.4 dB).  Each `selftest: GPU` line has the fallback text: `apple metal-3, fallback adapter no` and `apple apple apple, fallback adapter no` (TD-10).
 
 ## Decision log
 
