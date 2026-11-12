@@ -146,7 +146,7 @@ Every behaviour is verified by an automated check; "it compiles" is not acceptan
 
 * Why: the most frequent review finding in this repo's history was a test that could not fail (`docs/harness.md`).
 * Enforced by: CI (`.github/workflows/ci.yml`) and review.  `every_skip_can_be_required` fails a skip message that does not go through `test_support::skip`, and `the_skip_allowlist_is_current` fails a stale exception.  `a_required_need_that_cannot_run_fails` and `a_required_skip_fails_and_names_the_caller` check that a required skip fails.  `a_wasm_build_reads_the_build_value` checks that a wasm32 build gives the value of its build to the skip line.  `a_native_build_ignores_the_build_value` checks that a native build does not.  CI's `test` job compares the UI snapshots in `app/tests/ui.rs` with the committed PNGs, and `no_build_file_updates_snapshots` keeps `UPDATE_SNAPSHOTS` out of the build files.
-* Gaps: TD-8, TD-19, TD-29, TD-39, TD-43, TD-53, TD-60, TD-63, TD-65, TD-66, TD-92, TD-93, TD-96.
+* Gaps: TD-8, TD-19, TD-29, TD-39, TD-43, TD-53, TD-60, TD-63, TD-65, TD-66, TD-92, TD-93, TD-96, TD-98.
 
 ### GIT-1: push only when asked, never to main or gh-pages; never publish or merge a PR
 

@@ -19,6 +19,9 @@
 //!
 //! It runs each crate, also after a crate fails.  Then it prints one line
 //! for each crate, and fails with the name of each crate that failed.
+//! It exits with [`HANG_EXIT_CODE`] when each failed crate failed only by
+//! the runner's hang (TD-98, [`exit_code`]).  Each other failure exits
+//! with 1.  CI retries only the hang exit code.
 //!
 //! It sets Cargo's runner and the driver through the environment, so no
 //! `.cargo/config.toml` is needed, and it checks that the installed runner
@@ -82,7 +85,23 @@ fn parse_args(args: &[String], browser: Browser) -> Result<Options> {
     Ok(options)
 }
 
-pub fn run(args: &[String]) -> Result<()> {
+/// The exit code of a `web-test` whose each failed crate failed only by
+/// the runner's hang (TD-98).  It is `EX_TEMPFAIL` of `sysexits.h`.
+pub const HANG_EXIT_CODE: i32 = 75;
+
+/// Runs `web-test`, and gives its exit code: 0 when it passed,
+/// [`HANG_EXIT_CODE`] or 1 when it failed ([`exit_code`]).
+pub fn main(args: &[String]) -> i32 {
+    match run(args) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            1
+        }
+    }
+}
+
+fn run(args: &[String]) -> Result<i32> {
     let Options {
         browser,
         filter,
@@ -182,12 +201,63 @@ pub fn run(args: &[String]) -> Result<()> {
     match verdict(&results, &outputs, filter.as_deref()) {
         Ok(lines) => {
             println!("{lines}");
-            Ok(())
+            Ok(0)
         }
-        Err(lines) => bail!(
-            "{lines}\nbrowser tests failed in {browser:?}; if no test ran, check the driver: {}",
-            browser.setup_hint()
-        ),
+        Err(lines) => {
+            eprintln!(
+                "Error: {lines}\nbrowser tests failed in {browser:?}; if no test ran, check the driver: {}",
+                browser.setup_hint()
+            );
+            let code = exit_code(&results, &outputs);
+            if code == HANG_EXIT_CODE {
+                eprintln!(
+                    "web-test: each failed crate failed only by the runner's hang (\"{HANG}\"); exit code {HANG_EXIT_CODE} (TD-98)"
+                );
+            }
+            Ok(code)
+        }
+    }
+}
+
+/// The line that `wasm-bindgen-test-runner` 0.2.130 prints when a test
+/// page gives no `test result: ` line in the time limit (`headless.rs`).
+const HANG: &str = "Failed to detect test as having been run. It might have timed out.";
+
+/// The parts of lines that show a failure other than the hang.  They are
+/// a failed test, a failed test binary, a panic and a failed WebDriver
+/// request.
+const NOT_A_HANG: [&str; 4] = [
+    " ... FAILED",
+    "test result: FAILED",
+    "panicked at ",
+    "request failed",
+];
+
+/// Whether the output of a failed crate run shows only the runner's hang.
+/// It has the [`HANG`] line, and no line that holds a part of
+/// [`NOT_A_HANG`].
+fn failed_only_by_the_hang(output: &str) -> bool {
+    let output = plain(output);
+    output.lines().any(|line| line.trim() == HANG)
+        && !output
+            .lines()
+            .any(|line| NOT_A_HANG.iter().any(|part| line.contains(part)))
+}
+
+/// The exit code of a failed `web-test`.  It is [`HANG_EXIT_CODE`] when at
+/// least one crate failed, and [`failed_only_by_the_hang`] holds for each
+/// failed crate.  Else it is 1.
+fn exit_code(results: &[(&str, bool)], outputs: &[String]) -> i32 {
+    let failed: Vec<&str> = results
+        .iter()
+        .zip(outputs)
+        .filter(|((_, passed), _)| !passed)
+        .map(|(_, output)| output.as_str())
+        .collect();
+    if !failed.is_empty() && failed.iter().all(|output| failed_only_by_the_hang(output)) {
+        HANG_EXIT_CODE
+    } else {
+        1
     }
 }
 
@@ -495,6 +565,131 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             Some("0.4.79")
         );
         assert_eq!(locked_version(LOCK, "wasm"), None);
+    }
+
+    /// The output of a crate run that hung, as in CI run 43229036261
+    /// (TD-98).
+    const HUNG: &str = "     Running tests/web_output.rs (target/wasm32-unknown-unknown/debug/deps/web_output-ae8a3c20e4ab00f7.wasm)\n\
+        Running headless tests in Safari on `http://127.0.0.1:49241/`\n\
+        Loading Wasm module...\n\
+        Failed to detect test as having been run. It might have timed out.\n\
+        driver status: signal: 9 (SIGKILL)\n\
+        Error: some tests failed\n\
+        error: test failed, to rerun pass `-p app --test web_output`\n";
+
+    /// The output of a crate run with a failed test, as in CI run
+    /// 43152005940.
+    const A_FAILED_TEST: &str = "test web::tests::a_mix_file_changed_after_the_open_gives_no_old_samples ... FAILED\n\
+        failures:\n\
+        \x20       panicked at worker/src/web/tests.rs:3576:24:\n\
+        test result: FAILED. 109 passed; 1 failed; 0 ignored; 0 filtered out; finished in 63.72s\n";
+
+    /// The output of a crate run whose WebDriver request failed, as in CI
+    /// run 43223719719.
+    const A_FAILED_REQUEST: &str = "Error: webdriver POST /session/ABE2DB61/execute/sync request failed\n\
+        error: test failed, to rerun pass `-p engine --lib`\n";
+
+    fn outputs(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|text| text.to_string()).collect()
+    }
+
+    /// Asserts:
+    /// * one failed crate that hung gives [`HANG_EXIT_CODE`];
+    /// * two failed crates that both hung give [`HANG_EXIT_CODE`];
+    /// * a passed crate with any output does not change the code;
+    /// * a hang line in colour gives [`HANG_EXIT_CODE`].
+    #[test]
+    fn only_hung_crates_give_the_hang_exit_code() {
+        let results = [("app", false), ("engine", true)];
+        assert_eq!(
+            exit_code(&results, &outputs(&[HUNG, A_FAILED_TEST])),
+            HANG_EXIT_CODE
+        );
+        let both = [("app", false), ("stem-worker", false)];
+        assert_eq!(exit_code(&both, &outputs(&[HUNG, HUNG])), HANG_EXIT_CODE);
+        let coloured = HUNG.replace("Failed to detect", "\u{1b}[31mFailed to detect");
+        assert_eq!(
+            exit_code(&results[..1], &outputs(&[&coloured])),
+            HANG_EXIT_CODE
+        );
+    }
+
+    /// Asserts that each of these gives 1:
+    /// * a hung crate and a crate with a failed test (CI run 43152005940);
+    /// * a failed WebDriver request (CI run 43223719719);
+    /// * a hang after a failed test in the same crate run;
+    /// * a hang and a panic in the same crate run;
+    /// * a hang and a failed WebDriver request in the same crate run;
+    /// * a failed crate with no output;
+    /// * no failed crate, as when a filter matched no test.
+    #[test]
+    fn each_other_failure_gives_exit_code_1() {
+        let two = [("app", false), ("stem-worker", false)];
+        assert_eq!(exit_code(&two, &outputs(&[HUNG, A_FAILED_TEST])), 1);
+        let one = [("engine", false)];
+        assert_eq!(exit_code(&one, &outputs(&[A_FAILED_REQUEST])), 1);
+        let after_a_failed_test = format!("test lloyd ... FAILED\n{HUNG}");
+        assert_eq!(exit_code(&one, &outputs(&[&after_a_failed_test])), 1);
+        let with_a_panic = format!("    panicked at app/src/lib.rs:1:1:\n{HUNG}");
+        assert_eq!(exit_code(&one, &outputs(&[&with_a_panic])), 1);
+        let with_a_request = format!("{HUNG}{A_FAILED_REQUEST}");
+        assert_eq!(exit_code(&one, &outputs(&[&with_a_request])), 1);
+        assert_eq!(exit_code(&one, &outputs(&[""])), 1);
+        assert_eq!(exit_code(&[("app", true)], &outputs(&[HUNG])), 1);
+    }
+
+    /// Asserts that a line that only holds the hang text in other words
+    /// is not the hang.
+    #[test]
+    fn only_the_whole_hang_line_is_the_hang() {
+        assert!(failed_only_by_the_hang(HUNG));
+        assert!(!failed_only_by_the_hang(
+            "Failed to detect test as having been run.\n"
+        ));
+        assert!(!failed_only_by_the_hang(
+            "note: Failed to detect test as having been run. It might have timed out. lloyd\n"
+        ));
+    }
+
+    /// The `with:` lines of each `nick-fields/retry` step of the workflow
+    /// `ci`, trimmed.
+    fn retry_inputs(ci: &str) -> Vec<Vec<&str>> {
+        ci.split("uses: nick-fields/retry@")
+            .skip(1)
+            .map(|step| {
+                step.lines()
+                    .skip(1)
+                    .map(str::trim)
+                    .filter(|l| !l.starts_with('#'))
+                    .take_while(|l| !l.starts_with("- "))
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// Finding 1-5 of review round 1 of M3 of `gpu-speed`.  Asserts that CI
+    /// has 2 retry steps, and that each:
+    /// * runs `xtask -- web-test`;
+    /// * retries on [`HANG_EXIT_CODE`] only;
+    /// * has no `retry_on`, which would retry each failure.
+    #[test]
+    fn ci_runs_web_test_again_only_after_the_hang() {
+        let steps = retry_inputs(include_str!("../../.github/workflows/ci.yml"));
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        let code = format!("retry_on_exit_code: {HANG_EXIT_CODE}");
+        for inputs in steps {
+            assert!(
+                inputs
+                    .iter()
+                    .any(|l| l.starts_with("command: cargo run --locked -p xtask -- web-test ")),
+                "{inputs:?}"
+            );
+            assert!(inputs.contains(&code.as_str()), "{inputs:?}");
+            assert!(
+                !inputs.iter().any(|l| l.starts_with("retry_on:")),
+                "{inputs:?}"
+            );
+        }
     }
 
     #[test]

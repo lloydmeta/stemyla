@@ -504,19 +504,21 @@ This entry concerns VERIFY-1.  The causes are outside the repo (step 9 of `plans
 * A hidden test page: on 2026-11-11, 2 Safari 27.2 runs of `app --lib` stopped with no failure, while a person used the Mac.  One stopped after 182 tests, in `playback_tests::the_page_reads_a_lane_one_block_at_a_time`.  The other stopped after 82 tests, in `save_tests::a_stopped_worker_leaves_no_save_files_and_takes_no_encode`.  Safari's unified log shows the cause.  Before each stop, the test page became hidden ("view visibility state changed 1 -> 0"), and stayed hidden.  WebKit then gave its process a background assertion only, and later tried to suspend it.  In the second run, a click in the automation window showed the "Automation Interruption" alert.  The runner's limit of 600 s ended the first run.  One run passed with the page hidden at times, so a hidden page does not always stop a run.  The logs are in `m2/i1-3/` (intent review I1-3 of M2).  Fix: none in the repo.  Do not use the Mac during a Safari run.
 * WebKit bug 246069 ([Use AbortSignal.reason in Fetch code](https://bugs.webkit.org/show_bug.cgi?id=246069), NEW on 2026-11-11): Safari 27.2 rejects an aborted fetch with its own `AbortError`.  The worker gives the abort reason in its place (`download_to_opfs` in `worker/src/web.rs`).  Fix: remove the workaround when WebKit gives the reason.
 
-### TD-98: CI retries the `web-test` steps of the macOS job
+### TD-98: CI runs the `web-test` steps of the macOS job again after the runner's hang
 
-This entry concerns VERIFY-1.  It is a workaround: a retried test can hide a failure that comes and goes.
+This entry concerns VERIFY-1.  It is a workaround: a step that runs again can hide a hang that comes and goes.
 
-* The cause: on the `macos-latest` runner, `wasm-bindgen-test-runner` sometimes waits its 600 s limit for a test page that never reports.  It then prints "Failed to detect test as having been run.  It might have timed out."  On 2026-11-12 this failed 4 runs on branch `gpu-speed/2026-11-12`, in crates and tests that the branch did not change, and that passed on the maintainer's Mac:
-  * run 43152005940, Safari, `app` `web_close`;
-  * run 43223719719, Safari, `engine --lib` (a WebDriver `execute/sync` request failed);
-  * run 43229036261, Safari, `app` `web_output`;
-  * its rerun, Chrome, `stem-worker` `a_real_aac_decodes_to_the_source` (10 min to the timeout; 1.38 s on the Mac).
-* Of 21 runs of the Safari `web-test` step on 2026-11-11 and 2026-11-12, 3 failed.
-* The workaround: `.github/workflows/ci.yml` runs the Safari `web-test` and the Chrome AAC step through `nick-fields/retry` v4.0.0, pinned by its SHA.  Each step runs up to 3 times, with `warning_on_retry`, so each retry shows in the run's warnings.  At a failure rate of 14 % to 30 % for each attempt, 3 attempts leave 0.3 % to 2.7 %.  The job's limit grew from 180 to 285 minutes for the attempts.
-* Who looks: a person who sees a retry warning on a step that the branch changed treats it as a failure.
-* Fix: find why the test page does not report on the runner, then remove the retry.  `web-test` could also retry only the crate whose runner prints that text, in place of the whole step.
+* The cause: on the `macos-latest` runner, `wasm-bindgen-test-runner` sometimes waits its 600 s limit for a test page that never reports.  It then prints "Failed to detect test as having been run. It might have timed out." (`headless.rs` of wasm-bindgen-cli 0.2.130).  Why the page does not report is not known.  It can be the hidden test page of [TD-96](#td-96-the-safari-tests-depend-on-the-macs-session-and-on-webkit), which also stopped Safari runs with no failure.
+* The failures on 2026-11-12, on branch `gpu-speed/2026-11-12`: 4 attempts in 3 runs.
+  * Run 43152005940, Safari: `app` `web_close` hung.  In the same run, `stem-worker` failed `a_mix_file_changed_after_the_open_gives_no_old_samples` ("shortened: the read gave the old samples"), with no hang.
+  * Run 43223719719, Safari, `engine --lib`: a WebDriver `execute/sync` request failed, with no hang.
+  * Run 43229036261, attempt 1, Safari: `app` `web_output` hung.
+  * Run 43229036261, attempt 2, Chrome: `stem-worker` `a_real_aac_decodes_to_the_source` hung.  The step took 10.5 minutes; the test takes 1.38 s on the maintainer's Mac.
+* The branch did not change the failed tests.  It did change `stem-worker` (`worker/src/web.rs`, `worker/src/web/tests.rs`), the crate of the AAC test and of `a_mix_file_changed_after_the_open_gives_no_old_samples`.  Each failed test passed on the maintainer's Mac.
+* The rates: from run 42952206488 (2026-11-11) to run 43229036261 (2026-11-12), 3 of 34 Safari `web-test` steps failed (8.8 %).  1 of 22 Chrome AAC steps failed (4.5 %).  Only 2 of the Safari failures were hangs.  The cancelled steps are not counted.  Source: the jobs of each run of `ci.yml` in that range (`gh api .../attempts/<n>/jobs`, read on 2026-11-13).  The attempts of a step run on one runner, so they may not fail independently.  So no rate is given for 3 attempts.
+* The workaround: `.github/workflows/ci.yml` runs the Safari `web-test` and the Chrome AAC step through `nick-fields/retry` v4.0.0, pinned by its SHA.  `web-test` exits with 75 when each failed crate failed only by the hang (`exit_code` in `xtask/src/web_test.rs`).  Each other failure exits with 1.  Each step runs again, up to 3 attempts, only on exit code 75 (`retry_on_exit_code`).  So a failed test, a panic or a failed WebDriver request fails the step at once.  Of the 4 failed attempts above, the retry covers the 2 hangs of run 43229036261.  It does not cover run 43152005940, where `stem-worker` also failed, or the `execute/sync` failure of run 43223719719.  An attempt that reaches its `timeout_minutes` is not run again.  Each retry shows a warning in the run.  The job's limit grew from 180 to 285 minutes for the attempts.
+* Who looks: the person who reviews a PR.  Each "Attempt <n> failed" warning of a step of the `macos` job is a hang.  The attempt's log names the crate that hung.  If the PR changes that crate, the person runs `cargo run -p xtask -- web-test --browser <browser>` on a Mac before the merge.  It must pass.
+* Fix: find why the test page does not report on the runner, then remove the retry.  `web-test` could also run only the crate that hung again, in place of the whole step.
 
 ## Known breaches
 

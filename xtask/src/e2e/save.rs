@@ -2558,22 +2558,82 @@ mod tests {
     }
 
     /// The time, in minutes, that the limit of a job keeps for its steps
-    /// other than `e2e save`, by job key.  Each time is more than the
-    /// longest measured run of those steps.  In `browser-tests`, they took
-    /// 10.5, 15.3 and 19.7 minutes (runs 42777211457, 40894815433 and
-    /// 42952206488).  In `macos`, they took 37.0 minutes in run
-    /// 42952206488, with no cache.  Its two `web-test` steps now run up to
-    /// 3 times (TD-98), 75 and 45 minutes at most, in place of the 14.2
-    /// and about 1 measured: 141.8 minutes at most.
-    const OTHER_STEPS_MINUTES: [(&str, u64); 2] = [("browser-tests", 20), ("macos", 145)];
+    /// other than `e2e save` and the retry steps, by job key.  Each time
+    /// is more than the longest measured run of those steps.  In
+    /// `browser-tests`, they took 10.5, 15.3 and 19.7 minutes (runs
+    /// 42777211457, 40894815433 and 42952206488).  In `macos`, they took
+    /// 24.8 minutes in run 43108510738 (2026-11-11, with no cache).  That
+    /// is the longest of the macOS jobs from 2026-11-11 to 2026-11-12.
+    /// [`retry_minutes`] gives the time of the retry steps.
+    const OTHER_STEPS_MINUTES: [(&str, u64); 2] = [("browser-tests", 20), ("macos", 25)];
+
+    /// The inputs of one `nick-fields/retry` step that set its longest
+    /// time.  `None` is an input that the step does not give.
+    #[derive(Debug, PartialEq, Eq)]
+    struct RetryStep {
+        max_attempts: Option<u64>,
+        timeout_minutes: Option<u64>,
+        retry_wait_seconds: Option<u64>,
+    }
+
+    /// The `retry_wait_seconds` of `nick-fields/retry` v4.0.0 when a step
+    /// gives none (`action.yml` at
+    /// <https://github.com/nick-fields/retry/blob/ad984534de44a9489a53aefd81eb77f87c70dc60/action.yml>,
+    /// 2026-11-13).
+    const RETRY_WAIT_DEFAULT_S: u64 = 10;
+
+    /// Each `nick-fields/retry` step of the job text `job`, in order.
+    fn retry_steps(job: &str) -> Vec<RetryStep> {
+        job.split("uses: nick-fields/retry@")
+            .skip(1)
+            .map(|step| {
+                let inputs: Vec<&str> = step
+                    .lines()
+                    .skip(1)
+                    .map(str::trim)
+                    .filter(|l| !l.starts_with('#'))
+                    .take_while(|l| !l.starts_with("- "))
+                    .collect();
+                let input = |name: &str| {
+                    inputs
+                        .iter()
+                        .find_map(|l| l.strip_prefix(name)?.strip_prefix(':'))
+                        .and_then(|v| v.trim().parse().ok())
+                };
+                RetryStep {
+                    max_attempts: input("max_attempts"),
+                    timeout_minutes: input("timeout_minutes"),
+                    retry_wait_seconds: input("retry_wait_seconds"),
+                }
+            })
+            .collect()
+    }
+
+    /// The longest time of the retry steps `steps`, in whole minutes, or
+    /// `None` when a step gives no `max_attempts` or `timeout_minutes`.
+    /// Each attempt may take its `timeout_minutes`.  The action waits
+    /// `retry_wait_seconds` after each failed attempt, also after the last
+    /// (`runCmd` in `src/index.ts` at the same commit, 2026-11-13).
+    fn retry_minutes(steps: &[RetryStep]) -> Option<u64> {
+        let seconds: Option<u64> = steps
+            .iter()
+            .map(|step| {
+                let wait = step.retry_wait_seconds.unwrap_or(RETRY_WAIT_DEFAULT_S);
+                Some(step.max_attempts? * (step.timeout_minutes? * 60 + wait))
+            })
+            .sum();
+        seconds.map(|s| s.div_ceil(60))
+    }
 
     /// A job of a workflow with `e2e save` steps: its key, its
-    /// `timeout-minutes`, and the limits of its save steps.
+    /// `timeout-minutes`, the limits of its save steps, and its retry
+    /// steps.
     #[derive(Debug, PartialEq, Eq)]
     struct SaveJob {
         key: String,
         limit: Option<u64>,
         steps: Vec<Option<u64>>,
+        retries: Vec<RetryStep>,
     }
 
     /// Each job of the workflow `ci` that has an `e2e save` step, in order.
@@ -2605,13 +2665,15 @@ mod tests {
                     .find_map(|l| l.strip_prefix("    timeout-minutes:"))
                     .and_then(|m| m.trim().parse().ok()),
                 steps: save_step_limits(&lines.join("\n")),
+                retries: retry_steps(&lines.join("\n")),
             })
             .filter(|job| !job.steps.is_empty())
             .collect()
     }
 
     /// Why the limit of `job` is too short, or `None`.  The job limit
-    /// must hold each save step at its limit, and the time of the job in
+    /// must hold each save step at its limit, and the [`retry_minutes`] of
+    /// its retry steps.  It must also hold the time of the job in
     /// [`OTHER_STEPS_MINUTES`] for the other steps.
     fn job_limit_problem(job: &SaveJob) -> Option<String> {
         let Some(&(_, others)) = OTHER_STEPS_MINUTES.iter().find(|(key, _)| *key == job.key) else {
@@ -2621,22 +2683,29 @@ mod tests {
             ));
         };
         let steps: Option<u64> = job.steps.iter().copied().sum();
-        match (job.limit, steps) {
-            (Some(limit), Some(steps)) if limit >= steps + others => None,
+        let retries = retry_minutes(&job.retries);
+        match (job.limit, steps, retries) {
+            (Some(limit), Some(steps), Some(retries)) if limit >= steps + retries + others => None,
             _ => Some(format!(
-                "job {}: timeout-minutes {:?} does not hold the save steps {:?} and {others} minutes for the other steps",
-                job.key, job.limit, job.steps
+                "job {}: timeout-minutes {:?} does not hold the save steps {:?}, the retry steps {:?} ({retries:?} minutes) and {others} minutes for the other steps",
+                job.key, job.limit, job.steps, job.retries
             )),
         }
     }
 
     /// Review round 2 of M2 (2-5): each save step may take its whole
-    /// limit, so the job limit must hold all of them.
+    /// limit, so the job limit must hold all of them.  Asserts:
+    /// * the jobs with save steps are `browser-tests` and `macos`;
+    /// * `macos` has 2 retry steps, and `browser-tests` none;
+    /// * the limit of each job holds its save steps, its retry steps and
+    ///   its other steps.
     #[test]
     fn the_ci_job_limit_holds_its_save_steps() {
         let jobs = save_jobs(include_str!("../../../.github/workflows/ci.yml"));
         let keys: Vec<&str> = jobs.iter().map(|job| job.key.as_str()).collect();
         assert_eq!(keys, ["browser-tests", "macos"]);
+        let retries: Vec<usize> = jobs.iter().map(|job| job.retries.len()).collect();
+        assert_eq!(retries, [0, 2]);
         for job in &jobs {
             assert_eq!(job_limit_problem(job), None);
         }
@@ -2688,6 +2757,7 @@ mod tests {
                 key: "browser".to_string(),
                 limit: Some(120),
                 steps: vec![Some(60), Some(60)],
+                retries: Vec::new(),
             }
         );
         assert_eq!(the_job("browser", "", &[60]).limit, None);
@@ -2698,16 +2768,16 @@ mod tests {
     #[test]
     fn a_job_limit_that_the_save_steps_can_use_up_fails() {
         let limit = |minutes: u64| format!("    timeout-minutes: {minutes}\n");
-        let problem = job_limit_problem(&the_job("macos", &limit(135), &[60, 60]));
+        let problem = job_limit_problem(&the_job("macos", &limit(120), &[60, 60]));
         assert!(
             problem
                 .as_deref()
                 .is_some_and(|p| p.starts_with("job macos: ")),
             "{problem:?}"
         );
-        assert!(job_limit_problem(&the_job("macos", &limit(264), &[60, 60])).is_some());
+        assert!(job_limit_problem(&the_job("macos", &limit(144), &[60, 60])).is_some());
         assert_eq!(
-            job_limit_problem(&the_job("macos", &limit(265), &[60, 60])),
+            job_limit_problem(&the_job("macos", &limit(145), &[60, 60])),
             None
         );
         assert!(job_limit_problem(&the_job("browser-tests", &limit(79), &[60])).is_some());
@@ -2720,8 +2790,85 @@ mod tests {
             key: "macos".to_string(),
             limit: Some(180),
             steps: vec![Some(60), None],
+            retries: Vec::new(),
         };
         assert!(job_limit_problem(&no_step_limit).is_some());
+    }
+
+    /// A `nick-fields/retry` step with `max_attempts` of `attempts`,
+    /// `timeout_minutes` of `minutes`, and `retry_wait_seconds` of `wait`
+    /// when it is given.
+    fn retry_step(attempts: u64, minutes: u64, wait: Option<u64>) -> String {
+        let wait = wait.map_or(String::new(), |s| {
+            format!("\x20         retry_wait_seconds: {s}\n")
+        });
+        format!(
+            "\x20     # lloyd's retry, max_attempts: 99\n\
+             \x20     - name: The Safari web-test of beachape\n\
+             \x20       uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0\n\
+             \x20       with:\n\
+             \x20         command: cargo run --locked -p xtask -- web-test --browser safari\n\
+             \x20         max_attempts: {attempts}\n\
+             \x20         timeout_minutes: {minutes}\n\
+             {wait}\
+             \x20         retry_on_exit_code: 75\n"
+        )
+    }
+
+    /// The job `macos` of `limit` minutes, with two save steps of 60
+    /// minutes, and the retry steps `retries` before them.
+    fn retry_job(limit: u64, retries: &[String]) -> SaveJob {
+        let ci = one_job(
+            "macos",
+            &format!("    timeout-minutes: {limit}\n"),
+            &[60, 60],
+        );
+        let (head, saves) = ci
+            .split_once("      - run: cargo run --locked -p xtask -- e2e save")
+            .unwrap();
+        let jobs = save_jobs(&format!(
+            "{head}{}      - run: cargo run --locked -p xtask -- e2e save{saves}",
+            retries.concat()
+        ));
+        assert_eq!(jobs.len(), 1, "{jobs:?}");
+        jobs.into_iter().next().unwrap()
+    }
+
+    /// Finding 1-1 of review round 1 of M3 of `gpu-speed`.  Asserts:
+    /// * the job needs 120 minutes for the saves and 25 for the other
+    ///   steps.  3 attempts of 30 minutes, with 3 waits of 10 s, need 91.
+    ///   So it passes at 236;
+    /// * the same job with 4 attempts fails at 236, and passes at 266;
+    /// * the job with 3 attempts fails at 235;
+    /// * two retry steps, of 30 and 15 minutes, pass at 281 and fail at
+    ///   280, so a comment with `max_attempts: 99` is not read;
+    /// * a wait of 60 s in place of the default 10 s fails at 236;
+    /// * a retry step with no `timeout_minutes` fails.
+    #[test]
+    fn a_retry_step_that_can_use_up_the_job_limit_fails() {
+        let three = retry_step(3, 30, None);
+        assert_eq!(
+            job_limit_problem(&retry_job(236, std::slice::from_ref(&three))),
+            None
+        );
+        let four = retry_step(4, 30, None);
+        let problem = job_limit_problem(&retry_job(236, std::slice::from_ref(&four)));
+        assert!(
+            problem
+                .as_deref()
+                .is_some_and(|p| p.starts_with("job macos: ")),
+            "{problem:?}"
+        );
+        assert_eq!(job_limit_problem(&retry_job(266, &[four])), None);
+        assert!(job_limit_problem(&retry_job(235, std::slice::from_ref(&three))).is_some());
+        let two = [three, retry_step(3, 15, None)];
+        assert_eq!(job_limit_problem(&retry_job(281, &two)), None);
+        assert!(job_limit_problem(&retry_job(280, &two)).is_some());
+        let long_wait = retry_step(3, 30, Some(60));
+        assert!(job_limit_problem(&retry_job(236, &[long_wait])).is_some());
+        let no_limit =
+            retry_step(3, 30, None).replace("timeout_minutes: 30", "timeout_seconds: 1800");
+        assert!(job_limit_problem(&retry_job(500, &[no_limit])).is_some());
     }
 
     #[test]

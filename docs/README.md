@@ -97,6 +97,7 @@ Distilled facts from outside the repo, each with its source and the date it was 
 
 * `references/browser-quirks.md`: Safari, Web Audio and WebGPU behaviour the code works around.
 * `references/webgpu-limits.md`: the WebGPU default limits every kernel must fit (GPU-1).
+* `references/webkit-bug-workgroup-zero-init.md`: a WebKit bug text for the maintainer to file: Safari sets workgroup memory to zero with one thread.
 * `references/local-browser-testing.md`: running `xtask web-test` and `xtask e2e` on the maintainer's Mac: Safari, Chrome, model files and known local failures; reading an iPhone's memory kills.
 
 ## Conventions
