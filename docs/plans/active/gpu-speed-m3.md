@@ -180,7 +180,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * [x] Plan review round 2 (2026-11-13): 5 should-fix and 3 nits, each applied.
 * [x] Step 1 (2026-11-13): the sources.  `m3/sources.md` gives each fact with its file, lines and commit.  The table is in Surprises.
 * [x] Step 2 (2026-11-13): the scratch worktree and its harness, on `scratch/m3-variants` (`9a30c16`, `4cd30a2`, `047fbb8`).  The six matmul variants (with f16) and `attention-u` pass `every_kernel_fits_the_default_limits`, `sources_are_complete` and `workgroup_memory_within_defaults`.  `STEMYLA_REQUIRE=gpu,f16 cargo test --release --test kernels` passes natively (19 tests, `check_kernels_accepts_all` included).  `Gpu::check_kernels` accepted each variant in Safari 27.2 and Chrome 157 (`runs/smoke-*/bench.log`).  `attention-u` matches `attention_cpu` natively (relative error 6.4e-8).
-* [ ] Step 3: the controls.
+* [x] Step 3 (2026-11-13): the controls.  The controls are near 1 and `v64` is at 1.44 to 2.37, so the loss is in the code.  The loss falls as K grows: a fixed cost for each workgroup.  The table is in Surprises.
 * [ ] Step 4: matmul variants.
 * [ ] Step 5: the clamp's cost, alone.
 * [ ] Step 6: attention variants.
@@ -205,6 +205,23 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
   | `[[max_total_threads_per_threadgroup]]` | not written, and not set on the pipeline descriptor (`MetalFunctionWriter.cpp:1787-1791`, `WebGPU/ComputePipeline.mm:43-55`) | written from the workgroup size (`printer.cc:428-434`) | written from the workgroup size |
 
   So the clamp has the same form in both browsers.  Three differences remain: Chrome removes the clamps that it can prove, Safari sets workgroup memory to zero with one thread, byte by byte, and Safari gives Metal no maximum number of threads.
+
+* 2026-11-13, Step 3: the controls, from one set of `?bench=v64&bench_rounds=5` (`m3/runs/s3-{safari,chrome}-{1,2}.log`, headed Chrome `m3/runs/s3h-chrome-1.log`).  Figures are medians of 5 rounds, the spread in brackets; the ratio is Safari's time over Chrome's, for set 1 and set 2.  The full table is in `m3/findings.md`.
+
+  | Figure | Safari 1 | Chrome 1 | Safari 2 | Chrome 2 | Ratio |
+  | - | - | - | - | - | - |
+  | FMA control, GFLOP/s (start) | 5,976 (5.1 %) | 6,450 (0.9 %) | 6,086 (4.1 %) | 6,445 (0.9 %) | 1.079, 1.059 |
+  | Copy 64 MiB, GB/s (start) | 172.5 (1.3 %) | 179.9 (1.3 %) | 173.2 (1.3 %) | 178.9 (0.6 %) | 1.043, 1.033 |
+  | Dispatch (copy 4 KiB), us (start) | 10.6 (9.5 %) | 5.0 (3.7 %) | 10.8 (6.6 %) | 5.0 (3.5 %) | 2.120, 2.160 |
+  | `v64` `freq qkv` f16 (K 256), GFLOP/s | 1,218 (0.7 %) | 2,144 (0.4 %) | 1,218 (0.4 %) | 2,140 (1.0 %) | 1.761, 1.757 |
+  | `v64` `time qkv` f16 (K 256), GFLOP/s | 1,165 (0.9 %) | 2,021 (0.4 %) | 1,159 (0.9 %) | 2,014 (1.3 %) | 1.735, 1.737 |
+  | `v64` `freq ff down` f16 (K 1,024), GFLOP/s | 1,488 (0.9 %) | 2,153 (0.5 %) | 1,488 (1.1 %) | 2,160 (1.1 %) | 1.447, 1.452 |
+  | `v64` `time scores` (K 64), GFLOP/s | 606 (0.9 %) | 1,437 (0.7 %) | 606 (0.9 %) | 1,429 (0.9 %) | 2.374, 2.360 |
+  | Time-axis attention, fused, s per chunk | 3.53 (4.4 %) | 2.31 (0.6 %) | 3.52 (3.1 %) | 2.30 (1.5 %) | 1.528, 1.530 |
+
+  The FMA and copy ratios are below 4 % plus the larger spread, so no effect is seen: the GPU's state does not explain the loss.  A dispatch costs 6 us more in Safari, about 0.2 % of a `v64` dispatch on `freq qkv`.  Headed Chrome is within the spread of headless Chrome (FMA 6,475, `freq qkv` f16 2,153), so the later steps keep headless Chrome.  The f16 / f32 ratio of `v64` is 0.98 to 1.01 in both browsers, so `unpack2x16float` shows no effect.  The ratio of `freq qkv` f16, 1.76, is near the parent's 1.70.
+
+  The ratio falls as K grows.  A least-squares fit of the time for each workgroup (19 cores, shapes with 300 workgroups or more) gives Safari 8.5 us fixed plus 24.5 us for each 256 of K, and Chrome 0.7 us plus 18.2 us.  So Safari has a fixed cost of about 7.8 us for each workgroup, and an inner loop 1.35 times slower.  At K = 256 the fixed cost is 55 % of the gap.
 
 ## Decision log
 
