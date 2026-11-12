@@ -1504,15 +1504,16 @@ fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
 /// gave 12 growths, each 57 MB.  The peak is 80.16 MB, so each headroom is
 /// -23.16 MB, with a spread of 0.  The worker logs whole MB, so a growth
 /// has an error of up to 1 MB.  So the measured noise is 1 MB: the spread
-/// and the log's error.  The orchestrator took 2.16 MB as the noise, which
-/// adds 1.16 MB of an earlier rounding as more margin.  The smallest rise of
-/// the peak from a lost cut in the GPU half is 9.44 MB (cut 3: the whole
-/// normalised input, 89.60 MB against 80.16 MB).  The margin above the
-/// measured headroom is midway between the two, so that the check is no
-/// nuisance (the maintainer, 2026-11-12): -23.16 + (2.16 + 9.44) / 2 =
-/// -17.36, rounded to -17 MB.  So the budget is 63.16 MB, 6.16 MB above
-/// the measured growth of 57 MB.  The noise (2.16 MB) does not fail it,
-/// and a lost cut 3 (57 + 9.44 = 66.44 MB) does.
+/// and the log's error.  The taken noise is 2.16 MB, the orchestrator's
+/// choice: it adds the 1.16 MB margin of the earlier constant, -22
+/// MB.  The smallest rise of the peak from a lost cut in the GPU half is
+/// 9.44 MB (cut 3: the whole normalised input, 89.60 MB against 80.16
+/// MB).  The margin above the measured headroom is midway between the
+/// taken noise and that rise, so that the check is no nuisance (the
+/// maintainer, 2026-11-12): -23.16 + (2.16 + 9.44) / 2 = -17.36, rounded
+/// to -17 MB.  So the budget is 63.16 MB, 6.16 MB above the measured
+/// growth of 57 MB.  The taken noise (57 + 2.16 MB) does not fail it, and
+/// a lost cut 3 (57 + 9.44 = 66.44 MB) does.
 const WORKER_HEADROOM_MB: f64 = -17.0;
 
 /// MEM-4's budget for the tab during a separation, in MB: page wasm,
@@ -3131,6 +3132,11 @@ mod tests {
         );
         assert_eq!(chunk_done(&flat[4]), Some(2));
         assert_eq!(chunk_done("separator: chunk 12/48: 1.0 s"), Some(12));
+        assert_eq!(
+            chunk_done("chunk 2/six: worker wasm 9 MB"),
+            None,
+            "a total that is not a number"
+        );
     }
 
     /// The verdict of `memory-budget` on its checks across the songs: Ok

@@ -218,7 +218,8 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * 1-28: `one_frame_gives_no_samples`.  `+` to `*` in `istft_frames`'s `full` fails it (an index out of range at `stft.rs:95`).
   * 1-4: the cut-1 test compares with `accept_with_a_window_clone`, the old `accept`.  The `weight` mutant `-` to `+` now fails it too.
   * 1-1, 1-6, 1-7, 1-8, 1-9, 1-10, 1-11: the docs.
-  * Round 2 fixes (2026-11-12): 4 confirmed doc and test findings, and 4 nits.  `Job::shared_steps` gives the steps that every stem's mask needs.  `Job::steps` and `GpuNetwork::mask` both use it, so their orders are the same by construction (2-4).  `split_gains` no longer takes `sub_batch`'s doc (2-1).  The TD-8 line names the real gap: CI and a machine with no adapter skip the GPU test (2-3).  So no `KNOWN_MISSED` entry is needed for `set_input`.
+  * Round 2 fixes (2026-11-12): 4 confirmed doc and test findings, and 4 nits.  `Job::shared_steps` gives the steps that every stem's mask needs.  `Job::steps` and `GpuNetwork::mask` both use it, so their orders are the same by construction (2-4).  `split_gains` no longer takes `sub_batch`'s doc (2-1).  The TD-8 line names the real gap (2-3).  `review mutants` runs on the Mac, whose adapter runs the GPU test of `set_input`.  So the mutant is caught, and no `KNOWN_MISSED` entry is needed.
+  * Round 3 fixes (2026-11-12): `the_masks_follow_the_input_through_the_shared_steps` (`roformer-gpu/tests/memory.rs`) checks `Job::shared_steps` and `Job::steps` on a GPU, and that each stem's mask follows the input (3-1).  `shared_steps` without `FinalNorm`, and `shared_steps` as `vec![]`, each fail it at `memory.rs:668`.  The TD-8 line says that CI does not run roformer-gpu's integration tests (3-2).  `chunk_done` has a test of a total that is not a number (3-5).
 
 ## Surprises and discoveries
 

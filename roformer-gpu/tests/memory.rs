@@ -644,3 +644,44 @@ fn collected_profile_readbacks_are_freed() {
     let errors = g.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
 }
+
+/// `Job::shared_steps` runs the band split, every layer and the final
+/// norm, so each stem's mask depends on the input.  `Job::steps` is those
+/// steps and then each stem's mask steps, the order that the worker runs
+/// one stem at a time.  A lost shared step leaves the masks the same for
+/// two inputs; `forward_matches_pytorch` would see it too, but it needs
+/// fixtures that no machine has (TD-8).
+#[test]
+fn the_masks_follow_the_input_through_the_shared_steps() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = gpu() else { return };
+    let store = Store::from_source(Random::new(&tensors())).unwrap();
+    let net = Net::load_store(&g, store, 400_000, WeightFormat::F32).unwrap();
+    let frames = 9;
+    let job = Job::new(&g, &net, frames);
+
+    let mut layers = vec![Step::Split];
+    for layer in 0..DEPTH {
+        layers.extend(job.layer_steps(layer));
+    }
+    layers.push(Step::FinalNorm);
+    assert_eq!(job.shared_steps(), layers, "the shared steps");
+    let mut all = job.shared_steps();
+    for stem in 0..STEMS.len() {
+        all.extend(job.mask_steps(stem));
+    }
+    assert_eq!(job.steps(), all, "the steps of the forward pass");
+
+    let input = |seed: usize| -> Vec<f32> {
+        (0..frames * FEATURES)
+            .map(|i| (((i + seed) * 7919) % 2001) as f32 / 1000.0 - 1.0)
+            .collect()
+    };
+    let first = pollster::block_on(job.masks(&input(0))).unwrap();
+    let second = pollster::block_on(job.masks(&input(13))).unwrap();
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    for (stem, (a, b)) in first.iter().zip(&second).enumerate() {
+        assert_ne!(a, b, "stem {stem}: the mask does not follow the input");
+    }
+}
