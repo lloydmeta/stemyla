@@ -83,7 +83,7 @@ After a new candidate (M4 and M5), measure again the cost of each forced flip be
 
 ### M5: a flash-style time-axis attention
 
-A new fused attention kernel for the time axis (1,151 tokens, 8 heads of 64), from M3's result.  It keeps the softmax state on chip, so no score buffer goes to memory.  It loads each query block once.  It is a third `AttentionPolicy` candidate beside split and the current fused kernel.  It is checked against the CPU, as the current fused kernel is.  Its dispatches take their profile label from `attention_label`, so `e2e perf`'s profile groups count it as time-axis attention, not "other".  Acceptance: as M4, with `--query attn=<policy>`.
+A new fused attention kernel for the time axis (1,151 tokens, 8 heads of 64), from M3's result.  It keeps the softmax state on chip, so no score buffer goes to memory.  It loads each query block once.  It is a third `AttentionPolicy` candidate beside split and the current fused kernel.  M5's milestone plan defines "near" for three attention candidates, for the flip costs of M4.  It is checked against the CPU, as the current fused kernel is.  Its dispatches take their profile label from `attention_label`, so `e2e perf`'s profile groups count it as time-axis attention, not "other".  Acceptance: as M4, with `--query attn=<policy>`.
 
 ### M6: overlap on the worker
 
@@ -107,7 +107,13 @@ M6's milestone plan designs the order of the work and the read-back.  It must me
 ## Validation and acceptance
 
 * `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.  The gate is a backstop: at 10 % and 0.1 s per chunk, it stops a large loss only.
-* The same-session comparison shows each gain and "no loss" for M4, M5 and M6, in each browser.  Build the page at the milestone's base and at its head.  Run `e2e perf` on each, 3 runs each, taking turns, in one session, as M2 did for M1 (`plans/completed/gpu-speed-m2.md`, Surprises).  Compare the chunk lower quartile, the chunk median and the whole time ("6 stems in"), which has 0.1 s on about 50 to 80 s.  A loss, in either browser: the head's fastest whole time is more than 1 % over the base's fastest, or the head's best chunk lower quartile is over the base's.  A gain is the same with the sides changed.  The fastest run carries the least of the noise, which only adds time.  A gain lowers the baseline with `--update-baselines`.
+* The same-session comparison shows each gain and "no loss" for M4, M5 and M6, in each browser.  Goal: a verdict that a real change of 3 % or more in either browser cannot escape, and that noise does not make.  M4's milestone plan designs the rule, and M5 and M6 use it.  The cases:
+  1. The base page is built in a worktree and given to `e2e perf` with `--dist`, and the head page is HEAD's.  Base and head runs take turns in one session, as M2 did for M1 (`plans/completed/gpu-speed-m2.md`, Surprises), and each run is recorded in its order.
+  2. Inside a run, the noise only adds time: groups of slow chunks.  Between runs, the GPU's state can also move by about 4 % (Safari 7.10 s against 7.40 s with the same code).  So no verdict rests on one run.
+  3. A uniform 3 % loss in either browser is found.  The figures can be the chunk lower quartile, the chunk median and the whole time ("6 stems in", 0.1 s on about 50 to 80 s).
+  4. A loss or a gain holds only when it repeats.  When the verdict depends on one run, or the runs of one side differ by more than the noise, more pairs run.
+  5. A loss that holds is a defect of the milestone, or a reason to drop its candidate (Extra stop conditions).  A loss that does not repeat is recorded, not acted on.
+  6. A gain lowers the baseline with `--update-baselines`, after M4's `--raise` change.
 * `e2e memory-budget` passes in Safari and Chrome at the default chunk.  Its check 3 headroom (`WORKER_HEADROOM_MB`) is mostly heap that is free at the separation's start, which the model load and calibration set.  M4 and M5 change calibration, and M6 changes `working_set`, so each can move it.  Goal: the constant stays a measured figure with a margin that is not too tight, and still catches a lost cut.  The milestone plans of M4, M5 and M6 design the measurement, with these cases:
   1. The headroom is measured again at the end of M4, M5 and M6, and when check 3's margin is under the noise or over the smallest lost-cut rise.
   2. A measurement follows proof that the cause is free heap: the wasm test passes, and a probe of the live heap at each phase (as in M1 Step 8) finds no held buffer.  A held buffer is a defect to fix.
@@ -133,7 +139,7 @@ The branch is `gpu-speed/2026-11-12`, from `main` at `aa10c49`.  The maintainer 
 
 #### Maintainer steps
 
-None.  Safari has Develop > Allow Remote Automation on.  The weights and the arm64 chromedriver are on this Mac, outside the repo (ASSET-1); the kick-off prompt names their paths.  Runs on the Radeon Mac and the iPhone are optional, after the PR: the run never waits for them (the maintainer, 2026-11-12).
+None.  Safari has Develop > Allow Remote Automation on.  The weights are in `third_party/models/`, which git ignores (ASSET-1), and the arm64 chromedriver is outside the repo; the kick-off prompt names their paths.  Runs on the Radeon Mac and the iPhone are optional, after the PR: the run never waits for them (the maintainer, 2026-11-12).
 
 #### Preflight
 
@@ -164,7 +170,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * A kernel that is not faster on this Mac in either browser does not land.  Record the figures in Surprises.
 * A cause of Safari's overhead in WebKit gets a `browser-quirks.md` entry and a draft WebKit bug in the PR for the maintainer to file.
-* A browser update between runs changes the baselines.  Measure again, and record both figures.
+* A browser update between runs changes the speed.  Until M4's `--raise` change lands, record both sets of figures in Surprises, and change no baseline.  If the update fails the gate before then, the gate's failure is recorded with the version, and the milestone goes on with the same-session comparison for its verdict.  After that change, update the baselines with `--raise`, naming the browser update.
 
 ### Decisions for the maintainer
 
@@ -213,6 +219,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-12, agent (orchestrator), intent review of M2: the gate is a backstop, and M4 to M6 show gain and no loss by a same-session comparison of base and head (i1-2).  The preflight sets `STEMYLA_PERF_WEIGHTS`, and a skip is not a pass (i1-1).  M4 and M5 measure flip costs again (i1-3).  M4 makes every raise need `--raise` before it changes a baseline (i1-4), not a review round now, since the finding is not significant.  M5 uses `attention_label` (i1-5).  Not taken: chunk times in 2 decimals (i1-2's code part), since the whole time already has 0.1 s on about 50 to 80 s; `m4a/` and `protocol/` in `PERF_FOLDERS` (i1-6), refuted in M2 round 1 (1-8).
 * 2026-11-12, agent (orchestrator), intent review of M2, round 2: a loss or a gain compares the fastest runs of base and head, since the noise only adds time (i2-1).  "Near" choices are measured from calibration's flip point (i2-2).  M6 case 9 uses the same-session comparison (i2-3).  No baseline changes before M4's `--raise` change (i2-4).  The drift figures cite `plans/completed/gpu-speed-m2.md` (i2-5).
 * 2026-11-12, maintainer: the weights file moved to `third_party/models/`, which git ignores (`/third_party/`, `*.safetensors`).  The kick-off prompt and `STEMYLA_PERF_WEIGHTS` give its absolute path, since review worktrees hold no ignored files.
+* 2026-11-12, agent (orchestrator), intent review of M2, round 3: rounds 1 to 3 each found a new case in the same-session comparison.  So it is now a goal and a list of cases, and M4's milestone plan designs the rule (orchestrate skill, "The intent review").  Until M4's `--raise` change, a browser update changes no baseline (i3-1).  M5 defines "near" for three attention candidates (i3-5).
 
 ## Outcomes and retrospective
 
