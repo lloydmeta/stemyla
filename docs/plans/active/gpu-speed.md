@@ -88,7 +88,15 @@ Two changes in `worker/src/web.rs`, each measured:
 * `Pace` keeps up to 2 steps in flight: it submits a step before it waits for the step before.  The step limit and the errors still stop a run.
 * The CPU work of one chunk runs while the GPU runs the next: the STFT of chunk n + 1 and the inverse STFT of chunk n.
 
-The stems stay the same byte for byte: only the order of the work changes.  Acceptance: `e2e stored-stems` gives the same hashes before and after.  The perf gate in Chrome shows the gain, and Safari is not slower.  `memory-budget` passes with M1's budget.
+The stems stay the same byte for byte: only the order of the work changes.
+
+Memory, from M1 (`plans/active/gpu-speed-m1.md`, Step 6):
+
+* The worker's working set is the function in `roformer::separate`, which `memory-budget` and the worker's wasm test use.  M6 adds the buffers that it holds as named parts of that function, in the same commit as the code.  The next chunk's input, spectra and features are about 42.5 MB at the default chunk.
+* `Demixer::end_chunk` moves the read position.  So the next chunk's input cannot be read before every stem of this chunk is accepted.  M6 gives the demixer a read cursor apart from the accept cursor.
+* The limit is MEM-4: the tab total of `memory-budget` stays at most `TAB_BUDGET_MB` (943 MB).  If it does not, M1's Step 6 names the next cuts, in order of cost.
+
+Acceptance: `e2e stored-stems` gives the same hashes before and after.  The perf gate in Chrome shows the gain, and Safari is not slower.  `memory-budget` passes with M1's checks, with M6's parts in the working-set function.
 
 ## Validation and acceptance
 
@@ -168,6 +176,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * 2026-11-12: the session runs Opus 5.5 (`claude-opus-5-5`, the system prompt) at effort `high` (`modelSettings` for `claude-opus-5-5` in `~/.claude/settings.json`, over `effortLevel: xhigh`).
 * 2026-11-12: Safari has `timestamp-query`, so `?profile=1` gives GPU times in Safari as in Chrome.
+* 2026-11-12, M1: the worker's WebAssembly memory at the default chunk is now 87 MB from chunk 1 to the end, a growth of 57 MB (95 MB before).  The tab total is 799 MB in Chrome and 758 MB in Safari.  After the cuts the heap has little free space.  So a buffer of a new size, such as a shorter last chunk, grew the worker by 19 MB until M1 read and padded each chunk at one size (`plans/active/gpu-speed-m1.md`, Step 8).  M6 keeps its buffers at fixed sizes for the same reason.
 * 2026-11-12: Chrome's calibration chose split attention on the time axis (split 1.90 s, fused 2.26 s for each chunk).  Safari's chose fused (split 3.43 s, fused 3.27 s).  `docs/ARCHITECTURE.md` says Apple GPUs choose fused, which holds only for Safari.
 
 ## Decision log
