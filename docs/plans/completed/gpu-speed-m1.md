@@ -207,7 +207,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * [x] Step 8: the headroom (2026-11-12).  It found and fixed a growth at the last chunks (`0c56d0a`).  Then 3 runs of `memory-budget` in Chrome and 3 in Safari at `0c56d0a` passed, with 12 growths of 57 MB.  `WORKER_HEADROOM_MB` was -22 MB; it is now -17 MB, the orchestrator's choice (see the Decision log).
 * [x] Step 9: the docs and the debt (2026-11-12).  Each doc changed in the commit of its step.  `xtask/src/e2e.rs` and `README.md` changed in Steps 7 and 8, and `docs/ARCHITECTURE.md` in Steps 1 to 5, 7 and 8.  MEM-4 in `docs/invariants.md` changed in Steps 1 and 7, TD-11 in Steps 1, 4 and 7, and TD-54 in Step 7.  The diff of the parent plan's M6 section is for the orchestrator, outside the repo (`m1/parent-m6.diff` in the session's scratch folder); `git apply --check` passes on HEAD.
 * [x] Before review round 1 (2026-11-12, at `7609376`).  `stored-stems --hashes` passed in Chrome and Safari.  `web-test a_chunk_of_the_default_length_holds_its_working_set` passed in Chrome and Safari (17.5 s).  `memory-budget` passed in Chrome (growths 57 and 57 MB, tab 799 MB) and Safari (57 and 57 MB, tab 758 MB).  `check --tier push` (13 passed) and `cargo build -p xtask` passed.
-* [ ] Review rounds.  Round 1 fixes (2026-11-12):
+* [x] Review rounds (2026-11-12): 8 rounds, the log in `docs/reviews/gpu-speed-2026-11-12-m1.md`.  Round 1 fixes:
   * 1-2: `normalise_bands` takes a writer, and `set_input` and the fake GPU half call it.  `bands_normalised_one_at_a_time_equal_the_whole_input` failed first on a stub that wrote at offset 0 (`net.rs:1001`, "float 0").  The three offset mutants of `t * g.offset + j * t * w` (`*` to `+` at the first, `*` to `/` at the others) each fail it at "float 0" or "float 4".
   * 1-29: `set_input_writes_the_normalised_bands_to_the_gpu` (`roformer-gpu/tests/memory.rs`) passes on Metal.  With `set_input` replaced by `()`, it fails at `memory.rs:425` ("float 0 of split_in", left 0).  TD-8 has the gap for cargo-mutants.
   * 1-3: `STREAM_CASES` has (5000, 1000, 1) and (4950, 1000, 1).  The mutants `- ` to `+` and `1.0` to `self.window[k]` in `weight` survived before, and now fail at `demix.rs:642` ("n=5000 chunk=1000 overlap=1").
@@ -224,6 +224,8 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * Round 5 fix (2026-11-12): the test's doc and TD-8 say that the list checks cannot see a step lost inside `layer_steps` or `mask_steps`, such as `ToTime` (5-1).  TD-8 names the checks that see that.
   * Round 6 fix (2026-11-12): each test doc in M1's diff says what the test asserts, as a list, and names no fault that it would catch (6-1).  TD-8 gives the gaps of the GPU tests once: `xtask e2e selftest` (`selftest=stages`, with the model, run by hand; CI does not run it) checks the steps inside `layer_steps` and `mask_steps` and the result of each step that `Job::run` runs.
   * Round 7 fix (2026-11-12): TD-8 says that an agent or a person runs `e2e selftest` by hand, and that CI does not run it (7-1).
+  * Round 8 (2026-11-12): one nit, reported, not fixed.  It meets the stop rule of decision 0024.
+  * Totals: 51 agents, 2,863,709 tokens, 107.2 wall minutes, no interventions.  Rounds 4 to 8 fixed 6 findings, all in the GPU test that round 3 added and in its doc and TD-8.
 
 ## Surprises and discoveries
 
@@ -275,4 +277,21 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 
 ## Outcomes and retrospective
 
-Not yet.
+Done on 2026-11-12, at the default chunk.
+
+What M1 achieved:
+* `e2e memory-budget` runs at the defaults, the chunk that users run.  The worker's growth check of 4 MB is gone.  Four checks replace it: flat after chunk 2, no growth with the song, a working-set budget, and a tab total of 943 MB for the iPhone (MEM-4).  The scenario passes in Chrome and Safari.
+* Where the growth went, from the wasm test's measure: the masks phase held the six stems, the masked spectrum, a mask and the spectra, about 117.9 MB.  The upload phase held the features and their normalised copy.
+* Four cuts, each the same bit for bit (the `stored-stems` hashes did not change): each stem goes to the demixer as it is made; the mask applies one frame at a time; `set_input` writes one band at a time; the chunk input drops after the STFT.  The working-set peak went from 117.86 MB to 80.16 MB.
+* A fix that the plan did not name: the last chunks read and pad at a chunk's size, so their buffers leave no new holes in the heap.  The worker grows by 57 MB, not 95 MB, and stays at 87 MB from the end of chunk 1.
+* The tab total is 799 MB in Chrome and 758 MB in Safari, from 837 MB.  M6's second chunk input (about 42.5 MB) fits under 943 MB.
+* TD-11 loses its bullet on the chunk.  TD-8 records what the new GPU tests do not check.
+
+What it did not achieve:
+* The JS heap and WebGL are still not counted (TD-11).  No iPhone run (TD-54).
+* No e2e hash check at the default chunk: `stored-stems` runs at `chunk=16384`; the native tests compare each changed function bit for bit.
+
+What to do differently:
+* The plan's first estimate missed buffers that only a measure showed (the read's byte copy, the last chunk's padding).  Measure first, then plan the cuts.
+* Rounds 4 to 7 each found a new overclaim in one test's doc.  A test doc that lists only what the test asserts, from the start, would have saved four rounds.
+* Do not edit the tree before step 8 of a review round.  `git stash` shows to `review check` as a change.

@@ -315,7 +315,7 @@ mod tests {
     }
 
     /// The table "The buffers of one chunk at the default chunk" of
-    /// `docs/plans/active/gpu-speed-m1.md`, at `CHUNK` and overlap 2.
+    /// `docs/plans/completed/gpu-speed-m1.md`, at `CHUNK` and overlap 2.
     #[test]
     fn the_working_set_at_the_default_chunk_has_the_sizes_of_its_buffers() {
         let w = working_set(CHUNK, OVERLAP);
