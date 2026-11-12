@@ -1375,8 +1375,11 @@ mod tests {
     /// * refuses `--runs 0`, also with `--update-baselines`;
     /// * refuses 4 runs with `--update-baselines`;
     /// * accepts 5 runs with `--update-baselines`, and 1 run without it;
-    /// * refuses `--update-baselines` with `profile=1` (also after `?x=1&`),
-    ///   and accepts it with `profile=0`, and `profile=1` without it.
+    /// * refuses `--update-baselines` with `profile=1`, also after `?x=1&`
+    ///   and after a bare `?` (`?profile=1`);
+    /// * accepts `--update-baselines` with `profile=0`, with an empty
+    ///   `profile=`, and with a bare `profile`, which sets nothing;
+    /// * accepts `profile=1` without `--update-baselines`.
     #[test]
     fn the_run_count_is_checked_before_any_run() {
         assert!(runs_refusal(0, false, "").is_some());
@@ -1386,6 +1389,9 @@ mod tests {
         assert_eq!(runs_refusal(1, false, ""), None);
         assert!(runs_refusal(5, true, "profile=1").is_some());
         assert!(runs_refusal(5, true, "?x=1&profile=1").is_some());
+        assert!(runs_refusal(5, true, "?profile=1").is_some());
+        assert_eq!(runs_refusal(5, true, "profile="), None);
+        assert_eq!(runs_refusal(5, true, "profile"), None);
         assert_eq!(runs_refusal(5, true, "profile=0"), None);
         assert_eq!(runs_refusal(1, false, "profile=1"), None);
     }
