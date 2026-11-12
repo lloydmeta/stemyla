@@ -165,7 +165,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * [x] Plan review round 1 (2026-11-12): 8 should-fix and 3 nits, each applied.
 * [x] Plan review round 2 (2026-11-12): 2 should-fix (the asked tier; Safari's forced flip is `attn=freq`) and 3 nits, each applied.
 * [x] Step 1: the worker names the adapter and `isFallbackAdapter` (2026-11-12).  No new test: the e2e runs of Step 5 are the evidence (Step 3's parse fails a `model loaded` line with no fallback text).  TD-10 now says what the log gives.
-* [ ] Step 2: profile labels name the axis of attention.
+* [x] Step 2: profile labels name the axis of attention (2026-11-12).  First failure: `attention_labels_name_their_shapes` at `roformer-gpu/src/lib.rs:3704` (`assert_eq!(softmax_label(9208, 1151), "softmax 9208x1151")`, left `""`), with stubs that gave an empty label.  `cargo test -p roformer-gpu --lib` (50 passed) and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed on the M2 Pro (Metal).  The three profile tests that read the softmax label passed with `STEMYLA_REQUIRE=gpu,f16,timestamps`.
 * [ ] Step 3: the scenario `e2e perf`.
 * [ ] Step 4: the gate in `check --tier push`.
 * [ ] Step 5: the baselines, measured.

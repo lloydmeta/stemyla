@@ -640,7 +640,7 @@ fn collected_profile_readbacks_are_freed() {
     pollster::block_on(g.done());
     pollster::block_on(g.collect_profile()).unwrap();
     assert_eq!(g.live_bytes(), start);
-    assert_eq!(g.take_profile().get("softmax").map(|v| v.0), Some(3));
+    assert_eq!(g.take_profile().get("softmax 4x64").map(|v| v.0), Some(3));
     let errors = g.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
 }

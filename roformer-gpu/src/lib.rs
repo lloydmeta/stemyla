@@ -2175,6 +2175,17 @@ fn matmul_label([m, n, k]: [usize; 3], batch: usize, tile: Tile, format: WeightF
     format!("matmul {m}x{n}x{k} x{batch} {}{variant}", tile.name)
 }
 
+/// The profile label of a softmax: its rows and their length.
+fn softmax_label(rows: usize, len: usize) -> String {
+    format!("softmax {rows}x{len}")
+}
+
+/// The profile label of a fused attention: the tokens of each sequence
+/// and the number of sequences.
+fn attention_label(seq: usize, nseq: usize) -> String {
+    format!("attention seq {seq} x{nseq}")
+}
+
 /// Dispatches recorded for one submission.  Holds the borrows of the
 /// buffers it binds (`'g`) until [`Rec::submit`], so a [`GpuBuffer`]
 /// cannot be dropped, and destroyed, while a dispatch not yet submitted
@@ -2391,6 +2402,9 @@ impl<'g> Rec<'g> {
         let (gx, gy) = grid(rows);
         let p = [u(rows), u(len), gx, 0];
         self.push(Kernel::Softmax, &[x], bytemuck::cast_slice(&p), [gx, gy, 1]);
+        if let Some(label) = self.labels.last_mut() {
+            *label = softmax_label(rows, len);
+        }
     }
 
     /// RMSNorm of `rows` rows of 256: `y[y_off..] = x[x_off..] / |x| * g`.
@@ -2473,6 +2487,9 @@ impl<'g> Rec<'g> {
             bytemuck::bytes_of(&p),
             groups,
         );
+        if let Some(label) = self.labels.last_mut() {
+            *label = attention_label(seq, nseq);
+        }
     }
 
     /// `o[t, h*64 + d] *= sigmoid(gates[t, h])` for `tokens` rows.
@@ -3680,6 +3697,16 @@ mod tests {
         let label = |format| matmul_label([1151, 1536, 256], 6, TILES[0], format);
         assert_eq!(label(WeightFormat::F32), "matmul 1151x1536x256 x6 i64");
         assert_eq!(label(WeightFormat::F16), "matmul 1151x1536x256 x6 i64 f16");
+    }
+
+    /// Asserts:
+    /// * a softmax of 9208 rows of 1151 has the label `softmax 9208x1151`;
+    /// * a fused attention of 4 sequences of 1151 tokens has the label
+    ///   `attention seq 1151 x4`.
+    #[test]
+    fn attention_labels_name_their_shapes() {
+        assert_eq!(softmax_label(9208, 1151), "softmax 9208x1151");
+        assert_eq!(attention_label(1151, 4), "attention seq 1151 x4");
     }
 
     /// Values compare by their bits, except that `+0` equals `-0`: WGSL

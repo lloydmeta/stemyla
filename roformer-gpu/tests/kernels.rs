@@ -987,7 +987,8 @@ fn matmul_f16_weights_match_f32() {
 }
 
 /// A device opened for profiling records GPU time per dispatch under
-/// labels naming the kernel (and, for matmuls, the shape and tile).  Skips
+/// labels naming the kernel (and, for matmuls, the shape and tile; for a
+/// softmax, the rows and their length).  Skips
 /// when the adapter has no `timestamp-query`.
 #[test]
 fn profile_labels_dispatches() {
@@ -1024,7 +1025,8 @@ fn profile_labels_dispatches() {
         TILES[g.policy.get().pick(m, n)].name
     );
     assert_eq!(totals.get(&mm).map(|v| v.0), Some(2), "{totals:?}");
-    assert_eq!(totals.get("softmax").map(|v| v.0), Some(2), "{totals:?}");
+    let softmax = format!("softmax {m}x{n}");
+    assert_eq!(totals.get(&softmax).map(|v| v.0), Some(2), "{totals:?}");
     assert!(
         totals.values().all(|v| v.1 >= 0.0 && v.1 < 10.0),
         "{totals:?}"
@@ -1267,7 +1269,7 @@ fn profile_recording_and_reset() {
     softmax(&g);
     pollster::block_on(g.done());
     pollster::block_on(g.collect_profile()).unwrap();
-    assert_eq!(g.take_profile().get("softmax").map(|v| v.0), Some(1));
+    assert_eq!(g.take_profile().get("softmax 64x64").map(|v| v.0), Some(1));
     assert!(g.take_errors().is_empty());
 }
 
