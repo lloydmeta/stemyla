@@ -1970,8 +1970,7 @@ fn memory_budget(o: &Opts) -> Result<()> {
     }
     // M7: the stems show with no read-back, so showing them does not grow
     // with the song.  M1 of the GPU speed plan: nor does the worker.
-    let mut failed = Vec::new();
-    for (ok, what) in [
+    let checks = [
         shown_growth_check(
             shown_growths.first().copied().flatten(),
             shown_growths.last().copied().flatten(),
@@ -1980,12 +1979,24 @@ fn memory_budget(o: &Opts) -> Result<()> {
             worker_growths.first().copied().flatten(),
             worker_growths.last().copied().flatten(),
         ),
-    ] {
-        println!("memory-budget: {} {what}", if ok { "ok:" } else { "FAIL:" });
-        if !ok {
-            failed.push(what);
-        }
+    ];
+    for (ok, what) in &checks {
+        println!(
+            "memory-budget: {} {what}",
+            if *ok { "ok:" } else { "FAIL:" }
+        );
     }
+    verdict(&checks)
+}
+
+/// The verdict of `memory-budget` on its checks across the songs: an
+/// error that names each failed check, or Ok when each passes.
+fn verdict(checks: &[(bool, String)]) -> Result<()> {
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|(ok, _)| !*ok)
+        .map(|(_, what)| what.as_str())
+        .collect();
     if !failed.is_empty() {
         bail!("memory-budget FAILED: {}", failed.join("; "));
     }
@@ -3119,6 +3130,26 @@ mod tests {
         );
         assert_eq!(chunk_done(&flat[4]), Some(2));
         assert_eq!(chunk_done("separator: chunk 12/48: 1.0 s"), Some(12));
+    }
+
+    /// The verdict of `memory-budget` on its checks across the songs: Ok
+    /// when each passes, else an error that names each failed check and
+    /// no passed one.
+    #[test]
+    fn the_verdict_names_each_failed_check() {
+        let pass = |what: &str| (true, what.to_string());
+        let fail = |what: &str| (false, what.to_string());
+        assert!(
+            verdict(&[pass("shown"), pass("worker")]).is_ok(),
+            "all pass"
+        );
+        let one = verdict(&[pass("shown"), fail("worker")]);
+        assert!(one.is_err(), "one fails");
+        let text = one.map_err(|e| e.to_string()).unwrap_err();
+        assert!(text.contains("worker"), "it names the failed check: {text}");
+        assert!(!text.contains("shown"), "it names no passed check: {text}");
+        let both = verdict(&[fail("shown"), fail("worker")]).map_err(|e| e.to_string());
+        assert_eq!(both, Err("memory-budget FAILED: shown; worker".to_string()));
     }
 
     /// Check 2 of M1: no growth with the song.

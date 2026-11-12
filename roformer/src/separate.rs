@@ -134,8 +134,9 @@ impl WorkingSet {
 ///
 /// It describes the worker's design at this commit.  A change of that
 /// design changes this function in the same commit.  The wasm test
-/// `a_chunk_of_the_default_length_holds_its_working_set` measures each
-/// phase and fails when this function and the worker do not agree.
+/// `a_chunk_of_the_default_length_holds_its_working_set` checks the peak
+/// of each phase, its largest moment, on both sides.  The other moments
+/// of a phase are estimates, and no test measures them.
 pub fn working_set(chunk: usize, overlap: usize) -> WorkingSet {
     const F32: usize = 4;
     const COMPLEX: usize = 8;

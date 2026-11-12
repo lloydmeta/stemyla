@@ -16,8 +16,8 @@ use super::*;
 use encode::{EncodeOut, FLAC_BLOCK, MP3_BLOCK, OutFile, alac_end};
 use js_sys::{Object, Reflect};
 use m4a::FRAMES_PER_PACKET;
-use roformer::{band_groups, widest_band};
-use roformer_gpu::net::normalise_band;
+use roformer::{BandGroup, band_groups};
+use roformer_gpu::net::normalise_bands;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use stem_protocol::{Encode, Encoded};
@@ -3226,7 +3226,7 @@ struct PhasePeaks {
 
 /// A fake GPU half that holds in WebAssembly memory what the real one
 /// holds: one band of the normalised input during the upload, made by the
-/// real normalisation (`normalise_band`), and each mask of
+/// real normalisation (`normalise_bands`), and each mask of
 /// `[T, FEATURES]` floats, as `Gpu::read` copies it.  As a network, it
 /// runs the real CPU half ([`chunk_stems`]), and closes a phase at each
 /// boundary that it sees.  The upload phase runs from the chunk's start
@@ -3234,7 +3234,8 @@ struct PhasePeaks {
 /// between phase runs to the next chunk's start.
 struct FakeGpu {
     frames: usize,
-    /// The gains of the widest band, all 1.
+    /// The band groups, and gains of 1 for the largest group.
+    groups: Vec<BandGroup>,
     gains: Vec<f32>,
     peaks: Rc<RefCell<PhasePeaks>>,
 }
@@ -3243,18 +3244,16 @@ impl GpuHalf for FakeGpu {
     fn upload(&mut self, features: &[f32]) {
         let frames = features.len() / FEATURES;
         self.frames = frames;
-        // As `Job::set_input`: one band at a time, in a buffer of the
-        // widest band.  The gains are in the model, not in the chunk's
+        // As `Job::set_input`: `normalise_bands` holds one band at a time.
+        // The groups and their gains are in the model, not in the chunk's
         // working set, so they are made before the separation.
-        let mut band = vec![0.0f32; frames * widest_band()];
-        for g in band_groups() {
-            for j in 0..g.count {
-                let rows = &mut band[..frames * g.width];
-                normalise_band(features, &g, j, &self.gains[..g.width], rows);
-                std::hint::black_box(rows);
-            }
-        }
-        drop(band);
+        let groups = self
+            .groups
+            .iter()
+            .map(|g| (g, &self.gains[..g.count * g.width]));
+        normalise_bands(features, groups, |_, rows| {
+            std::hint::black_box(rows);
+        });
         let peak = close_phase();
         self.peaks.borrow_mut().upload.push(peak);
     }
@@ -3325,7 +3324,8 @@ async fn a_chunk_of_the_default_length_holds_its_working_set() {
     }));
     let fake = FakeGpu {
         frames: 0,
-        gains: vec![1.0; widest_band()],
+        groups: band_groups(),
+        gains: vec![1.0; FEATURES],
         peaks: Rc::clone(&peaks),
     };
     SENT.with_borrow_mut(|sent| {
@@ -3383,6 +3383,60 @@ async fn a_chunk_of_the_default_length_holds_its_working_set() {
                 phase.largest().at
             );
         }
+    }
+}
+
+/// M1 of `plans/active/gpu-speed.md`: `Demixer::next_input` holds only
+/// the span that it reads and the two channels of the chunk's input, each
+/// of `chunk` floats, also on the last chunks, which pad by reflection or
+/// with zeros.  So a temporary buffer of the unpadded length fails.  The
+/// mix is in memory, so a read is two channels of `min(chunk, frames)`
+/// floats.
+#[wasm_bindgen_test]
+fn a_chunk_input_holds_only_its_span_and_its_two_channels() {
+    // (frames, chunk, overlap): padded, with a last chunk of each path;
+    // unpadded and shorter than a chunk, the same.
+    for (frames, chunk, overlap) in [(5003, 1000, 2), (700, 1000, 2)] {
+        let mut d = Demixer::new(mix_of(frames), chunk, overlap, STEMS.len());
+        let span = chunk.min(frames);
+        let step = chunk / overlap;
+        let border = chunk - step;
+        let total = if frames > 2 * border {
+            frames + 2 * border
+        } else {
+            frames
+        };
+        let mut paths = (false, false);
+        let mut lengths = Vec::new();
+        loop {
+            // The unpadded part of the next chunk: reflected, or zeros.
+            let unpadded = total.saturating_sub(d.chunk_index() * step).min(chunk);
+            if unpadded < chunk && unpadded > chunk / 2 + 1 {
+                paths.0 = true;
+            } else if unpadded > 0 && unpadded <= chunk / 2 + 1 {
+                paths.1 = true;
+            }
+            let start = LIVE.get();
+            PEAK.set(start);
+            let Some(x) = d.next_input().expect("a read from memory") else {
+                break;
+            };
+            let held = PEAK.get() - start;
+            assert_eq!(
+                held,
+                4 * (2 * span + 2 * chunk),
+                "frames={frames} chunk={chunk}: chunk {} holds its span and its two channels",
+                d.chunk_index()
+            );
+            lengths.push(x[0].len());
+            d.accept(&fake_stems_of(&x));
+        }
+        assert!(lengths.iter().all(|&n| n == chunk), "{lengths:?}");
+        assert_eq!(
+            paths,
+            (true, true),
+            "frames={frames}: a chunk pads by reflection, and one with zeros"
+        );
     }
 }
 

@@ -274,6 +274,13 @@ impl Net {
 
     /// Sequences per transformer step for sequences of `seq` tokens, with
     /// fused attention or without.
+    /// Each band group of the band split with its gains (`[count, width]`,
+    /// times the square root of the width), as [`normalise_bands`] takes
+    /// them.
+    pub fn split_gains(&self) -> impl Iterator<Item = (&BandGroup, &[f32])> {
+        self.split.iter().map(|sg| (&sg.g, sg.gamma.as_slice()))
+    }
+
     pub fn sub_batch(&self, batch: usize, seq: usize, fused: bool) -> usize {
         (self.budget / per_seq(seq, fused)).clamp(1, batch)
     }
@@ -423,6 +430,29 @@ pub fn normalise_band(features: &[f32], g: &BandGroup, j: usize, gamma: &[f32], 
     }
 }
 
+/// The band-split RMSNorm of `features` (`[T, FEATURES]`), one band at a
+/// time, in a buffer of the widest band.  `groups` gives each band group
+/// with its gains (`[count, width]`).  `write(at, rows)` takes each band's
+/// rows (`[T, width]`) and their offset in floats in the normalised input,
+/// which is `[count, T, width]` for each group.  [`Job::set_input`]
+/// writes them to the GPU.
+pub fn normalise_bands<'g>(
+    features: &[f32],
+    groups: impl IntoIterator<Item = (&'g BandGroup, &'g [f32])>,
+    mut write: impl FnMut(usize, &[f32]),
+) {
+    let t = features.len() / FEATURES;
+    let mut band = vec![0.0f32; t * widest_band()];
+    for (g, gamma) in groups {
+        let w = g.width;
+        for j in 0..g.count {
+            let rows = &mut band[..t * w];
+            normalise_band(features, g, j, &gamma[j * w..(j + 1) * w], rows);
+            write(t * g.offset + j * t * w, rows);
+        }
+    }
+}
+
 /// Buffers and steps for one chunk of `frames` STFT frames.
 pub struct Job<'a> {
     gpu: &'a Gpu,
@@ -526,18 +556,10 @@ impl<'a> Job<'a> {
     /// writes it to the GPU at the band's offset, so it holds one band,
     /// not the whole input.
     pub fn set_input(&self, features: &[f32]) {
-        let t = self.frames;
-        assert_eq!(features.len(), t * FEATURES);
-        let mut band = vec![0.0f32; t * widest_band()];
-        for sg in &self.net.split {
-            let (g, w) = (sg.g, sg.g.width);
-            for j in 0..g.count {
-                let rows = &mut band[..t * w];
-                normalise_band(features, &g, j, &sg.gamma[j * w..(j + 1) * w], rows);
-                self.gpu
-                    .write(&self.split_in, t * g.offset + j * t * w, rows);
-            }
-        }
+        assert_eq!(features.len(), self.frames * FEATURES);
+        normalise_bands(features, self.net.split_gains(), |at, rows| {
+            self.gpu.write(&self.split_in, at, rows);
+        });
     }
 
     /// Replaces the hidden state `[BANDS, T, DIM]` (to run single layers).
@@ -551,6 +573,14 @@ impl<'a> Job<'a> {
     pub fn set_normed(&self, x: &[f32]) {
         assert_eq!(x.len(), BANDS * self.frames * DIM);
         self.gpu.write(&self.xt, 0, x);
+    }
+
+    /// The band-normalised input that [`Self::set_input`] wrote, per group
+    /// `[count, T, width]`.
+    pub async fn split_input(&self) -> Result<Vec<f32>, String> {
+        self.gpu
+            .read(&self.split_in, 0, self.frames * FEATURES)
+            .await
     }
 
     pub async fn hidden(&self) -> Result<Vec<f32>, String> {
@@ -947,10 +977,10 @@ mod tests {
         (h % 2001) as f32 / 1000.0 - 1.0
     }
 
-    /// Cut 3 of M1 of `plans/active/gpu-speed.md`: the bands of
-    /// `normalise_band`, put together at the offsets that
-    /// `Job::set_input` writes them to, equal the normalised input made
-    /// whole, bit for bit.  One frame of one band is all zeros, so the
+    /// Cut 3 of M1 of `plans/active/gpu-speed.md`: the bands that
+    /// `normalise_bands` writes, put at the offsets that it gives (and
+    /// `Job::set_input` writes to the GPU), equal the normalised input
+    /// made whole, bit for bit.  One frame of one band is all zeros, so the
     /// floor of the norm is in the test.  The buffer of the widest band
     /// holds each band.
     #[test]
@@ -969,19 +999,20 @@ mod tests {
             .collect();
         let want = normalised_whole(&features, &gammas);
         let mut got = vec![f32::NAN; t * FEATURES];
-        let mut band = vec![0.0f32; t * widest_band()];
-        for (g, gamma) in band_groups().iter().zip(&gammas) {
-            let w = g.width;
-            assert!(w <= widest_band(), "the buffer holds band group {g:?}");
-            for j in 0..g.count {
-                let rows = &mut band[..t * w];
-                normalise_band(&features, g, j, &gamma[j * w..(j + 1) * w], rows);
-                got[t * g.offset + j * t * w..][..t * w].copy_from_slice(rows);
-            }
-        }
+        let groups = band_groups();
+        let mut widest = 0;
+        normalise_bands(
+            &features,
+            groups.iter().zip(gammas.iter().map(Vec::as_slice)),
+            |at, rows| {
+                widest = widest.max(rows.len() / t);
+                got[at..][..rows.len()].copy_from_slice(rows);
+            },
+        );
         for (k, (g, w)) in got.iter().zip(&want).enumerate() {
             assert_eq!(g.to_bits(), w.to_bits(), "float {k}");
         }
+        assert_eq!(widest, widest_band(), "the widest band fits its buffer");
     }
 
     /// Without the scores buffer, a time-axis step takes 4 bands of a full

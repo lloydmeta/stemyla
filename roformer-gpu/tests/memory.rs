@@ -17,7 +17,7 @@ use std::sync::Mutex;
 
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{DEPTH, DIM, DIM_HEAD, FEATURES, HEADS, HIDDEN, STEMS, band_groups};
-use roformer_gpu::net::{Job, Net, Step};
+use roformer_gpu::net::{Job, Net, Step, normalise_bands};
 use roformer_gpu::{Gpu, WeightFormat, weight_format};
 use test_support::{Need, skip};
 
@@ -392,6 +392,37 @@ fn net_f16_weights_match_f32() {
             "stem {stem}: {} mask values differ, the largest by {:e}",
             d.count, d.largest
         );
+    }
+}
+
+/// `Job::set_input` writes the band-normalised input to the GPU: the
+/// read-back of `split_in` equals what `normalise_bands` gives with the
+/// model's gains, bit for bit.  The gains are not 1, and the buffer starts
+/// at zero, so a lost or misplaced write fails.
+#[test]
+fn set_input_writes_the_normalised_bands_to_the_gpu() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = gpu() else { return };
+    let frames = 9;
+    // No feature is 0, so no normalised float is 0.
+    let features: Vec<f32> = (0..frames * FEATURES)
+        .map(|i| ((i * 7919) % 2001) as f32 / 1000.0 - 0.9995)
+        .collect();
+    let store = Store::from_source(Random::new(&tensors())).unwrap();
+    let net = Net::load_store(&g, store, 400_000, WeightFormat::F32).unwrap();
+    let mut want = vec![0.0f32; frames * FEATURES];
+    normalise_bands(&features, net.split_gains(), |at, rows| {
+        want[at..][..rows.len()].copy_from_slice(rows);
+    });
+    assert!(want.iter().all(|v| *v != 0.0), "every float is set");
+    let job = Job::new(&g, &net, frames);
+    job.set_input(&features);
+    let got = pollster::block_on(job.split_input()).unwrap();
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(got.len(), want.len());
+    for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "float {k} of split_in");
     }
 }
 

@@ -207,6 +207,18 @@ mod tests {
         );
     }
 
+    /// One frame gives `HOP x (1 - 1)` samples: none, and no panic.
+    #[test]
+    fn one_frame_gives_no_samples() {
+        let mut asked = 0;
+        let out = istft_frames(1, |t, bins| {
+            asked += 1;
+            bins.fill(Complex::new(t as f32 + 1.0, 0.0));
+        });
+        assert_eq!(asked, 1, "the frame is asked for once");
+        assert!(out.is_empty(), "{} samples", out.len());
+    }
+
     #[test]
     fn reflect_matches_numpy_reflect_mode() {
         // numpy.pad([0,1,2,3], 2, 'reflect') == [2,1,0,1,2,3,2,1]
