@@ -73,8 +73,9 @@ Chrome's compiler, Tint, also clamps indices by default (its robustness transfor
 
 ### The paths of this run
 
+* The session scratchpad: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad`.  This folder belongs to one session, and is not kept.
 * The scratch worktree: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt`, on the local branch `scratch/m3-variants` from `1be7a18`.  Never push it (GIT-1).
-* The logs are in `<scratchpad>/m3/runs/`, where `<scratchpad>` is the folder above `m3/`.  Each page has three:
+* The logs are in `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/runs/`.  Each page has three:
   * `<step>-<browser>-<n>/bench.log`: the bench log, in the folder that `e2e --out` names;
   * `<step>-<browser>-<n>.log`: a copy of that bench log;
   * `<step>-<browser>-<n>.stdout`: the output of `e2e`.
@@ -83,7 +84,7 @@ Chrome's compiler, Tint, also clamps indices by default (its robustness transfor
 * Weights (Step 8 only): `/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors` (git-ignored, ASSET-1).
 * Chrome: `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.
 * Safari: through `safaridriver`, which `xtask` drives.  Never quit the maintainer's Safari.  Read `docs/references/local-browser-testing.md` first.
-* Build the page of the worktree with `(cd <wt>/app && trunk build --release)`, and pass `--dist <wt>/app/dist` to `e2e`.  Run one browser GPU run at a time.  `caffeinate -dimsu` runs.
+* Build the page of the worktree with `(cd /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt/app && trunk build --release)`, and pass `--dist /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt/app/dist` to `e2e`.  Run one browser GPU run at a time.  `caffeinate -dimsu` runs.
 
 ## Plan of work
 
@@ -105,7 +106,7 @@ Read these, and record each fact with the file, the commit SHA and the date chec
 
 ### Step 2: the scratch worktree and its harness
 
-1. `git worktree add <scratchpad>/m3/wt -b scratch/m3-variants 1be7a18`.
+1. `git worktree add /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt -b scratch/m3-variants 1be7a18`.
 2. On that branch only:
    * Each matmul variant of Step 4 is a new `TILES` entry, with its f16 variant, so that the bench times both formats.  `s64-c` needs a source of its own, since a `hand_written` tile always gives `matmul.wgsl`: for example a source field on `Tile`.
    * Each attention variant of Step 6 is a new source timed in `attention_per_chunk`, beside split and fused.
@@ -166,7 +167,7 @@ At most two fused attention variants, from what Steps 3 to 5 found, each within 
 2. The design that M4 and M5 start from: tile shape, outputs for each thread, the memory layout and index form.  Also the number of barriers, and the attention structure.  Each choice names its figure.  The parent's M4 gives 8 KiB for the 128 x 128 tile, without a pad; with `v64`'s pad of one vec4 it is 12 KiB.  The diff of item 3 corrects it, or says why the pad goes.
 3. `m3/parent-m3.diff` for the orchestrator, `git apply --check` passing on HEAD.  It holds a Surprises entry with the summary table, and Decision log lines for the cause and the design.  It changes the M4 and M5 sections where the design changes their start point.
 4. If the cause is in WebKit: an entry in `docs/references/browser-quirks.md` in the form of the other entries.  It gives what was seen, where and when, the code, and the rule.  Also `m3/webkit-bug.md`, a bug text for the maintainer to file.  The text gives a small WGSL case, the figures in both browsers, and the WebKit source lines with the commit.  Review round 1 put it in the repo as `docs/references/webkit-bug-workgroup-zero-init.md`.
-5. `git -C <wt> format-patch 1be7a18..scratch/m3-variants -o <scratchpad>/m3/variants/`.  M4 and M5 can start from it.  Then remove the worktree and the scratch branch.
+5. `git -C /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt format-patch 1be7a18..scratch/m3-variants -o /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/variants/`.  M4 and M5 can start from it.  Then remove the worktree and the scratch branch.
 6. If a variant or the bench harness is worth keeping on the branch, do not commit it: say so in the report, with the reason.  The team leader decides, and then this plan gets a code step with tests that fail first, and review rounds over the code.
 
 ### Step 8: the checks before the review round
@@ -305,6 +306,8 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * 2026-11-13, Step 7: the best-supported explanation (Step 7 of `m3/findings.md`, which was in the session scratchpad and is not kept).  Safari's loss on `v64` has two parts.  First, a fixed cost for each workgroup.  WebKit sets workgroup memory to zero with thread 0, byte by byte.  With WebKit's clamps, this makes Chrome's MSL 1.49 times slower at K 256 (Step 5.2).  By that emulation, it is 64 % of `v64`'s loss at K 256 and 30 % at K 1,024.  The other estimates at K 256 are about 26 % (`wg10k`), about 34 % (`v64-g4`, from K 256 only) and 55 % (Step 3's fit).  In fused attention, it is about 2 % of a fused dispatch in Safari, and about 5 % of its loss.  The `v64-g4` estimate assumes that `v64-g4`'s own extra cost is the same in both browsers.  At K 256, Safari's time did not go down with `v64-g4`, and Chrome's became about 1.20 times longer.  Second, a K loop about 1.35 times slower, whose cause is not found.  It is the rest, and most of fused attention's loss of 1.52.  A dump of Safari's own MSL would settle the second part.  WebKit's toggle for it is `com.apple.WebKit.WebGPU.TogglePrintMetalCode`.  Where the GPU process writes it is not confirmed, so M3 did not try it.
 
 * 2026-11-13, review round 2: a reviewer's `git worktree add` failed on a name in use, and a pipe hid the failure.  So a `sed` changed one line in another reviewer's worktree.  The reviewer reverted it, and `review check` printed "no change" (TD-34; as in M1 and M2).
+* 2026-11-13, review round 3: the supply-chain reviewer still ran after its report.  It ran `find /` from the plan's scratchpad placeholder for 3.6 hours, and raised a macOS privacy prompt.
+* 2026-11-13: the Safari perf gate at `eb81ed0` hung for 3 hours after "click Separate 6 stems".  A rerun passed (7.00 s, bound 8.14 s).
 
 ## Decision log
 
@@ -326,6 +329,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * 2026-11-13, agent (implementer), Step 7: the cause in WebKit is the zero-init of workgroup memory, so it gets a `browser-quirks.md` entry and `m3/webkit-bug.md`.  The design for M4: `v64`'s tile with fewer bytes of workgroup memory for each unit of work, no 8 x 8 tile, no unrolled loop.  The candidates are `v64` with BK 8, and a kernel with no workgroup memory.  For M5: the fused structure, each query block loaded once, no unrolled loop.  Each choice and its figure was in `m3/findings.md` and `m3/parent-m3.diff`.  `m3/findings.md` was in the session scratchpad and is not kept.  This plan's Surprises hold the figures.
 * 2026-11-13, agent (implementer), review rounds 1 and 2: the review of the CI commit added code to `xtask`.  Round 1 changed `xtask/src/web_test.rs` and `xtask/src/main.rs`, and round 2 also `xtask/tests/e2e_cli.rs`.  Why: CI must run a step again only after the runner's hang, so `web-test` gives the hang its own exit code.  Step 8's path list names these paths.
 * 2026-11-13, agent (orchestrator): the stem-worker failure of run 43152005940 is a pre-existing finding; with no cause found in one hour, it gets TD-99.
+* 2026-11-13, maintainer: three changes before review round 4: the Bash guard refuses a search of the whole disk or home folder; each browser `e2e` scenario gets a time limit; the skills give absolute paths and check that no subagent still runs.  Why: a review agent ran `find /` for 3.6 hours and walked the Photos library, and a Safari `e2e perf` run hung for 3 hours.
 
 ## Outcomes and retrospective
 
