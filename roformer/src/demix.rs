@@ -101,16 +101,18 @@ fn linspace(start: f32, end: f32, n: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Reflect padding on the right, numpy/torch `reflect` mode.
-fn reflect_right(x: &[f32], to: usize) -> Vec<f32> {
+/// Reflect padding on the right to `to` samples, numpy/torch `reflect`
+/// mode, in place.  `x` grows within its capacity when it holds `to`.
+fn reflect_right_in_place(x: &mut Vec<f32>, to: usize) {
     let n = x.len();
     assert!(
         to - n < n,
         "reflect padding must be shorter than the signal"
     );
-    (0..to)
-        .map(|j| if j < n { x[j] } else { x[2 * (n - 1) - j] })
-        .collect()
+    for j in n..to {
+        let mirrored = x[2 * (n - 1) - j];
+        x.push(mirrored);
+    }
 }
 
 impl<S: MixSource> Demixer<S> {
@@ -198,6 +200,19 @@ impl<S: MixSource> Demixer<S> {
         lo..hi + 1
     }
 
+    /// `span`, widened inside the song to a chunk of frames, or to the
+    /// whole song if it is shorter.  So each read, the last chunks' too,
+    /// takes buffers of the same size, and leaves no new holes in the
+    /// heap (M1 of `plans/active/gpu-speed.md`).
+    fn whole(&self, span: Range<usize>) -> Range<usize> {
+        let want = self.chunk.min(self.frames);
+        if span.end - span.start >= want {
+            return span;
+        }
+        let start = span.start.min(self.frames - want);
+        start..start + want
+    }
+
     /// Samples in each output stem: the song's length.
     pub fn output_len(&self) -> usize {
         self.frames
@@ -214,28 +229,29 @@ impl<S: MixSource> Demixer<S> {
 
     /// The next chunk, padded to `chunk` samples, or `None` when done.  It
     /// reads one span of the song from the source, and gives the source's
-    /// error if that read fails.
+    /// error if that read fails.  The span is a chunk of frames, or the
+    /// whole song if it is shorter: it holds the frames that the chunk
+    /// reads.
     pub fn next_input(&mut self) -> Result<Option<Stereo>, S::Error> {
         let total = self.total();
         if self.pos >= total {
             return Ok(None);
         }
         let end = (self.pos + self.chunk).min(total);
-        let span = self.span(self.pos..end);
+        let span = self.whole(self.span(self.pos..end));
         let frames = self.source.read(span.start, span.end)?;
+        // Each channel is made at the chunk's size and padded in place.
+        // So the last chunks, which are shorter, take buffers of the
+        // same size as the others, and leave no new holes in the heap.
         let part = |c: usize| {
-            let x: Vec<f32> = (self.pos..end)
-                .map(|i| frames[c][self.frame(i) - span.start])
-                .collect();
-            if x.len() == self.chunk {
-                x
-            } else if x.len() > self.chunk / 2 + 1 {
-                reflect_right(&x, self.chunk)
+            let mut x = Vec::with_capacity(self.chunk);
+            x.extend((self.pos..end).map(|i| frames[c][self.frame(i) - span.start]));
+            if x.len() > self.chunk / 2 + 1 {
+                reflect_right_in_place(&mut x, self.chunk);
             } else {
-                let mut v = x;
-                v.resize(self.chunk, 0.0);
-                v
+                x.resize(self.chunk, 0.0);
             }
+            x
         };
         Ok(Some([part(0), part(1)]))
     }
@@ -423,6 +439,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Reflect padding on the right, numpy/torch `reflect` mode, into a
+    /// new buffer: the padding of the reference.
+    fn reflect_right(x: &[f32], to: usize) -> Vec<f32> {
+        let n = x.len();
+        (0..to)
+            .map(|j| if j < n { x[j] } else { x[2 * (n - 1) - j] })
+            .collect()
     }
 
     /// The previous implementation: song-length running sums over a padded
@@ -782,10 +807,14 @@ mod tests {
                 let frames: Vec<usize> = (pos..(pos + chunk).min(total)).map(frame).collect();
                 let lo = *frames.iter().min().unwrap();
                 let hi = *frames.iter().max().unwrap() + 1;
+                assert!(
+                    read.0 <= lo && hi <= read.1,
+                    "n={n} chunk={chunk} overlap={overlap}: read {k} {read:?} holds the frames {lo}..{hi} that its chunk reads"
+                );
                 assert_eq!(
-                    read,
-                    (lo, hi),
-                    "n={n} chunk={chunk} overlap={overlap}: read {k} is the frames that its chunk reads"
+                    read.1 - read.0,
+                    chunk.min(n),
+                    "n={n} chunk={chunk} overlap={overlap}: read {k} {read:?} is a chunk of frames, or the song"
                 );
             }
             for &(start, end) in &reads {
@@ -809,6 +838,27 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// M1 of `plans/active/gpu-speed.md`: each chunk's input has the
+    /// chunk's size and capacity, the last chunks' too, so their buffers
+    /// leave no new holes in the heap.
+    #[test]
+    fn each_chunk_input_has_the_capacity_of_a_chunk() {
+        for &(n, chunk, overlap) in STREAM_CASES {
+            let mut d = Demixer::new(song(n), chunk, overlap, 3);
+            while let Some(x) = d.next_input().unwrap() {
+                for c in &x {
+                    assert_eq!(
+                        (c.len(), c.capacity()),
+                        (chunk, chunk),
+                        "n={n} chunk={chunk} overlap={overlap}: chunk {}",
+                        d.chunk_index()
+                    );
+                }
+                d.accept(&fake(&x));
             }
         }
     }
