@@ -1,6 +1,6 @@
 # 0031: tier push runs the perf gate when asked
 
-Status: proposed (2026-11-12, by the agent, in Step 4 of `plans/active/gpu-speed-m2.md`; amends decision 0026 and GIT-2)
+Status: proposed (2026-11-12, by the agent, in Step 4 of `plans/completed/gpu-speed-m2.md`; amends decision 0026 and GIT-2)
 
 ## Context
 
@@ -29,4 +29,4 @@ B.
 * A machine without the variable prints the skip line, and runs as before.  CI does not set it.
 * GIT-2 in `invariants.md`, `CLAUDE.md` and `.claude/rules/gpu.md` change in the same commit (DOC-1).
 * The gate's tolerance comes from at least 5 runs in each browser, and is never under 10 % (`xtask/src/e2e/perf.rs`).
-* The gate reads the chunk lower quartile, not the chunk median.  Interference only adds time to a chunk, and a slower kernel adds time to each chunk.  On 5 runs in each browser, the median gave a tolerance of 22 % (Chrome) and 28 % (Safari), and the lower quartile 10 % and 11 % (`plans/active/gpu-speed-m2.md`, Step 5).
+* The gate reads the chunk lower quartile, not the chunk median.  Interference only adds time to a chunk, and a slower kernel adds time to each chunk.  On 5 runs in each browser, the median gave a tolerance of 22 % (Chrome) and 28 % (Safari), and the lower quartile 10 % and 11 % (`plans/completed/gpu-speed-m2.md`, Step 5).

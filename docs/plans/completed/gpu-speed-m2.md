@@ -196,7 +196,12 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * First failures of the change: `the_lower_quartile_is_the_value_at_a_quarter_by_nearest_rank` at `assert_eq!(lower_quartile(&ten), 4.8)` (`perf.rs:571`, left 0.0), with a stub that gave 0.0.  With the tests on the lower quartile and the gate still on the median, `the_gate_fails_only_over_the_bound` failed at `assert!(text.contains(part))` (`perf.rs:823`, "chunk lower quartile 5.50 s: chunk median 4.70 s, ...").  `an_entry_holds_the_runs_and_the_median_of_their_lower_quartiles` failed at `assert_eq!(e.baseline, 5.0)` (`perf.rs:904`, left 4.7).
 * [x] Step 6: the docs and the debt (2026-11-12).  Each doc changed in the commit of its step.  `xtask/src/e2e.rs` and `README.md` changed in Step 3 and with the lower quartile.  The perf gate section of `docs/references/local-browser-testing.md`, decision 0031, its `docs/README.md` line, 0026's "Amended by" line, GIT-2, GPU-3, `docs/working-with-agents.md` and TD-10 changed in Step 4.  TD-10 changed in Step 1 too.  The orchestrator applied the changes of `CLAUDE.md` and `.claude/rules/gpu.md` (Step 4, and the lower quartile).  The measured gate time (2.8 minutes) replaced "about 3.5 minutes" in Step 5.  The diff for the parent plan's Surprises is `m2/parent-surprises.diff` in the session's scratch folder.
 * [x] Before review round 1 (2026-11-12, at `0d251df`).  `check --tier push` with `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` set passed (15 lines, 402.3 s): the gate passed in Chrome (4.70 s, margin 0.47 s) and in Safari (7.40 s, margin 0.74 s).  Without the variable, it passed (13 lines, 232.4 s) and printed the skip line "the perf gate did not run: STEMYLA_PERF_WEIGHTS does not name the model".  `cargo build -p xtask` passed.
-* [ ] Review rounds.
+* [x] Review rounds (2026-11-12): 5 rounds, the log in `docs/reviews/gpu-speed-2026-11-12-m2.md`.  Totals: 42 agents, 2,704,055 tokens, 90.0 wall minutes, no interventions.  Rounds 4 and 5 fixed 2 findings (4-1, 4-2), both in the round 3 fixes.
+  * Round 1 (15 agents, 39.8 minutes): 42 findings.  30 confirmed should-fix (15 of 38 missed mutants merged into 1-2 and 1-4), 7 refuted, 11 nits.  Fixed in `928264d`.
+  * Round 2 (11 agents, 18.7 minutes): 15 findings.  5 confirmed, 2 pre-existing (new on this branch), 1 refuted, 7 nits.  Fixed in `eb2fb57`.
+  * Round 3 (9 agents, 15.6 minutes): 12 findings.  4 confirmed (3-1 and 3-3 on VERIFY-1, 3-2 on GPU-3), 8 nits.  Fixed in `93dc31e`.
+  * Round 4 (5 agents, 10.7 minutes): 7 findings.  4-1 (significant) and 4-2 (VERIFY-1) fixed in `5c1f836`; 5 nits reported, not fixed.
+  * Round 5 (2 agents, 5.2 minutes): one nit, reported, not fixed.  No mutants in the diff.  The round meets the stop rule of decision 0024.
   * Round 1 fixes (2026-11-12):
     * 1-1: `profile_labels_attention_by_its_shape` (`roformer-gpu/tests/kernels.rs`) passes on Metal with `STEMYLA_REQUIRE=gpu,f16,timestamps`.  With the label lines of `Rec::attention` deleted, it fails at `kernels.rs:1066` (`{"attention": (1, 0.0)}`, left `None`).
     * 1-4: `outcome`, `key_of`, `entry_of` and `runs_refusal` in `perf.rs` take the choices of `fn perf`.  `perf_axes`, `browser_name` and `command_text` move to `perf.rs`.  With stubs, `each_outcome_follows_the_options` failed at `perf.rs:1226` (left `"note"`, right `"fail"`).  `a_run_reads_only_the_entry_of_its_key` failed at `perf.rs:1189` (left a key of empty texts).  `the_run_count_is_checked_before_any_run` failed at `perf.rs:1170` (`runs_refusal(0, false).is_some()`).  Each of 13 mutants of the guards, the key match and the run count fails a test: for example `gated || update` to `&&` at `perf.rs:1282`, `runs < MIN_RUNS` to `<=` at `perf.rs:1229`.
@@ -293,4 +298,21 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 
 ## Outcomes and retrospective
 
-Not yet.
+Done on 2026-11-12.
+
+What M2 achieved:
+* `xtask e2e perf` separates the 1-minute synthetic song at the default chunk, and writes a result for each run.  The result gives the browser and its version, the adapter, `isFallbackAdapter`, the kernels, each chunk time, the chunk median and lower quartile, the whole time and the matmul rate.  With `profile=1`, it adds the GPU time of four groups.
+* The gate compares the chunk lower quartile with a committed baseline for the browser, the adapter and the host's chip (`xtask/perf-baselines.json`).  Chrome 157 is 4.70 s and Safari 27.2 is 7.40 s on the M2 Pro, each from 5 runs, with a tolerance of 10 %.
+* The gate fails closed.  A fallback value other than `no`, a software adapter, a query that changes the work, and a hand-edited baselines file are never a pass.  An update cannot raise the bound without a new browser version or a stored reason.
+* `check --tier push`, when asked with `STEMYLA_PERF_WEIGHTS`, runs the gate in Chrome, then Safari, for a path that can change the speed (decision 0031, proposed).  It adds about 3 minutes.
+* The worker names `isFallbackAdapter` beside the adapter, and the profile labels give the shapes of softmax and fused attention (GPU-3, TD-10).
+* Safari is not slower after M1: the code of `22cdd74` and of HEAD both gave 7.40 s.
+
+What it did not achieve:
+* The key cannot see a change of GPU state.  The Safari push checks of the review rounds gave 7.10 s, under the 7.40 s baseline, with the same code.
+* Nothing ties a new default kernel to a pass on a named real GPU (TD-10).  The PR still names it.
+
+What to do differently:
+* Plan the statistic of a timing gate from the noise first.  The chunk median gave tolerances of 22 % and 28 %; the lower quartile gave 10 % and 11 %.
+* A list that copies another crate's keys needs a sensor in the same commit.  Rounds 1 to 3 each found a gap in `MEASURE_KEYS` or its tests.
+* Start a gate fail-closed: refuse each value that is not the known good one.
