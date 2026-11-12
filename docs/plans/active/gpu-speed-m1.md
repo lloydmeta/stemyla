@@ -205,7 +205,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * [x] Step 6: the room for M6 (2026-11-12).  No larger cut is needed: see the Decision log.
 * [x] Step 7: the four checks (2026-11-12).  First failures, with stubs that passed each case: `the_worker_must_stay_flat_after_the_warm_up` at `assert!(!ok, "a rise of 4.1 MB at chunk 5 fails: {what}")`; `the_long_song_must_not_grow_the_worker_more` at `assert!(!ok, "4.1 MB more fails: {what}")`; `the_worker_growth_must_fit_the_working_set_budget` at `assert_eq!(over, Some(false), "0.1 MB over fails: {over_what}")` (left `Some(true)`); `the_tab_total_must_fit_the_budget` at `assert_eq!(ok, Some(false), "943.1 fails: {what}")` (left `Some(true)`).  `WORKER_HEADROOM_MB` starts at -22, from Step 0 (95 MB) less the function's peak before the cuts (117.86 MB).
 * [x] Step 8: the headroom (2026-11-12).  It found and fixed a growth at the last chunks (`0c56d0a`).  Then 3 runs of `memory-budget` in Chrome and 3 in Safari at `0c56d0a` passed, with 12 growths of 57 MB.  `WORKER_HEADROOM_MB` is -22 MB.
-* [ ] Step 9: the docs and the debt.
+* [x] Step 9: the docs and the debt (2026-11-12).  Each doc changed in the commit of its step: `xtask/src/e2e.rs` and `README.md` (Steps 7 and 8), `docs/ARCHITECTURE.md` (Steps 1 to 5, 7 and 8), MEM-4 in `docs/invariants.md` (Steps 1 and 7), TD-11 (Steps 1, 4 and 7) and TD-54 (Step 7).  The diff of the parent plan's M6 section is for the orchestrator, outside the repo (`m1/parent-m6.diff` in the session's scratch folder); `git apply --check` passes on HEAD.
 * [ ] Review rounds.
 
 ## Surprises and discoveries
