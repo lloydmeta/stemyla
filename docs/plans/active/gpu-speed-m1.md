@@ -196,7 +196,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 
 ## Progress
 
-* [ ] Step 0: the baselines.
+* [x] Step 0: the baselines (2026-11-12, at `32a25fc`, whose code is the code of `22cdd74`).
 * [ ] Step 1: the working-set function and its measure.
 * [ ] Step 2: each stem goes to the demixer as it is made.
 * [ ] Step 3: the mask applies one frame at a time.
@@ -211,6 +211,8 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 ## Surprises and discoveries
 
 * 2026-11-12, plan review round 1: at the default chunk a song has at most 2 chunks or at least 5, because a song is padded only above `2 x border` frames (`Demixer::new`).
+* 2026-11-12, Step 0: `e2e stored-stems --weights <path>` passed in Chrome 157 and in Safari 27.2.  Both browsers give the same six SHA-256s, so each later run compares with one list.  The list for `--hashes`: `55b981ea1ae82ddae4b0e6c5b5479de3447cf6bea51095f1ac07415cdf7a7348,7f0b47d66796b8346b2e07012e1c65abec4a0c622a365a5f772312ea728f687d,6f97eccacdd66503a20256282a82b6a5e014b70fff60818abe023a8636b1bf28,f1b79d872435cdb931306a0c33228905c2d6b3ddfd33e9f1cb55720f52d0b624,87fc0cc23bdefac194dfe5f0268a1684a78928f74c630f3d8d664cdb78189d8a,3166e0de310c930f2b40f75c2631e4524b7115c64f90d4ef540102af6da68f90`.  `stored-stems` sets its own options (`mm: 's64', attn: 'split', chunk: 16384, overlap: 2`), so it tests the CPU path at 17 segments of a 3-second clip, not at the default chunk.
+* 2026-11-12, Step 0: `e2e memory-budget --browser chrome --query x=1` fails at the 1-minute song, as the plan expects.  `Page::finish` stops the run at the first failed song, so the 4-minute song did not run.  The worker's lines: 30 MB at the separation's start, 58 MB at `separating 11 chunks`, 92 MB after chunk 1, 125 MB after chunks 2 to 11, 125 MB at the end.  `FAIL: the worker grew by Some(95.0) MB during the separation, at most 4 MB`.  The four peaks: page wasm 33 MB, worker wasm 125 MB, decoder wasm 6 MB, GPU live 673 MB, sum 837 MB.  The separation took 51.5 s (11 chunks, 4.7 s each).  The page grew by 0 MB during the open and the separation, and by 18 MB to show the stems.
 
 ## Decision log
 
