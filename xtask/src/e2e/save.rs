@@ -2562,9 +2562,10 @@ mod tests {
     /// is more than the longest measured run of those steps.  In
     /// `browser-tests`, they took 10.5, 15.3 and 19.7 minutes (runs
     /// 42777211457, 40894815433 and 42952206488).  In `macos`, they took
-    /// 24.9 minutes in run 43108510738 (2026-11-11, with no cache), so 25
-    /// has 0.1 to spare.  That is the longest of the macOS jobs from
-    /// 2026-11-11 to 2026-11-12.
+    /// 24.9 minutes in run 43108510738 (2026-11-11, with no cache).  That
+    /// is the longest of the macOS jobs from 2026-11-11 to 2026-11-12.  25
+    /// is 24.9 rounded up.  The 4 spare minutes of the job limit cover the
+    /// rounding of each measured time and the retry action's own overhead.
     /// [`retry_minutes`] gives the time of the retry steps.
     const OTHER_STEPS_MINUTES: [(&str, u64); 2] = [("browser-tests", 20), ("macos", 25)];
 

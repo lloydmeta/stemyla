@@ -528,7 +528,7 @@ This entry concerns VERIFY-1.  The cause is not known.
 * What it shows: the test writes 16 zero bytes over the mix after `StoredMix::open`, and awaits `close()`.  The read through the `File` from before the write then gave the old samples of channel 0.  WebKit's source on `main` gives the new bytes or NotFoundError after `close()` resolves.  No path to old bytes was found.
 * The rate: 1 of 37 macOS job attempts that ran the test (2.7 %), from run 42952206488 to run 43241235485.  In Chrome, 0 of 59 job attempts from 2026-11-09.  On the maintainer's Mac, 0 of 600 reads gave old bytes.
 * TD-98 does not cover it: the action runs a step again only after the runner's hang, and this failure exits with 1.  So it fails CI if it comes back.
-* The product risk is low.  The page never writes the mix during a separation (D6 of M4), and the end check of `StoredMix` sees a change of size ([TD-55](#td-55-safari-can-miss-a-mix-file-written-again-during-a-separation)).
+* The product risk is low.  The page never writes the mix during a separation (D6 of `plans/completed/stream-from-storage-m4.md`), and the end check of `StoredMix` sees a change of size ([TD-55](#td-55-safari-can-miss-a-mix-file-written-again-during-a-separation)).
 * Next step: in the test, after the change, read the mix again through a new `getFile()` before the old `File`.  Assert that the new read sees the change.  If that assert fails on CI, the write had not landed, and the test can wait for it.  If it passes and the old `File` still gives old samples, the cause is in WebKit, and it goes under TD-96.
 * Fix: find the cause, then fix the test or the code, or record a WebKit bug.
 
@@ -575,7 +575,7 @@ M3 of that plan (2026-10-25) removed the page's song-length stems during a stora
 
 ### TD-55: Safari can miss a mix file written again during a separation
 
-The page never writes `mix.f32` while a separation runs (D6 of M4).  The worker checks this too.  After the last chunk, it compares the file's size and `lastModified` with their values at the open.  Chrome also refuses any read after a write.  Safari reads the bytes on disk now, and gives `lastModified` in whole seconds (`references/browser-quirks.md`).  So in Safari, a write of the same size in the same second as the open is not seen.  The stems then come from mixed samples.
+The page never writes `mix.f32` while a separation runs (D6 of `plans/completed/stream-from-storage-m4.md`).  The worker checks this too.  After the last chunk, it compares the file's size and `lastModified` with their values at the open.  Chrome also refuses any read after a write.  Safari reads the bytes on disk now, and gives `lastModified` in whole seconds (`references/browser-quirks.md`).  So in Safari, a write of the same size in the same second as the open is not seen.  The stems then come from mixed samples.
 
 Source: review round 3 of M4 on the branch `iphone-crashes-2026-10-25`, finding 3-3.  `the_end_check_sees_a_mix_file_written_again_at_its_size` tests the check alone.  `a_mix_file_written_again_after_the_last_read_ends_with_unstored` reaches the check through a separation, in Chrome too (finding 4-1 of review round 4 of M4).  The write comes over a second after the open, so Safari can also see it.  A write that makes the file shorter fails a read first (`a_mix_file_changed_during_the_separation_ends_with_unstored`).
 

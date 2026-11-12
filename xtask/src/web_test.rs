@@ -198,21 +198,57 @@ fn run(args: &[String]) -> Result<i32> {
         ));
         outputs.push(output);
     }
-    match verdict(&results, &outputs, filter.as_deref()) {
-        Ok(lines) => {
-            println!("{lines}");
-            Ok(0)
-        }
+    let End {
+        stdout,
+        stderr,
+        code,
+    } = end(browser, &results, &outputs, filter.as_deref());
+    if let Some(lines) = stdout {
+        println!("{lines}");
+    }
+    for lines in stderr {
+        eprintln!("{lines}");
+    }
+    Ok(code)
+}
+
+/// What a `web-test` prints and gives at its end.
+#[derive(Debug, PartialEq, Eq)]
+struct End {
+    /// The text for stdout, or `None`.
+    stdout: Option<String>,
+    /// The texts for stderr, in order.
+    stderr: Vec<String>,
+    /// The exit code.
+    code: i32,
+}
+
+/// The [`End`] of a `web-test` from its [`verdict`].  A pass gives 0 and
+/// the summary on stdout.  A failure gives the code of [`failure_end`],
+/// and the error and the note on stderr.
+fn end(
+    browser: Browser,
+    results: &[(&str, bool)],
+    outputs: &[String],
+    filter: Option<&str>,
+) -> End {
+    match verdict(results, outputs, filter) {
+        Ok(lines) => End {
+            stdout: Some(lines),
+            stderr: Vec::new(),
+            code: 0,
+        },
         Err(lines) => {
-            eprintln!(
+            let error = format!(
                 "Error: {lines}\nbrowser tests failed in {browser:?}; if no test ran, check the driver: {}",
                 browser.setup_hint()
             );
-            let (note, code) = failure_end(&results, &outputs);
-            if let Some(note) = note {
-                eprintln!("{note}");
+            let (note, code) = failure_end(results, outputs);
+            End {
+                stdout: None,
+                stderr: std::iter::once(error).chain(note).collect(),
+                code,
             }
-            Ok(code)
         }
     }
 }
@@ -685,6 +721,53 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         assert_eq!(failure_end(&failed, &outputs(&[A_FAILED_TEST])), (None, 1));
     }
 
+    /// Finding 3-1 of review round 3 of M3 of `gpu-speed`.  Asserts:
+    /// * crates that all passed give 0, the summary on stdout and no
+    ///   stderr;
+    /// * a failed test gives 1, no stdout, and only the error on stderr;
+    /// * a hung crate gives [`HANG_EXIT_CODE`], no stdout, and the error
+    ///   and then the hang note on stderr;
+    /// * a filter that matched no test gives 1 and no stdout.
+    #[test]
+    fn only_a_pass_ends_with_exit_code_0() {
+        let passed = [("app", true)];
+        let ran = outputs(&["running 1 test\n"]);
+        assert_eq!(
+            end(Browser::Safari, &passed, &ran, None),
+            End {
+                stdout: Some("web-test: app: passed".to_string()),
+                stderr: Vec::new(),
+                code: 0,
+            }
+        );
+        let failed = [("stem-worker", false)];
+        let a_failed_test = end(Browser::Safari, &failed, &outputs(&[A_FAILED_TEST]), None);
+        assert_eq!(a_failed_test.code, 1);
+        assert_eq!(a_failed_test.stdout, None);
+        assert_eq!(a_failed_test.stderr.len(), 1, "{:?}", a_failed_test.stderr);
+        assert!(
+            a_failed_test.stderr[0].starts_with("Error: web-test: stem-worker: failed\n"),
+            "{:?}",
+            a_failed_test.stderr
+        );
+        assert!(
+            a_failed_test.stderr[0].contains("browser tests failed in Safari; "),
+            "{:?}",
+            a_failed_test.stderr
+        );
+        let hung = end(Browser::Chrome, &[("app", false)], &outputs(&[HUNG]), None);
+        assert_eq!(hung.code, HANG_EXIT_CODE);
+        assert_eq!(hung.stdout, None);
+        assert_eq!(hung.stderr.len(), 2, "{:?}", hung.stderr);
+        assert_eq!(
+            Some(&hung.stderr[1]),
+            failure_end(&[("app", false)], &outputs(&[HUNG])).0.as_ref()
+        );
+        let no_match = end(Browser::Chrome, &passed, &outputs(&[""]), Some("lloyd"));
+        assert_eq!(no_match.code, 1);
+        assert_eq!(no_match.stdout, None);
+    }
+
     /// Asserts that a line that only holds the hang text in other words
     /// is not the hang.
     #[test]
@@ -698,43 +781,50 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         ));
     }
 
-    /// The `with:` lines of each `nick-fields/retry` step of the workflow
-    /// `ci`, trimmed.
-    fn retry_inputs(ci: &str) -> Vec<Vec<&str>> {
-        ci.split("uses: nick-fields/retry@")
-            .skip(1)
-            .map(|step| {
-                step.lines()
-                    .skip(1)
-                    .map(str::trim)
-                    .take_while(|l| !l.starts_with("- "))
-                    .collect()
-            })
+    /// The lines of each step of the workflow `ci` that uses
+    /// `nick-fields/retry`, trimmed.  A step goes from its `- ` line at
+    /// the step indent to the next one.
+    fn retry_steps(ci: &str) -> Vec<Vec<&str>> {
+        ci.split("\n      - ")
+            .filter(|step| step.contains("uses: nick-fields/retry@"))
+            .map(|step| step.lines().map(str::trim).collect())
             .collect()
     }
 
-    /// Finding 1-5 of review round 1 of M3 of `gpu-speed`.  Asserts that CI
-    /// has 2 retry steps, and that each:
+    /// Findings 1-5 of review round 1 and 3-10 of review round 3 of M3 of
+    /// `gpu-speed`.  Asserts that CI has 2 retry steps, and that each:
     /// * runs `xtask -- web-test`;
     /// * retries on [`HANG_EXIT_CODE`] only;
-    /// * has no `retry_on`, which would retry each failure.
+    /// * has `warning_on_retry: true`;
+    /// * has no `retry_on`, which would retry each failure;
+    /// * has no `continue_on_error` and no step `continue-on-error`, which
+    ///   would pass a failed step;
+    /// * has no `new_command_on_retry`, which would run another command.
     #[test]
     fn ci_runs_web_test_again_only_after_the_hang() {
-        let steps = retry_inputs(include_str!("../../.github/workflows/ci.yml"));
+        let steps = retry_steps(include_str!("../../.github/workflows/ci.yml"));
         assert_eq!(steps.len(), 2, "{steps:?}");
         let code = format!("retry_on_exit_code: {HANG_EXIT_CODE}");
-        for inputs in steps {
+        for lines in steps {
             assert!(
-                inputs
+                lines
                     .iter()
                     .any(|l| l.starts_with("command: cargo run --locked -p xtask -- web-test ")),
-                "{inputs:?}"
+                "{lines:?}"
             );
-            assert!(inputs.contains(&code.as_str()), "{inputs:?}");
-            assert!(
-                !inputs.iter().any(|l| l.starts_with("retry_on:")),
-                "{inputs:?}"
-            );
+            assert!(lines.contains(&code.as_str()), "{lines:?}");
+            assert!(lines.contains(&"warning_on_retry: true"), "{lines:?}");
+            for refused in [
+                "retry_on:",
+                "continue_on_error:",
+                "continue-on-error:",
+                "new_command_on_retry:",
+            ] {
+                assert!(
+                    !lines.iter().any(|l| l.starts_with(refused)),
+                    "{refused} {lines:?}"
+                );
+            }
         }
     }
 

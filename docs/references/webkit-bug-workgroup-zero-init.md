@@ -59,7 +59,7 @@ The reference is the same kernel without `w`.  It keeps the barrier, and sets `v
 
 ## Results
 
-Wall time for each dispatch, median of 5 rounds, in 2 pages of each browser.  Each range is from the start and the end of each page:
+Wall time for each dispatch, median of 5 rounds.  The figures come from the 2 pages of each browser in the first set of Step 4 (`plans/active/gpu-speed-m3.md`).  Each range is from the start and the end of each page:
 
 | | Safari 27.2 | Chrome 157 |
 | - | - | - |

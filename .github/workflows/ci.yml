@@ -264,8 +264,9 @@ jobs:
     # * the two `e2e save` steps at their limits: 120 minutes;
     # * the two retry steps (TD-98): 3 attempts of 30 and of 15 minutes,
     #   and a wait of 10 s after each failed attempt: 136 minutes;
-    # * 25 minutes for the other steps, 0.1 more than 24.9.
-    # That is 281 minutes, and 4 to spare.  A hung browser must not hold
+    # * 25 minutes for the other steps: the measured 24.9, rounded up.
+    # That is 281 minutes.  The 4 spare minutes cover the rounding of each
+    # measured time and the action's own overhead.  A hung browser must not hold
     # the runner for GitHub's 6 h default.
     # `the_ci_job_limit_holds_its_save_steps` (xtask/src/e2e/save.rs)
     # checks that the limit holds the save and retry steps.
