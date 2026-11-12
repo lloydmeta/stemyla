@@ -213,6 +213,16 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * The one natural flip (Safari run 4, `v64,i64`) had a median 1.4 % over the baseline.
   * Wall time for each update: Chrome 350 s, Safari 505 s.  That includes the debug `xtask` and `long_song`.
   * One `ps` sample during the Chrome runs gave WindowServer 48 % CPU; no other process was over 4 %.  The agent session ran beside each run, as it does in a push check.
+* 2026-11-12, Step 5.1 again, at `1a79cdd`, on the chunk lower quartile.  Each run chose the same kernels in its browser, and gave fallback adapter `no`.
+  * Chrome 157.0.8103.51, `apple metal-3`, Apple M2 Pro, `matmul v64,v64, attention freq`.  Chunk lower quartiles in order: 4.70, 4.70, 4.70, 4.70, 4.70 s (chunk medians 4.70, 4.70, 4.70, 4.70, 5.00 s).  Baseline 4.70 s, spread 0 %, tolerance 10 %.
+  * Safari 27.2, `apple apple apple`, Apple M2 Pro, `matmul v64,v64, attention fused`.  Chunk lower quartiles: 7.40 s in each run (chunk medians 7.40 s in each run).  Baseline 7.40 s, spread 0 %, tolerance 10 %.
+  * No drift with the order.  Runs 3 and 5 of Chrome again had groups of slow chunks (up to 5.9 s), and the lower quartile did not move.
+  * Wall time for each update: Chrome 346 s, Safari 493 s.
+* 2026-11-12, Step 5.3: the cost of a kernel flip, one forced run each at `1a79cdd`, not gated (`never_a_pass`: "the query sets attn=" or "mm=").  The 5 runs of each browser chose the same kernels, so each near choice was forced.
+  * Chrome `attn=fused` (time axis fused): chunk lower quartile 4.80 s, +0.10 s, 2.1 % over the baseline.
+  * Chrome `mm=v64,i64`: 4.70 s, 0 %.
+  * Safari `attn=freq` (time axis split): 8.10 s in two runs, each with all 10 chunks at 8.0 to 8.1 s.  +0.70 s, 9.5 % over the baseline.  The bound is 7.40 x 1.10 = 8.14 s, so the margin is 0.04 s, under the log's 0.1 s step.
+  * Safari `mm=v64,i64`: 7.40 s, 0 %.
 
 ## Decision log
 
@@ -238,6 +248,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, agent (implementer): GPU-3's "Enforced by" names the test `never_a_pass_names_each_reason`, not the function `never_a_pass`.  Why: `docs-check` reads each name in that line as a test name.
 * 2026-11-12, agent (implementer): the skip line of the perf gate shows `--browser chrome|safari --weights $STEMYLA_PERF_WEIGHTS`.  Why: one skip line stands for both run lines.
 * 2026-11-12, agent (team leader), Step 5: the gate, the baseline, `tolerance_pct`, `update_refusal` and the "faster than the baseline" note read the chunk lower quartile, not the chunk median.  `PerfResult` keeps the chunk median.  The other rules stay: at least 10 %, 2 x the slowest run's excess, and a Decision log line over 20 %.  Why: the noise only adds time, and a slower kernel moves every chunk, the floor too.  Under one-sided noise, a low quantile is the robust estimate ([Chen and Revels, "Robust benchmarking in noisy environments", 2016](https://arxiv.org/abs/1608.04295)).  The lower quartile, not the minimum, so that one fast chunk cannot move it.  The 5 runs of 5.1: Chrome 22 % on the median against 10 % on the lower quartile; Safari 28 % against 11 %.
+* 2026-11-12, agent (implementer), Step 5.3: both tolerances stay at 10 %, and the baseline is not keyed on the kernels.  Why: each measured flip cost is under 10 %: Chrome 2.1 % and 0 %, Safari 9.5 % and 0 %.  The Safari `attn=freq` margin is thin, 0.04 s, but its two runs gave 8.10 s with every chunk at 8.0 to 8.1 s.  The lower quartile moves only when 8 of 10 chunks are slow.  Calibration chose fused by 5 % in Safari (split 3.43 s, fused 3.27 s), so this flip is rare.  If a flip fails the gate, the gate's text names the other kernels, and an update with a `--raise` reason records it.
 
 ## Outcomes and retrospective
 
