@@ -94,7 +94,7 @@ M6's milestone plan designs the order of the work and the read-back.  It must me
 2. No mask is read after a later stem's mask steps wrote the buffer: `Job` has one `mask` buffer, which every stem's mask steps write.
 3. The CPU holds at most one mask.  Six masks (113 MB at the default chunk) leave about 7 MB under `TAB_BUDGET_MB` in Chrome, too little for the JS heap, which no check counts (TD-11).
 4. A wait for a mask does not also wait for later steps.  In WebGPU, `mapAsync` resolves only after the queue work submitted before the call.  `Gpu::read` submits, maps and waits in one call today.
-5. The next chunk's input can be read before every stem of this chunk is accepted, and the read does not move where the stems are accepted.  Today `next_input` reads at `pos`, which only `Demixer::end_chunk` moves.
+5. The next chunk's input can be read before every stem of this chunk is accepted, and the read does not move where the stems are accepted.  Today `next_input` reads at `pos`, which only `Demixer::end_chunk` moves during a separation.
 6. `roformer::separate::working_set` and the phases of the worker's wasm test describe the overlap, with each part in the phases where it is live.  Added parts alone only raise check 3's budget and test nothing.
 7. Buffers keep fixed sizes from chunk to chunk.  A new size left holes in the heap and grew the worker by 19 MB in M1 (`plans/completed/gpu-speed-m1.md`, Step 8).
 8. `memory-budget` passes its four checks, with the tab total at most `TAB_BUDGET_MB` (MEM-4).  If it does not, M1's Step 6 names the next cuts, in order of cost.
@@ -106,7 +106,7 @@ M6's milestone plan designs the order of the work and the read-back.  It must me
 * `e2e memory-budget` passes in Safari and Chrome at the default chunk.  Its check 3 headroom (`WORKER_HEADROOM_MB`) is mostly heap that is free at the separation's start, which the model load and calibration set.  M4 and M5 change calibration, and M6 changes `working_set`, so each can move it.  Goal: the constant stays a measured figure with a margin that is not too tight, and still catches a lost cut.  The milestone plans of M4, M5 and M6 design the measurement, with these cases:
   1. The headroom is measured again at the end of M4, M5 and M6, and when check 3's margin is under the noise or over the smallest lost-cut rise.
   2. A measurement follows proof that the cause is free heap: the wasm test passes, and a probe of the live heap at each phase (as in M1 Step 8) finds no held buffer.  A held buffer is a defect to fix.
-  3. The smallest lost-cut rise is computed again from the current `working_set`, for the GPU half's cut 3 (9.44 MB at M1).  The wasm test checks the CPU half's cuts 2 and 4.
+  3. The smallest lost-cut rise is computed again from the current `working_set`, for the GPU half's cut 3 (9.44 MB at M1).  The wasm test checks the CPU half's cuts 1, 2 and 4.
   4. The constant goes midway between the noise (2.16 MB at M1) and that rise, by the rule in its doc.  If the noise is not less than the rise, decide in the Decision log.  Its doc, the figures in `the_worker_growth_must_fit_the_working_set_budget` and a Decision log line change in the same commit.
 * `e2e selftest --weights <model>` passes in Safari and Chrome with the kernels that each browser chooses.
 * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passes on this Mac (Metal).
