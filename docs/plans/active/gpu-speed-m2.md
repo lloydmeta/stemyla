@@ -229,6 +229,11 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * Safari: time-axis attention 36.93 s (47.2 %), frequency-axis attention 2.73 s (3.5 %), linear products 35.32 s (45.2 %), other 3.20 s (4.1 %); total 78.18 s.  Chunk lower quartile 7.50 s with profiling.
   * Chrome's time-axis group (20.03 s) matches the parent's Context (scores 7.7 s, P.v 7.8 s, softmax 4.4 s).
 * 2026-11-12, Step 5.7: `e2e selftest --weights <path>` passed in Chrome and Safari (worst stage 69.4 dB).  Each `selftest: GPU` line has the fallback text: `apple metal-3, fallback adapter no` and `apple apple apple, fallback adapter no` (TD-10).
+* 2026-11-12, after Step 5, the team leader's question "is Safari slower after M1?": no.  The page of `22cdd74` (before M1) and HEAD's page (`e3f5a3f`), 3 runs of `e2e perf` in Safari 27.2 each, in turns, old first, with HEAD's `xtask`.  Each run chose `matmul v64,v64, attention fused`.
+  * Old: chunk lower quartile 7.40, 7.40, 7.40 s (chunk medians 7.40 s).  HEAD: 7.40, 7.40, 7.40 s (chunk medians 7.40 s).  So M1 did not make Safari slower.
+  * The old page's runs fail the parse, as expected ("no fallback adapter text in the model loaded line"), so their chunk lines were read by hand with the same lower quartile.
+  * The 7.1 s of the orchestrator's earlier run of `22cdd74` (`--query x=1`) came with faster GPU-only figures from calibration.  Then: `v64` large products 1.30 s, fused time-axis attention 3.28 s.  Now, old and HEAD alike: `v64` 1.33 to 1.34 s, fused 3.42 to 3.54 s.  Calibration times only GPU kernels, so the 4 % is a different browser or GPU state, not code.
+  * The baselines stay as they are.
 
 ## Decision log
 
