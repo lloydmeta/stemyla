@@ -75,11 +75,15 @@ Find why Safari runs the same WGSL 1.4 to 1.7 times slower than Chrome.  Time va
 
 ### M4: a larger register-tiled matmul
 
-A new `TILES` entry, with its f16 variant, from M3's result.  The start point is a 128 x 128 tile, 8 x 8 outputs for each thread and vec4 reads: (128 + 128) x 8 x 4 B = 8 KiB of workgroup memory.  Each output keeps its sum order, so its f16 variant gives the f32 kernel's output bit for bit (decision 0022).  Calibration times it with the others; bump `CALIBRATION`.  Acceptance: `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` on this Mac.  `e2e selftest --query mm=<kernel>` passes in Safari and Chrome.  The perf gate passes, and the baselines go down if the GPU chooses it.
+A new `TILES` entry, with its f16 variant, from M3's result.  The start point is a 128 x 128 tile, 8 x 8 outputs for each thread and vec4 reads: (128 + 128) x 8 x 4 B = 8 KiB of workgroup memory.  Each output keeps its sum order, so its f16 variant gives the f32 kernel's output bit for bit (decision 0022).  Calibration times it with the others; bump `CALIBRATION`.  Acceptance: `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` on this Mac.  `e2e selftest --query mm=<kernel>` passes in Safari and Chrome.  The perf gate passes, the same-session comparison of "Validation and acceptance" shows the gain and no loss in either browser, and the baselines go down if the GPU chooses it.
+
+Before M4 changes a baseline, it makes every raise of a bound need `--raise`, a new browser version included, with a test that fails first (intent review of M2, i1-4).  The reason names the browser update when that is the cause.
+
+After a new candidate (M4 and M5), measure again the cost of each forced flip between choices that calibration measures as near (within `FUSED_MARGIN`, or within 10 % for matmul kernels), as M2 Step 5.3 did.  If a flip's cost plus the 4 % drift between sessions (Surprises) is over the tolerance, decide in the Decision log: a wider tolerance with its proof, or a gate key that names the kernels.
 
 ### M5: a flash-style time-axis attention
 
-A new fused attention kernel for the time axis (1,151 tokens, 8 heads of 64), from M3's result.  It keeps the softmax state on chip, so no score buffer goes to memory.  It loads each query block once.  It is a third `AttentionPolicy` candidate beside split and the current fused kernel.  It is checked against the CPU, as the current fused kernel is.  Acceptance: as M4, with `--query attn=<policy>`.
+A new fused attention kernel for the time axis (1,151 tokens, 8 heads of 64), from M3's result.  It keeps the softmax state on chip, so no score buffer goes to memory.  It loads each query block once.  It is a third `AttentionPolicy` candidate beside split and the current fused kernel.  It is checked against the CPU, as the current fused kernel is.  Its dispatches take their profile label from `attention_label`, so `e2e perf`'s profile groups count it as time-axis attention, not "other".  Acceptance: as M4, with `--query attn=<policy>`.
 
 ### M6: overlap on the worker
 
@@ -102,7 +106,8 @@ M6's milestone plan designs the order of the work and the read-back.  It must me
 
 ## Validation and acceptance
 
-* `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.
+* `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.  The gate is a backstop: at 10 % and 0.1 s per chunk, it stops a large loss only.
+* The same-session comparison shows each gain and "no loss" for M4, M5 and M6, in each browser.  Build the page at the milestone's base and at its head.  Run `e2e perf` on each, 3 runs each, taking turns, in one session, as M2 did for M1 (Surprises).  Compare the chunk lower quartile, the chunk median and the whole time ("6 stems in"), which has 0.1 s on about 50 to 80 s.  A loss is a whole time over the base's spread plus 1 % in either browser.  A gain lowers the baseline with `--update-baselines`.
 * `e2e memory-budget` passes in Safari and Chrome at the default chunk.  Its check 3 headroom (`WORKER_HEADROOM_MB`) is mostly heap that is free at the separation's start, which the model load and calibration set.  M4 and M5 change calibration, and M6 changes `working_set`, so each can move it.  Goal: the constant stays a measured figure with a margin that is not too tight, and still catches a lost cut.  The milestone plans of M4, M5 and M6 design the measurement, with these cases:
   1. The headroom is measured again at the end of M4, M5 and M6, and when check 3's margin is under the noise or over the smallest lost-cut rise.
   2. A measurement follows proof that the cause is free heap: the wasm test passes, and a probe of the live heap at each phase (as in M1 Step 8) finds no held buffer.  A held buffer is a defect to fix.
@@ -137,6 +142,7 @@ The skill's preflight, and:
 * `caffeinate -dimsu` runs for the length of the run.
 * `cargo run -p xtask -- setup --check` passes.
 * The weights file and the chromedriver of the kick-off prompt exist.
+* `STEMYLA_PERF_WEIGHTS` names the weights file and `CHROMEDRIVER` the chromedriver, in the environment of each `check --tier push` and of each team.  From M3, each push check before a review round runs both perf gates.  A milestone's Progress gives both gates' verdicts; a skip line is not a pass (VERIFY-1).
 
 #### Decision points
 
@@ -204,6 +210,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-12, agent (team leader of M2): decision 0031 amends decision 0026 and GIT-2: tier `push`, when asked, runs `e2e perf --gate` in Chrome, then Safari, when `STEMYLA_PERF_WEIGHTS` names the model and the paths change `roformer/`, `roformer-gpu/`, `worker/` or a workspace file.  For "Needs your attention" in the PR.
 
 * 2026-11-12, maintainer: decision 0031 is accepted.
+* 2026-11-12, agent (orchestrator), intent review of M2: the gate is a backstop, and M4 to M6 show gain and no loss by a same-session comparison of base and head (i1-2).  The preflight sets `STEMYLA_PERF_WEIGHTS`, and a skip is not a pass (i1-1).  M4 and M5 measure flip costs again (i1-3).  M4 makes every raise need `--raise` before it changes a baseline (i1-4), not a review round now, since the finding is not significant.  M5 uses `attention_label` (i1-5).  Not taken: chunk times in 2 decimals (i1-2's code part), since the whole time already has 0.1 s on about 50 to 80 s; `m4a/` and `protocol/` in `PERF_FOLDERS` (i1-6), refuted in M2 round 1 (1-8).
 
 ## Outcomes and retrospective
 
