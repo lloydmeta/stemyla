@@ -192,12 +192,13 @@ This entry concerns VERIFY-1, through the mutants run of a review round.
 
 This entry concerns GIT-1, and the read-only rule of the review agents.
 
-`.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more, and `the_bash_guard_explains_each_refusal` checks the whole line of a refusal.
+`.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It also refuses a wide search: `find` or `du` from the whole disk or a home folder, and `mdfind` without `-onlyin` a narrower folder.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more, and `the_bash_guard_explains_each_refusal` checks the whole line of a refusal.
 
 These pass the guard.  Each item gives examples only, and the list is not complete:
 
 * `git --exec-path=`, and `git grep -O`, which starts a pager program;
 * `find -exec` and `find -delete`;
+* a wide search in another form, such as `cd / && find .`, `find ~/Pictures`, `grep -r x /`, `ls -R ~` or `rg x /`;
 * `$(...)` inside double quotes, `$'...'` quoting, `$"..."` quoting such as `$"git" commit`, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
 * a redirection before the command, such as `2>/dev/null git commit`;
 * a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
