@@ -77,9 +77,9 @@ Find why Safari runs the same WGSL 1.4 to 1.7 times slower than Chrome.  Time va
 
 A new `TILES` entry, with its f16 variant, from M3's result.  The start point is a 128 x 128 tile, 8 x 8 outputs for each thread and vec4 reads: (128 + 128) x 8 x 4 B = 8 KiB of workgroup memory.  Each output keeps its sum order, so its f16 variant gives the f32 kernel's output bit for bit (decision 0022).  Calibration times it with the others; bump `CALIBRATION`.  Acceptance: `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` on this Mac.  `e2e selftest --query mm=<kernel>` passes in Safari and Chrome.  The perf gate passes, the same-session comparison of "Validation and acceptance" shows the gain and no loss in either browser, and the baselines go down if the GPU chooses it.
 
-Before M4 changes a baseline, it makes every raise of a bound need `--raise`, a new browser version included, with a test that fails first (intent review of M2, i1-4).  The reason names the browser update when that is the cause.
+Before M4 changes a baseline, it makes every raise of a bound need `--raise`, a new browser version included, with a test that fails first (intent review of M2, i1-4).  No milestone changes a baseline before that change lands.  Until then, a browser update, a patch build included, only records its figures in Surprises.  The reason names the browser update when that is the cause.
 
-After a new candidate (M4 and M5), measure again the cost of each forced flip between choices that calibration measures as near (within `FUSED_MARGIN`, or within 10 % for matmul kernels), as M2 Step 5.3 did.  If a flip's cost plus the 4 % drift between sessions (Surprises) is over the tolerance, decide in the Decision log: a wider tolerance with its proof, or a gate key that names the kernels.
+After a new candidate (M4 and M5), measure again the cost of each forced flip between choices that calibration measures as near, as M2 Step 5.3 did.  Near means within 10 % of the point where calibration flips: for attention, a fused / split ratio within 10 % of `FUSED_MARGIN` (1.1); for matmul kernels, which `decide` takes as the plain fastest, within 10 % of each other.  If a flip's cost plus the 4 % drift between sessions (`plans/completed/gpu-speed-m2.md`, Surprises) is over the tolerance, decide in the Decision log: a wider tolerance with its proof, or a gate key that names the kernels.
 
 ### M5: a flash-style time-axis attention
 
@@ -102,12 +102,12 @@ M6's milestone plan designs the order of the work and the read-back.  It must me
 6. `roformer::separate::working_set` and the phases of the worker's wasm test describe the overlap, with each part in the phases where it is live.  Added parts alone only raise check 3's budget and test nothing.
 7. Buffers keep fixed sizes from chunk to chunk.  A new size left holes in the heap and grew the worker by 19 MB in M1 (`plans/completed/gpu-speed-m1.md`, Step 8).
 8. `memory-budget` passes its four checks, with the tab total at most `TAB_BUDGET_MB` (MEM-4).  If it does not, M1's Step 6 names the next cuts, in order of cost.
-9. The perf gate in Chrome shows the gain, and Safari is not slower.
+9. The same-session comparison of "Validation and acceptance" shows the gain in Chrome and no loss in Safari.  The perf gate passes in both.
 
 ## Validation and acceptance
 
 * `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.  The gate is a backstop: at 10 % and 0.1 s per chunk, it stops a large loss only.
-* The same-session comparison shows each gain and "no loss" for M4, M5 and M6, in each browser.  Build the page at the milestone's base and at its head.  Run `e2e perf` on each, 3 runs each, taking turns, in one session, as M2 did for M1 (Surprises).  Compare the chunk lower quartile, the chunk median and the whole time ("6 stems in"), which has 0.1 s on about 50 to 80 s.  A loss is a whole time over the base's spread plus 1 % in either browser.  A gain lowers the baseline with `--update-baselines`.
+* The same-session comparison shows each gain and "no loss" for M4, M5 and M6, in each browser.  Build the page at the milestone's base and at its head.  Run `e2e perf` on each, 3 runs each, taking turns, in one session, as M2 did for M1 (`plans/completed/gpu-speed-m2.md`, Surprises).  Compare the chunk lower quartile, the chunk median and the whole time ("6 stems in"), which has 0.1 s on about 50 to 80 s.  A loss, in either browser: the head's fastest whole time is more than 1 % over the base's fastest, or the head's best chunk lower quartile is over the base's.  A gain is the same with the sides changed.  The fastest run carries the least of the noise, which only adds time.  A gain lowers the baseline with `--update-baselines`.
 * `e2e memory-budget` passes in Safari and Chrome at the default chunk.  Its check 3 headroom (`WORKER_HEADROOM_MB`) is mostly heap that is free at the separation's start, which the model load and calibration set.  M4 and M5 change calibration, and M6 changes `working_set`, so each can move it.  Goal: the constant stays a measured figure with a margin that is not too tight, and still catches a lost cut.  The milestone plans of M4, M5 and M6 design the measurement, with these cases:
   1. The headroom is measured again at the end of M4, M5 and M6, and when check 3's margin is under the noise or over the smallest lost-cut rise.
   2. A measurement follows proof that the cause is free heap: the wasm test passes, and a probe of the live heap at each phase (as in M1 Step 8) finds no held buffer.  A held buffer is a defect to fix.
@@ -155,7 +155,7 @@ Decision 0024, through the `review-rounds` skill.  M3 has no review rounds if it
 #### Kick-off prompt
 
 ```text
-/orchestrate docs/plans/active/gpu-speed.md.  Weights: ~/Downloads/bs_roformer_sw.f16.safetensors.  CHROMEDRIVER: ~/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver.
+/orchestrate docs/plans/active/gpu-speed.md.  Weights: /Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors.  CHROMEDRIVER: ~/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver.
 ```
 
 #### Extra stop conditions
@@ -211,6 +211,8 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * 2026-11-12, maintainer: decision 0031 is accepted.
 * 2026-11-12, agent (orchestrator), intent review of M2: the gate is a backstop, and M4 to M6 show gain and no loss by a same-session comparison of base and head (i1-2).  The preflight sets `STEMYLA_PERF_WEIGHTS`, and a skip is not a pass (i1-1).  M4 and M5 measure flip costs again (i1-3).  M4 makes every raise need `--raise` before it changes a baseline (i1-4), not a review round now, since the finding is not significant.  M5 uses `attention_label` (i1-5).  Not taken: chunk times in 2 decimals (i1-2's code part), since the whole time already has 0.1 s on about 50 to 80 s; `m4a/` and `protocol/` in `PERF_FOLDERS` (i1-6), refuted in M2 round 1 (1-8).
+* 2026-11-12, agent (orchestrator), intent review of M2, round 2: a loss or a gain compares the fastest runs of base and head, since the noise only adds time (i2-1).  "Near" choices are measured from calibration's flip point (i2-2).  M6 case 9 uses the same-session comparison (i2-3).  No baseline changes before M4's `--raise` change (i2-4).  The drift figures cite `plans/completed/gpu-speed-m2.md` (i2-5).
+* 2026-11-12, maintainer: the weights file moved to `third_party/models/`, which git ignores (`/third_party/`, `*.safetensors`).  The kick-off prompt and `STEMYLA_PERF_WEIGHTS` give its absolute path, since review worktrees hold no ignored files.
 
 ## Outcomes and retrospective
 
