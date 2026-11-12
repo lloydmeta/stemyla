@@ -1147,6 +1147,8 @@ async fn run(
         job: None,
         total,
         debug: s.debug,
+        index: 0,
+        started: t0,
     };
     separate_mix(mix, session, chunk, overlap, network, t0).await
 }
@@ -1207,6 +1209,31 @@ trait Network {
     fn finish(&self);
 }
 
+/// The GPU half of a chunk's separation: the network, from a chunk's
+/// features to each stem's mask.  [`GpuNetwork`] runs it on the GPU.  A
+/// test runs a fake, so it measures the CPU half's memory with no GPU.
+trait GpuHalf {
+    /// Uploads the features `[T, FEATURES]` of a chunk.
+    fn upload(&mut self, features: &[f32]);
+    /// Runs the network to the mask of `stem`, and gives that mask
+    /// `[T, FEATURES]`.  The stems come in order, from 0.
+    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String>;
+}
+
+/// The CPU half of one chunk: the STFT, the upload through `gpu`, then
+/// each stem's mask applied to the spectra and inverted.
+async fn chunk_stems(gpu: &mut impl GpuHalf, x: &Stereo) -> Result<Vec<Stereo>, String> {
+    let (spec, features) = analyse(x);
+    gpu.upload(&features);
+    // The GPU holds the input now; the spectra alone make the stems.
+    drop(features);
+    let mut out = Vec::with_capacity(STEMS.len());
+    for stem in 0..STEMS.len() {
+        out.push(apply_masks(&spec, &gpu.mask(stem).await?));
+    }
+    Ok(out)
+}
+
 /// BS-RoFormer SW on the GPU, one paced step at a time.
 struct GpuNetwork<'a> {
     gpu: &'a Gpu,
@@ -1217,16 +1244,18 @@ struct GpuNetwork<'a> {
     /// Chunks in the song.
     total: usize,
     debug: bool,
+    /// The index and the start time of the chunk in progress, for the
+    /// debug notes.
+    index: usize,
+    started: f64,
 }
 
-impl Network for GpuNetwork<'_> {
-    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
-        let tc = now_s();
-        let (spec, feats) = analyse(x);
-        let frames = feats.len() / FEATURES;
+impl GpuHalf for GpuNetwork<'_> {
+    fn upload(&mut self, features: &[f32]) {
+        let frames = features.len() / FEATURES;
         trace(
             self.debug,
-            &format!("chunk {index}: stft {:.2} s", now_s() - tc),
+            &format!("chunk {}: stft {:.2} s", self.index, now_s() - self.started),
         );
         if self.job.as_ref().is_none_or(|j| j.frames != frames) {
             // Freed before the next is made: two chunks' buffers (about
@@ -1239,22 +1268,39 @@ impl Network for GpuNetwork<'_> {
                 memory_text(self.net, self.job.as_ref())
             ));
         }
-        let j = self.job.as_ref().expect("job");
-        j.set_input(&feats);
-        // The GPU holds the input now; the spectra alone make the stems.
-        drop(feats);
-        let mut out = Vec::with_capacity(STEMS.len());
-        for step in j.steps() {
+        self.job.as_ref().expect("job").set_input(features);
+    }
+
+    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String> {
+        let j = self.job.as_ref().expect("a chunk was uploaded");
+        // The first stem also runs the layers that every stem shares, in
+        // the order of `Job::steps`.
+        let shared = if stem == 0 { j.steps() } else { Vec::new() };
+        let shared = shared
+            .into_iter()
+            .filter(|step| !matches!(step, Step::Mask { .. }));
+        for step in shared.chain(j.mask_steps(stem)) {
             self.pace.run(self.gpu, j, &step).await?;
-            if let Step::Mask { last: true, .. } = step {
-                out.push(apply_masks(&spec, &j.mask().await?));
-                trace(
-                    self.debug,
-                    &format!("chunk {index}: mask {} at {:.2} s", out.len(), now_s() - tc),
-                );
-            }
         }
-        Ok(out)
+        let mask = j.mask().await?;
+        trace(
+            self.debug,
+            &format!(
+                "chunk {}: mask {} at {:.2} s",
+                self.index,
+                stem + 1,
+                now_s() - self.started
+            ),
+        );
+        Ok(mask)
+    }
+}
+
+impl Network for GpuNetwork<'_> {
+    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+        self.index = index;
+        self.started = now_s();
+        chunk_stems(self, x).await
     }
 
     fn so_far(&self) -> String {

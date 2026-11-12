@@ -3197,6 +3197,165 @@ async fn a_stored_mix_keeps_the_worker_memory_flat() {
     );
 }
 
+/// The peak of the Rust heap since the last call, which starts the next
+/// peak at the live bytes now.
+fn close_phase() -> usize {
+    let peak = PEAK.get();
+    PEAK.set(LIVE.get());
+    peak
+}
+
+/// The measured peaks of each phase of each chunk, in live heap bytes, in
+/// the order of the chunks.
+#[derive(Default)]
+struct PhasePeaks {
+    upload: Vec<usize>,
+    masks: Vec<usize>,
+    between: Vec<usize>,
+}
+
+/// A fake GPU half that holds in WebAssembly memory what the real one
+/// holds: the normalised input during the upload, and each mask of
+/// `[T, FEATURES]` floats, as `Gpu::read` copies it.  As a network, it
+/// runs the real CPU half ([`chunk_stems`]), and closes a phase at each
+/// boundary that it sees.  The upload phase runs from the chunk's start
+/// to the upload's end.  The masks phase runs to the last stem.  The
+/// between phase runs to the next chunk's start.
+struct FakeGpu {
+    frames: usize,
+    peaks: Rc<RefCell<PhasePeaks>>,
+}
+
+impl GpuHalf for FakeGpu {
+    fn upload(&mut self, features: &[f32]) {
+        self.frames = features.len() / FEATURES;
+        let normalised = std::hint::black_box(vec![0.0f32; features.len()]);
+        drop(normalised);
+        let peak = close_phase();
+        self.peaks.borrow_mut().upload.push(peak);
+    }
+
+    async fn mask(&mut self, _stem: usize) -> Result<Vec<f32>, String> {
+        Ok(vec![0.5; self.frames * FEATURES])
+    }
+}
+
+impl Network for FakeGpu {
+    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+        let peak = close_phase();
+        if index > 0 {
+            self.peaks.borrow_mut().between.push(peak);
+        }
+        let out = chunk_stems(self, x).await;
+        let peak = close_phase();
+        self.peaks.borrow_mut().masks.push(peak);
+        out
+    }
+
+    fn so_far(&self) -> String {
+        "the fake GPU half".into()
+    }
+
+    fn finish(&self) {}
+}
+
+/// The bytes by which a measured phase may differ from the function's.
+/// They are the small buffers that `roformer::separate::working_set` does
+/// not name:
+/// * the FFT plan and the buffers of `stft` or `istft`: an input of 2,048
+///   floats (8,192 bytes), an output of 1,025 complex values (8,200),
+///   the scratch, and the plan's twiddles and the planner's cache, each
+///   under 16,384 bytes;
+/// * the two `hann` windows of 2,048 floats (8,192 bytes each);
+/// * the log strings of each chunk (under 1,024 bytes);
+/// * the `Segment` and `Vec` headers: 6 stems of 2 channels of 12 bytes,
+///   and the `Vec` of 6 stems (under 1,024 bytes).
+///
+/// Their sum is under 128 KiB.  On 2026-11-12, in Chrome, the phases held
+/// at most 37,420 bytes more than the function gives (the masks phase).
+const SMALL: usize = 128 << 10;
+
+/// MEM-4: one chunk of the default length holds the working set that
+/// `roformer::separate::working_set` gives, phase by phase, on both
+/// sides.  So a phase that holds a buffer that the function does not
+/// name fails, and so does a function that names a buffer that the
+/// phase no longer holds.  It separates a stored mix of 5 chunks at
+/// `CHUNK` and overlap 2 with the real CPU half and a fake GPU half, and
+/// checks chunks 2 and 3, after the warm-up.
+#[wasm_bindgen_test]
+async fn a_chunk_of_the_default_length_holds_its_working_set() {
+    let frames = 3 * CHUNK / OVERLAP;
+    let chunks = Demixer::new(mix_of(frames), CHUNK, OVERLAP, STEMS.len()).num_chunks();
+    assert_eq!(chunks, 5, "the mix has 5 chunks");
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&mix_of(frames))).await;
+    let peaks = Rc::new(RefCell::new(PhasePeaks {
+        upload: Vec::with_capacity(chunks),
+        masks: Vec::with_capacity(chunks),
+        between: Vec::with_capacity(chunks),
+    }));
+    let fake = FakeGpu {
+        frames: 0,
+        peaks: Rc::clone(&peaks),
+    };
+    SENT.with_borrow_mut(|sent| {
+        sent.clear();
+        sent.reserve(8 * chunks);
+    });
+    let start = LIVE.get();
+    PEAK.set(start);
+    separate_mix(
+        stored_mix(frames),
+        Some(SESSION),
+        CHUNK,
+        OVERLAP,
+        |_| fake,
+        now_s(),
+    )
+    .await
+    .expect("separated");
+    assert_eq!(reply_types().last().map(String::as_str), Some("done"));
+    let want = roformer::separate::working_set(CHUNK, OVERLAP);
+    let peaks = peaks.borrow();
+    for (phase, measured) in [
+        (&want.upload, &peaks.upload),
+        (&want.masks, &peaks.masks),
+        (&want.between, &peaks.between),
+    ] {
+        // Chunks 2 and 3.  The between phase of chunk k ends at chunk
+        // k + 1's start, so its list too starts at chunk 1.
+        let after_warm_up = &measured[1..3];
+        let parts: Vec<String> = phase
+            .largest()
+            .parts
+            .iter()
+            .map(|p| format!("{} {}", p.name, p.bytes))
+            .collect();
+        web_sys::console::log_1(
+            &format!(
+                "working set: {} phase: measured {:?} bytes above the start for chunks 1 to {chunks}; the function gives {} at {}: {}",
+                phase.name,
+                measured.iter().map(|m| m - start).collect::<Vec<_>>(),
+                phase.bytes(),
+                phase.largest().at,
+                parts.join(", ")
+            )
+            .into(),
+        );
+        for (k, &peak) in after_warm_up.iter().enumerate() {
+            let held = peak - start;
+            assert!(
+                held.abs_diff(phase.bytes()) <= SMALL,
+                "the {} phase of chunk {} holds {held} bytes, and the function gives {} ({}): more than {SMALL} apart",
+                phase.name,
+                k + 2,
+                phase.bytes(),
+                phase.largest().at
+            );
+        }
+    }
+}
+
 #[wasm_bindgen_test]
 async fn a_missing_mix_file_ends_with_unstored() {
     fresh().await;

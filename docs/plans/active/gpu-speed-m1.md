@@ -197,7 +197,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 ## Progress
 
 * [x] Step 0: the baselines (2026-11-12, at `32a25fc`, whose code is the code of `22cdd74`).
-* [ ] Step 1: the working-set function and its measure.
+* [x] Step 1: the working-set function and its measure (2026-11-12).  First failures: `the_working_set_at_the_default_chunk_has_the_sizes_of_its_buffers` at `assert_eq!(part(moment, name), bytes, ...)` ("demixer sums at the stub", left 0, right 28262400), and `the_working_set_follows_the_chunk_and_the_overlap` at `assert_eq!(part(upload, "chunk input"), 2 * chunk * 4)` (left 0), with a stub that gives no parts.  `a_chunk_of_the_default_length_holds_its_working_set` at `assert!(held.abs_diff(phase.bytes()) <= SMALL, ...)` ("the upload phase of chunk 2 holds 75436204 bytes, and the function gives 94312400"), with a fake GPU half that held no normalised input.
 * [ ] Step 2: each stem goes to the demixer as it is made.
 * [ ] Step 3: the mask applies one frame at a time.
 * [ ] Step 4: `set_input` writes one band at a time.
@@ -213,6 +213,8 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, plan review round 1: at the default chunk a song has at most 2 chunks or at least 5, because a song is padded only above `2 x border` frames (`Demixer::new`).
 * 2026-11-12, Step 0: `e2e stored-stems --weights <path>` passed in Chrome 157 and in Safari 27.2.  Both browsers give the same six SHA-256s, so each later run compares with one list.  The list for `--hashes`: `55b981ea1ae82ddae4b0e6c5b5479de3447cf6bea51095f1ac07415cdf7a7348,7f0b47d66796b8346b2e07012e1c65abec4a0c622a365a5f772312ea728f687d,6f97eccacdd66503a20256282a82b6a5e014b70fff60818abe023a8636b1bf28,f1b79d872435cdb931306a0c33228905c2d6b3ddfd33e9f1cb55720f52d0b624,87fc0cc23bdefac194dfe5f0268a1684a78928f74c630f3d8d664cdb78189d8a,3166e0de310c930f2b40f75c2631e4524b7115c64f90d4ef540102af6da68f90`.  `stored-stems` sets its own options (`mm: 's64', attn: 'split', chunk: 16384, overlap: 2`), so it tests the CPU path at 17 segments of a 3-second clip, not at the default chunk.
 * 2026-11-12, Step 0: `e2e memory-budget --browser chrome --query x=1` fails at the 1-minute song, as the plan expects.  `Page::finish` stops the run at the first failed song, so the 4-minute song did not run.  The worker's lines: 30 MB at the separation's start, 58 MB at `separating 11 chunks`, 92 MB after chunk 1, 125 MB after chunks 2 to 11, 125 MB at the end.  `FAIL: the worker grew by Some(95.0) MB during the separation, at most 4 MB`.  The four peaks: page wasm 33 MB, worker wasm 125 MB, decoder wasm 6 MB, GPU live 673 MB, sum 837 MB.  The separation took 51.5 s (11 chunks, 4.7 s each).  The page grew by 0 MB during the open and the separation, and by 18 MB to show the stems.
+* 2026-11-12, Step 1: where the growth goes, measured by `a_chunk_of_the_default_length_holds_its_working_set` in Chrome 157 (`-- --nocapture`), in live heap bytes above the separation's start, for chunks 1 to 5.  Upload: 63,695,004, then 94,312,604 for chunks 2 to 5; the function gives 94,312,400 (+204).  Masks: 87,283,204, then 117,900,804; the function gives 117,863,384 (+37,420).  Between (chunks 1 to 4): 68,301,148 each; the function gives 68,300,800 (+348).  So each phase agrees with the table's parts, and no buffer is missing.  The masks phase's 37,420 bytes are the FFT plans, buffers and `hann` windows.  Chunk 1 is lower by the demixer's sums and counter, which `accept` makes at chunk 1.  The test took 23.6 s in Chrome (the whole binary run, with the build of the mix file).
+* 2026-11-12, Step 1: the between phase's peak today is the demixer's `accept`, with the six stems and the window clone: 68.3 MB.  The emit (53.0 MB) and the next read (42.4 MB) are less.  The plan's table had these parts, not this order.
 
 ## Decision log
 
@@ -226,6 +228,10 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, agent (team leader, plan review round 2): checks 3 and 4 print "not checked" with `f32 weights`, and check 3 also with a `chunk=` or `overlap=` query.  Why: the headroom and the 943 MB are measured or derived for f16 weights at the default chunk only.
 * 2026-11-12, agent (team leader, plan review round 2): the wasm test asserts each phase on both sides.  Why: a cut that lowers a phase that is not the largest would else fail nothing.
 * 2026-11-12, agent (team leader): a larger cut waits for Step 6's figures.  Why: each costs more code or more read-backs; the cheaper cuts may be enough.
+* 2026-11-12, agent (implementer): `working_set` gives each phase as a list of moments, each with its parts, and a phase's bytes are its largest moment.  Why: a cut changes which moment of a phase is the largest (the between phase goes from `accept` to the emit at cut 1), and the function then picks it with no other change.
+* 2026-11-12, agent (implementer): the test's phase boundaries are the entry and the exit of `Network::stems` and the exit of `GpuHalf::upload`.  So the upload phase holds the STFT too.  Why: the fake sees these boundaries with no change of the CPU half, and the STFT's end is less than the upload's peak.
+* 2026-11-12, agent (implementer): `GpuHalf::mask(0)` runs the shared layers (`Job::steps` less its mask steps) before stem 0's mask steps.  Why: the GPU runs the same steps in the same order as before, and `upload` stays a plain write.
+* 2026-11-12, agent (implementer): the TD-11 bullet on the features, the MEM-4 "Enforced by" line and the ARCHITECTURE text change in Step 1's commit, not in Step 7.  Why: DOC-1; the wasm test sees the features drop from Step 1.
 
 ## Outcomes and retrospective
 
