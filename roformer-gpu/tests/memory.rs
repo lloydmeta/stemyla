@@ -647,13 +647,17 @@ fn collected_profile_readbacks_are_freed() {
 
 /// `Job::shared_steps` lists the band split, every layer and the final
 /// norm.  `Job::steps` is those steps, then each stem's mask steps.  The
-/// two list checks catch a step that is lost from either list.  Then each
-/// input runs on a new `Job`, so no state carries over between the runs.
-/// The same input gives the same six masks, and a second input gives other
-/// masks.  So an input that does not reach the masks fails, as with a lost
-/// band split.  A step that `Job::run` runs wrong, such as a lost final
-/// norm, can pass.  Only `forward_matches_pytorch` sees that, and it needs
-/// fixtures that no machine has (TD-8).
+/// two list checks catch a step that `shared_steps` or `steps` drops or
+/// puts in the wrong order.  They build their lists from `layer_steps` and
+/// `mask_steps` too, so they cannot see a step lost inside those.  Then
+/// each input runs on a new `Job`, so no state carries over between the
+/// runs.  The same input gives the same six masks, and a second input
+/// gives other masks.  So an input that does not reach the masks fails, as
+/// with a lost band split.  Two kinds of fault can pass: a step lost inside
+/// `layer_steps` or `mask_steps`, such as `ToTime`, and a step that
+/// `Job::run` runs wrong, such as a lost final norm.  Only
+/// `forward_matches_pytorch` sees those, and it needs fixtures that no
+/// machine has (TD-8).
 #[test]
 fn the_masks_follow_the_input_through_the_shared_steps() {
     let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
