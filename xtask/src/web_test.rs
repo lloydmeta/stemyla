@@ -21,7 +21,7 @@
 //! for each crate, and fails with the name of each crate that failed.
 //! It exits with [`HANG_EXIT_CODE`] when each failed crate failed only by
 //! the runner's hang (TD-98, [`exit_code`]).  Each other failure exits
-//! with 1.  CI retries only the hang exit code.
+//! with 1.  CI runs a step again only after the hang exit code.
 //!
 //! It sets Cargo's runner and the driver through the environment, so no
 //! `.cargo/config.toml` is needed, and it checks that the installed runner
@@ -208,11 +208,9 @@ fn run(args: &[String]) -> Result<i32> {
                 "Error: {lines}\nbrowser tests failed in {browser:?}; if no test ran, check the driver: {}",
                 browser.setup_hint()
             );
-            let code = exit_code(&results, &outputs);
-            if code == HANG_EXIT_CODE {
-                eprintln!(
-                    "web-test: each failed crate failed only by the runner's hang (\"{HANG}\"); exit code {HANG_EXIT_CODE} (TD-98)"
-                );
+            let (note, code) = failure_end(&results, &outputs);
+            if let Some(note) = note {
+                eprintln!("{note}");
             }
             Ok(code)
         }
@@ -223,25 +221,27 @@ fn run(args: &[String]) -> Result<i32> {
 /// page gives no `test result: ` line in the time limit (`headless.rs`).
 const HANG: &str = "Failed to detect test as having been run. It might have timed out.";
 
-/// The parts of lines that show a failure other than the hang.  They are
-/// a failed test, a failed test binary, a panic and a failed WebDriver
-/// request.
-const NOT_A_HANG: [&str; 4] = [
-    " ... FAILED",
-    "test result: FAILED",
-    "panicked at ",
-    "request failed",
-];
+/// The parts of lines that show a failure other than the hang and a
+/// failed test.  They are a panic and a failed WebDriver request.
+const NOT_A_HANG: [&str; 2] = ["panicked at ", "request failed"];
+
+/// Whether `line` shows a failed test.  wasm-bindgen-test 0.3.80 prints
+/// `test <name> ... FAIL` for it (`log_test` and `TestResult` in
+/// `src/rt/mod.rs`).
+fn a_failed_test(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("test ") && line.ends_with(" ... FAIL")
+}
 
 /// Whether the output of a failed crate run shows only the runner's hang.
-/// It has the [`HANG`] line, and no line that holds a part of
-/// [`NOT_A_HANG`].
+/// It has the [`HANG`] line.  It has no line of [`a_failed_test`], and no
+/// line that holds a part of [`NOT_A_HANG`].
 fn failed_only_by_the_hang(output: &str) -> bool {
     let output = plain(output);
     output.lines().any(|line| line.trim() == HANG)
         && !output
             .lines()
-            .any(|line| NOT_A_HANG.iter().any(|part| line.contains(part)))
+            .any(|line| a_failed_test(line) || NOT_A_HANG.iter().any(|part| line.contains(part)))
 }
 
 /// The exit code of a failed `web-test`.  It is [`HANG_EXIT_CODE`] when at
@@ -259,6 +259,18 @@ fn exit_code(results: &[(&str, bool)], outputs: &[String]) -> i32 {
     } else {
         1
     }
+}
+
+/// The note and the exit code of a failed `web-test`.  The code is
+/// [`exit_code`].  The note is `Some` only for [`HANG_EXIT_CODE`].
+fn failure_end(results: &[(&str, bool)], outputs: &[String]) -> (Option<String>, i32) {
+    let code = exit_code(results, outputs);
+    let note = (code == HANG_EXIT_CODE).then(|| {
+        format!(
+            "web-test: each failed crate failed only by the runner's hang (\"{HANG}\"); exit code {HANG_EXIT_CODE} (TD-98)"
+        )
+    });
+    (note, code)
 }
 
 /// Runs one crate with `run`.  In Safari, it ends the stale sessions with
@@ -579,7 +591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 
     /// The output of a crate run with a failed test, as in CI run
     /// 43152005940.
-    const A_FAILED_TEST: &str = "test web::tests::a_mix_file_changed_after_the_open_gives_no_old_samples ... FAILED\n\
+    const A_FAILED_TEST: &str = "test web::tests::a_mix_file_changed_after_the_open_gives_no_old_samples ... FAIL\n\
         failures:\n\
         \x20       panicked at worker/src/web/tests.rs:3576:24:\n\
         test result: FAILED. 109 passed; 1 failed; 0 ignored; 0 filtered out; finished in 63.72s\n";
@@ -597,7 +609,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     /// * one failed crate that hung gives [`HANG_EXIT_CODE`];
     /// * two failed crates that both hung give [`HANG_EXIT_CODE`];
     /// * a passed crate with any output does not change the code;
-    /// * a hang line in colour gives [`HANG_EXIT_CODE`].
+    /// * a hang line in colour gives [`HANG_EXIT_CODE`];
+    /// * a hang after a passed test gives [`HANG_EXIT_CODE`];
+    /// * a hang after a line that ends with " ... FAIL" but does not
+    ///   start with "test " gives [`HANG_EXIT_CODE`].
     #[test]
     fn only_hung_crates_give_the_hang_exit_code() {
         let results = [("app", false), ("engine", true)];
@@ -612,12 +627,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             exit_code(&results[..1], &outputs(&[&coloured])),
             HANG_EXIT_CODE
         );
+        let after_a_passed_test = format!("test lloyd ... ok\n{HUNG}");
+        assert_eq!(
+            exit_code(&results[..1], &outputs(&[&after_a_passed_test])),
+            HANG_EXIT_CODE
+        );
+        let not_a_test_line = format!("lloyd: test ... FAIL\n{HUNG}");
+        assert_eq!(
+            exit_code(&results[..1], &outputs(&[&not_a_test_line])),
+            HANG_EXIT_CODE
+        );
     }
 
     /// Asserts that each of these gives 1:
     /// * a hung crate and a crate with a failed test (CI run 43152005940);
     /// * a failed WebDriver request (CI run 43223719719);
     /// * a hang after a failed test in the same crate run;
+    /// * a hang after a failed test with no panic, on a line with spaces
+    ///   around it;
     /// * a hang and a panic in the same crate run;
     /// * a hang and a failed WebDriver request in the same crate run;
     /// * a failed crate with no output;
@@ -628,14 +655,34 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
         assert_eq!(exit_code(&two, &outputs(&[HUNG, A_FAILED_TEST])), 1);
         let one = [("engine", false)];
         assert_eq!(exit_code(&one, &outputs(&[A_FAILED_REQUEST])), 1);
-        let after_a_failed_test = format!("test lloyd ... FAILED\n{HUNG}");
+        let after_a_failed_test = format!("test lloyd ... FAIL\n{HUNG}");
         assert_eq!(exit_code(&one, &outputs(&[&after_a_failed_test])), 1);
+        let with_spaces = format!("  test web::tests::lloyd ... FAIL \r\n{HUNG}");
+        assert_eq!(exit_code(&one, &outputs(&[&with_spaces])), 1);
         let with_a_panic = format!("    panicked at app/src/lib.rs:1:1:\n{HUNG}");
         assert_eq!(exit_code(&one, &outputs(&[&with_a_panic])), 1);
         let with_a_request = format!("{HUNG}{A_FAILED_REQUEST}");
         assert_eq!(exit_code(&one, &outputs(&[&with_a_request])), 1);
         assert_eq!(exit_code(&one, &outputs(&[""])), 1);
         assert_eq!(exit_code(&[("app", true)], &outputs(&[HUNG])), 1);
+    }
+
+    /// Asserts:
+    /// * a crate that hung gives [`HANG_EXIT_CODE`] and a note that names
+    ///   the hang line, the code and TD-98;
+    /// * a crate with a failed test gives 1 and no note.
+    #[test]
+    fn only_the_hang_exit_code_gets_the_hang_note() {
+        let failed = [("app", false)];
+        let (note, code) = failure_end(&failed, &outputs(&[HUNG]));
+        assert_eq!(code, HANG_EXIT_CODE);
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "web-test: each failed crate failed only by the runner's hang (\"Failed to detect test as having been run. It might have timed out.\"); exit code 75 (TD-98)"
+            )
+        );
+        assert_eq!(failure_end(&failed, &outputs(&[A_FAILED_TEST])), (None, 1));
     }
 
     /// Asserts that a line that only holds the hang text in other words
@@ -660,7 +707,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
                 step.lines()
                     .skip(1)
                     .map(str::trim)
-                    .filter(|l| !l.starts_with('#'))
                     .take_while(|l| !l.starts_with("- "))
                     .collect()
             })

@@ -83,7 +83,7 @@ Seen in Safari 27.2 on macOS 27.2.1, on an Apple M2 Pro, on 2026-11-13.  The sou
 * The part of `v64`'s loss in Safari at K 256 that the fixed cost for each workgroup explains has four estimates:
   * 64 %: Chrome's MSL timed with WebKit's zero-init and clamps (Step 5.2).  At K 1,024 it is 30 %.
   * 55 %: Step 3's fit of the time for each workgroup.
-  * about 34 %: `v64-g4` against `v64` in both browsers (Step 4b).  `v64-g4` sets its memory to zero once for 4 tiles.
+  * about 34 %: `v64-g4` against `v64` in both browsers (Step 4b).  `v64-g4` sets its memory to zero once for 4 tiles.  The estimate assumes that `v64-g4`'s own extra cost is the same in both browsers.  Safari's time with `v64-g4` did not go down (1.014 to 1.033 times `v64`).  The browser ratio fell because Chrome got about 1.20 times slower.
   * about 26 %: the `wg10k` control (Step 4).  It has almost no work, so it can give less than a real kernel.
 * The code here: none yet.  The cost grows with the bytes of workgroup memory and the number of workgroups.  So a kernel that does more work for each byte of workgroup memory loses less in Safari.  M4 of `plans/active/gpu-speed.md` uses this.
 * Rule: GPU-1 (the default limits stay).  The WebKit bug text for the maintainer is [webkit-bug-workgroup-zero-init.md](webkit-bug-workgroup-zero-init.md).

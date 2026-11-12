@@ -2562,8 +2562,9 @@ mod tests {
     /// is more than the longest measured run of those steps.  In
     /// `browser-tests`, they took 10.5, 15.3 and 19.7 minutes (runs
     /// 42777211457, 40894815433 and 42952206488).  In `macos`, they took
-    /// 24.8 minutes in run 43108510738 (2026-11-11, with no cache).  That
-    /// is the longest of the macOS jobs from 2026-11-11 to 2026-11-12.
+    /// 24.9 minutes in run 43108510738 (2026-11-11, with no cache), so 25
+    /// has 0.1 to spare.  That is the longest of the macOS jobs from
+    /// 2026-11-11 to 2026-11-12.
     /// [`retry_minutes`] gives the time of the retry steps.
     const OTHER_STEPS_MINUTES: [(&str, u64); 2] = [("browser-tests", 20), ("macos", 25)];
 
@@ -2591,7 +2592,6 @@ mod tests {
                     .lines()
                     .skip(1)
                     .map(str::trim)
-                    .filter(|l| !l.starts_with('#'))
                     .take_while(|l| !l.starts_with("- "))
                     .collect();
                 let input = |name: &str| {
@@ -2803,8 +2803,7 @@ mod tests {
             format!("\x20         retry_wait_seconds: {s}\n")
         });
         format!(
-            "\x20     # lloyd's retry, max_attempts: 99\n\
-             \x20     - name: The Safari web-test of beachape\n\
+            "\x20     - name: The Safari web-test of beachape\n\
              \x20       uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0\n\
              \x20       with:\n\
              \x20         command: cargo run --locked -p xtask -- web-test --browser safari\n\
@@ -2841,9 +2840,14 @@ mod tests {
     /// * the same job with 4 attempts fails at 236, and passes at 266;
     /// * the job with 3 attempts fails at 235;
     /// * two retry steps, of 30 and 15 minutes, pass at 281 and fail at
-    ///   280, so a comment with `max_attempts: 99` is not read;
+    ///   280;
     /// * a wait of 60 s in place of the default 10 s fails at 236;
-    /// * a retry step with no `timeout_minutes` fails.
+    /// * a retry step with no `timeout_minutes` fails;
+    /// * a retry step with no `timeout_minutes` reads none from a later
+    ///   step, and fails;
+    /// * one attempt of 30 minutes with a wait of 60 s needs 31 minutes,
+    ///   since the action also waits after the last attempt.  So it
+    ///   passes at 176 and fails at 175.
     #[test]
     fn a_retry_step_that_can_use_up_the_job_limit_fails() {
         let three = retry_step(3, 30, None);
@@ -2868,7 +2872,35 @@ mod tests {
         assert!(job_limit_problem(&retry_job(236, &[long_wait])).is_some());
         let no_limit =
             retry_step(3, 30, None).replace("timeout_minutes: 30", "timeout_seconds: 1800");
-        assert!(job_limit_problem(&retry_job(500, &[no_limit])).is_some());
+        assert!(job_limit_problem(&retry_job(500, std::slice::from_ref(&no_limit))).is_some());
+        let other_action = "\x20     - uses: lloyd/wait@v1\n\
+                            \x20       with:\n\
+                            \x20         timeout_minutes: 15\n"
+            .to_string();
+        let before_a_later_step =
+            retry_job(500, &[no_limit, other_action, retry_step(3, 15, None)]);
+        assert_eq!(
+            before_a_later_step.retries,
+            [
+                RetryStep {
+                    max_attempts: Some(3),
+                    timeout_minutes: None,
+                    retry_wait_seconds: None,
+                },
+                RetryStep {
+                    max_attempts: Some(3),
+                    timeout_minutes: Some(15),
+                    retry_wait_seconds: None,
+                },
+            ]
+        );
+        assert!(job_limit_problem(&before_a_later_step).is_some());
+        let one_attempt = retry_step(1, 30, Some(60));
+        assert_eq!(
+            job_limit_problem(&retry_job(176, std::slice::from_ref(&one_attempt))),
+            None
+        );
+        assert!(job_limit_problem(&retry_job(175, &[one_attempt])).is_some());
     }
 
     #[test]

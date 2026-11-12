@@ -173,7 +173,7 @@ At most two fused attention variants, from what Steps 3 to 5 found, each within 
 
 * `STEMYLA_PERF_WEIGHTS=<weights> CHROMEDRIVER=<driver> cargo run -p xtask -- check --tier push` passes, with both perf gates run (the changed paths from `origin/main` include `roformer-gpu/`).  Progress gives both gates' verdicts.  A skip line is not a pass (VERIFY-1).
 * `cargo build -p xtask` passes.
-* `git diff --stat 7ec4d06..HEAD` shows no path outside `docs/`, `.github/`, `xtask/src/e2e/save.rs` (the CI commit) and the paths that the orchestrator applies.
+* `git diff --stat 7ec4d06..HEAD` shows no path outside `docs/`, `.github/`, `xtask/src/e2e/save.rs` (the CI commit) and the paths that the orchestrator applies.  The review fixes of the CI commit add `xtask/src/web_test.rs`, `xtask/src/main.rs` and `xtask/tests/e2e_cli.rs`.
 
 ## Validation and acceptance
 
@@ -187,7 +187,7 @@ At most two fused attention variants, from what Steps 3 to 5 found, each within 
 
 ## Idempotence and recovery
 
-Each experiment writes only to the scratch worktree and `m3/`.  A session that stops reads Progress and `m3/findings.md`, and goes on at the next open step.  A page that a locked screen or a Safari timeout stops runs again.  A set that a browser update splits runs again in full, and Surprises records both versions.  `git worktree remove` and `git branch -D scratch/m3-variants` undo Step 2.
+Each experiment writes only to the scratch worktree and `m3/`.  A session that stops reads Progress and this plan's Surprises, and goes on at the next open step.  The full tables of `m3/findings.md` were in the session scratchpad, and are not kept.  A page that a locked screen or a Safari timeout stops runs again.  A set that a browser update splits runs again in full, and Surprises records both versions.  `git worktree remove` and `git branch -D scratch/m3-variants` undo Step 2.
 
 ## Progress
 
@@ -221,7 +221,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
   So the clamp has the same form in both browsers.  Three differences remain.  Chrome removes the clamps that it can prove.  Safari sets workgroup memory to zero with one thread, byte by byte.  Safari gives Metal no maximum number of threads.
 
-* 2026-11-13, Step 3: the controls, from one set of `?bench=v64&bench_rounds=5` (`m3/runs/s3-{safari,chrome}-{1,2}.log`, headed Chrome `m3/runs/s3h-chrome-1.log`).  Figures are medians of 5 rounds, the spread in brackets; the ratio is Safari's time over Chrome's, for set 1 and set 2.  The full table is in `m3/findings.md`.
+* 2026-11-13, Step 3: the controls, from one set of `?bench=v64&bench_rounds=5` (`m3/runs/s3-{safari,chrome}-{1,2}.log`, headed Chrome `m3/runs/s3h-chrome-1.log`).  Figures are medians of 5 rounds, the spread in brackets; the ratio is Safari's time over Chrome's, for set 1 and set 2.  The full table was in `m3/findings.md`, in the session scratchpad, and is not kept.
 
   | Figure | Safari 1 | Chrome 1 | Safari 2 | Chrome 2 | Ratio |
   | - | - | - | - | - | - |
@@ -238,7 +238,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
   The ratio falls as K grows.  A least-squares fit of the time for each workgroup used 19 cores, and the shapes with 300 workgroups or more.  It gives Safari 8.5 us fixed plus 24.5 us for each 256 of K.  It gives Chrome 0.7 us plus 18.2 us.  So Safari has a fixed cost of about 7.8 us for each workgroup, and an inner loop 1.35 times slower.  At K = 256 the fixed cost is 55 % of the gap.
 
-* 2026-11-13, Step 4: one set of `?bench=i64,s64,v64,v64-u,v64-clamp2,v64-bar,v128,v128-u,s64-c&bench_rounds=5` on `freq qkv`, `time qkv` and `freq ff down` (`m3/runs/s4-{safari,chrome}-{1,2}.log`), then one set of `?bench=v64,v64-g4` (`m3/runs/s4b-*.log`).  Ratio: the variant's time over its reference's time in the same page, the range over both pages, shapes and formats.  A star: an effect in each page of that browser.  The full table is in `m3/findings.md`.
+* 2026-11-13, Step 4: one set of `?bench=i64,s64,v64,v64-u,v64-clamp2,v64-bar,v128,v128-u,s64-c&bench_rounds=5` on `freq qkv`, `time qkv` and `freq ff down` (`m3/runs/s4-{safari,chrome}-{1,2}.log`), then one set of `?bench=v64,v64-g4` (`m3/runs/s4b-*.log`).  Ratio: the variant's time over its reference's time in the same page, the range over both pages, shapes and formats.  A star: an effect in each page of that browser.  The full table was in `m3/findings.md`, in the session scratchpad, and is not kept.
 
   | Kernel (reference) | Ratio in Safari | Ratio in Chrome | Browser ratio, `freq qkv` f16 |
   | - | - | - | - |
@@ -250,7 +250,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
   | `v128-u` (`v128`) | 1.50 to 1.58 * | 1.90 to 2.08 * | 1.030, 1.034 |
   | `s64-c` (`s64`) | 0.115 to 0.152 * | 0.996 to 1.009 | 1.491, 1.481 |
   | `i64` (`v64`) | 1.25 to 1.58 * | 1.44 to 1.50 * | 1.498, 1.494 |
-  | `v64-g4` (`v64`), K 256 | 1.014 to 1.033 | 1.196 to 1.225 | 1.496, 1.504 |
+  | `v64-g4` (`v64`), K 256 | 1.014 to 1.033 | 1.196 to 1.225 * | 1.496, 1.504 |
 
   | Control (start of the page) | Safari 1, 2 | Chrome 1, 2 | Ratio |
   | - | - | - | - |
@@ -259,9 +259,9 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
   | `wg10k`, us for 2,064 workgroups | 408.0, 410.2 | 17.9, 17.8 | 22.8, 23.0 |
   | `wg0`, us for 2,064 workgroups | 11.0, 11.0 | 6.3, 6.3 | 1.75, 1.75 |
 
-  The reading.  In the `wg10k` control, the zero-init of 10 KiB costs Safari 0.19 us of GPU time for each workgroup.  That is 0.39 ms of the 1.53 ms that Safari loses on each `v64` dispatch of `freq qkv` (about 26 %).  Step 5.2 measured more in a real kernel: 0.56 ms for the zero-init alone, and 0.96 ms with the clamps.  One clamp on each workgroup read costs about 5 % in both browsers.  `v64` has it only in Safari, since Chrome's range analysis removes it (`m3/v64-chrome.msl`).  Barriers, `unpack2x16float` (f16 / f32 0.96 to 1.06 in both) and 64 live values (`fma64`) show no effect.  The unrolled form and the 8 x 8 tile are slower in both browsers.  `s64`'s loss in Safari is its loop-indexed private array: `s64-c` with constant indices runs at `i64`'s rate.  `v64-g4` lowers the browser ratio to 1.50 at K 256, but costs Chrome 20 %.  So it is not a design for M4.  In Safari 2, one round of `time qkv` was slow for every kernel (spreads to 126 %); the medians of 5 do not change.  Each Step 4 page logged "the bench finishes: FAIL".  `bench::summary` panicked after the timings, on the shorter list of shapes.  The scratch branch fixed it in `cc6cf54`.
+  The reading.  In the `wg10k` control, the zero-init of 10 KiB costs Safari 0.19 us of GPU time for each workgroup.  That is 0.39 ms of the 1.53 ms that Safari loses on each `v64` dispatch of `freq qkv` (about 26 %).  Step 5.2 measured more in a real kernel: 0.56 ms for the zero-init alone, and 0.96 ms with the clamps.  One clamp on each workgroup read costs about 5 % in both browsers.  `v64` has it only in Safari, since Chrome's range analysis removes it (`m3/v64-chrome.msl`).  Barriers, `unpack2x16float` (f16 / f32 0.96 to 1.06 in both) and 64 live values (`fma64`) show no effect.  The unrolled form and the 8 x 8 tile are slower in both browsers.  `s64`'s loss in Safari is its loop-indexed private array: `s64-c` with constant indices runs at `i64`'s rate.  `v64-g4` lowers the browser ratio to 1.50 at K 256, but costs Chrome 20 %.  So it is not a design for M4.  In Chrome, each `v64-g4` ratio is over 1.19, and each spread is 4.6 % or less, so the row has a star.  In Safari, `v64-g4` is not faster than `v64`.  Its row has no star: in Safari 1, `freq qkv` f32 gives 1.014, inside its spread of 2.8 %.  In Safari 2, one round of `time qkv` was slow for every kernel (spreads to 126 %); the medians of 5 do not change.  Each Step 4 page logged "the bench finishes: FAIL".  `bench::summary` panicked after the timings, on the shorter list of shapes.  The scratch branch fixed it in `cc6cf54`.
 
-* 2026-11-13, Step 5: the cost of what each compiler adds.  The full tables are in `m3/findings.md`.
+* 2026-11-13, Step 5: the cost of what each compiler adds.  The full tables were in `m3/findings.md`, in the session scratchpad, and are not kept.
 
   5.1, Chrome's toggles, pages in turns twice (`m3/runs/s5{def,rob,wgi,rng}-chrome-{1,2}.log`).  The figure is the time ratio to the default page, divided by each page's FMA control.  It is for `v64`, `s64` and `s64-c` on `freq qkv`, `time qkv` and `freq ff down`:
 
@@ -286,7 +286,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
   The thread maximum shows no effect.  WebKit's zero-init with the clamps adds 0.96 ms for 2,064 workgroups at each K.  That is a fixed cost for each workgroup, near Step 3's fit for Safari (0.85 ms).  At K 256 this is 0.49 of the 0.76 by which Safari's ratio is over 1 (64 %).  At K 1,024 (`freq ff down`) it is 0.133 of 0.447 (30 %).  The 64 % is the estimate of Chrome's MSL timed with WebKit's zero-init and clamps.  The other estimates of the fixed cost's part at K 256 are lower:
   * the `wg10k` control: about 26 % (Step 4);
-  * `v64-g4` against `v64`: about 34 % (Step 4b);
+  * `v64-g4` against `v64`: about 34 % (Step 4b).  It assumes that `v64-g4`'s own extra cost is the same in both browsers.  Safari's time with `v64-g4` did not go down (1.014 to 1.033 times `v64`).  The browser ratio fell because Chrome got about 1.20 times slower;
   * Step 3's fit: 55 %.
 
   The rest is a K loop 1.35 times slower in Safari, which none of these forms gives.  Natively each form takes 5.35 ms for each 768 of K.
@@ -301,7 +301,9 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
   The unrolled form is slower in both browsers, as in Step 4.  The fixed cost of Step 5 is about 2 % of a fused dispatch in Safari (576 workgroups, each over 1,151 keys).  So fused attention's loss is the slower inner loop.
 
-* 2026-11-13, Step 7: the best-supported explanation (`m3/findings.md`, Step 7).  Safari's loss on `v64` has two parts.  First, a fixed cost for each workgroup.  WebKit sets workgroup memory to zero with thread 0, byte by byte.  With WebKit's clamps, this makes Chrome's MSL 1.49 times slower at K 256 (Step 5.2).  By that emulation, it is 64 % of `v64`'s loss at K 256 and 30 % at K 1,024.  The other estimates at K 256 are about 26 % (`wg10k`), about 34 % (`v64-g4`) and 55 % (Step 3's fit).  It is about 2 % of fused attention's loss.  Second, a K loop about 1.35 times slower, whose cause is not found.  It is the rest, and most of fused attention's loss of 1.52.  A dump of Safari's own MSL would settle the second part.  WebKit's toggle for it is `com.apple.WebKit.WebGPU.TogglePrintMetalCode`.  Where the GPU process writes it is not confirmed, so M3 did not try it.
+* 2026-11-13, Step 7: the best-supported explanation (Step 7 of `m3/findings.md`, which was in the session scratchpad and is not kept).  Safari's loss on `v64` has two parts.  First, a fixed cost for each workgroup.  WebKit sets workgroup memory to zero with thread 0, byte by byte.  With WebKit's clamps, this makes Chrome's MSL 1.49 times slower at K 256 (Step 5.2).  By that emulation, it is 64 % of `v64`'s loss at K 256 and 30 % at K 1,024.  The other estimates at K 256 are about 26 % (`wg10k`), about 34 % (`v64-g4`) and 55 % (Step 3's fit).  It is about 2 % of fused attention's loss.  The `v64-g4` estimate assumes that `v64-g4`'s own extra cost is the same in both browsers.  Safari's time did not go down with `v64-g4`, and Chrome's became about 1.20 times longer.  Second, a K loop about 1.35 times slower, whose cause is not found.  It is the rest, and most of fused attention's loss of 1.52.  A dump of Safari's own MSL would settle the second part.  WebKit's toggle for it is `com.apple.WebKit.WebGPU.TogglePrintMetalCode`.  Where the GPU process writes it is not confirmed, so M3 did not try it.
+
+* 2026-11-13, review round 2: a reviewer's `git worktree add` failed on a name in use, and a pipe hid the failure.  So a `sed` changed one line in another reviewer's worktree.  The reviewer reverted it, and `review check` printed "no change" (TD-34; as in M1 and M2).
 
 ## Decision log
 
@@ -321,6 +323,8 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * 2026-11-13, agent (implementer), Step 5: 5.1 has a third Chrome form, range analysis off, and 5.2 times Chrome's MSL through Metal directly, not wgpu.  Why: range analysis off makes Chrome keep each clamp as Safari does.  Chrome's MSL lets one WebKit form go in at a time, and no wgpu option gives WebKit's zero-init or removes the thread maximum.
 * 2026-11-13, agent (implementer), Step 6: only `attention-u` ran, not a second variant.  Why: no finding of Steps 3 to 5 gives an attention form that removes Safari's loss.  The fixed cost is about 2 % of a fused dispatch.
 * 2026-11-13, agent (implementer), Step 7: the cause in WebKit is the zero-init of workgroup memory, so it gets a `browser-quirks.md` entry and `m3/webkit-bug.md`.  The design for M4: `v64`'s tile with fewer bytes of workgroup memory for each unit of work, no 8 x 8 tile, no unrolled loop.  The candidates are `v64` with BK 8, and a kernel with no workgroup memory.  For M5: the fused structure, each query block loaded once, no unrolled loop.  Each choice and its figure is in `m3/findings.md` and `m3/parent-m3.diff`.
+* 2026-11-13, agent (implementer), review rounds 1 and 2: the review of the CI commit added code to `xtask`.  Round 1 changed `xtask/src/web_test.rs` and `xtask/src/main.rs`, and round 2 also `xtask/tests/e2e_cli.rs`.  Why: CI must run a step again only after the runner's hang, so `web-test` gives the hang its own exit code.  Step 8's path list names these paths.
+* 2026-11-13, agent (orchestrator): the stem-worker failure of run 43152005940 is a pre-existing finding; with no cause found in one hour, it gets TD-99.
 
 ## Outcomes and retrospective
 

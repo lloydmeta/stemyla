@@ -170,7 +170,9 @@ fn flac_with_no_driver_fails_before_a_browser_starts() {
 
 /// `xtask web-test` with an option it does not know fails before it builds
 /// or runs anything (the mutants of review round speed 2 of M8: a `run`
-/// that returns `Ok(())` would pass).
+/// that returns `Ok(())` would pass).  Asserts:
+/// * the process exits with code 1, the code of `web_test::main`;
+/// * stderr names the option.
 #[test]
 fn web_test_refuses_an_unknown_option() {
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
@@ -178,7 +180,7 @@ fn web_test_refuses_an_unknown_option() {
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "web-test fails: {stderr}");
+    assert_eq!(out.status.code(), Some(1), "web-test fails: {stderr}");
     assert!(
         stderr.contains("unknown option --bogus"),
         "web-test names the option: {stderr}"

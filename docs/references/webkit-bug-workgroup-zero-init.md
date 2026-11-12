@@ -59,11 +59,11 @@ The reference is the same kernel without `w`.  It keeps the barrier, and sets `v
 
 ## Results
 
-Wall time for each dispatch, median of 5 rounds, in 2 pages of each browser:
+Wall time for each dispatch, median of 5 rounds, in 2 pages of each browser.  Each range is from the start and the end of each page:
 
 | | Safari 27.2 | Chrome 157 |
 | - | - | - |
-| With 10 KiB of workgroup memory | 408 to 410 us | 17.7 to 17.9 us |
+| With 10 KiB of workgroup memory | 408 to 410 us | 17.8 to 17.9 us |
 | No workgroup memory | 10.9 to 11.1 us | 6.3 us |
 
 A real kernel: Chrome's MSL for a 64 x 64 tiled matrix product (10 KiB of workgroup memory, 256 threads).  It was compiled and timed through Metal directly on the same Mac.  The only change was WebKit's zero-initialisation in place of Tint's.  Each dispatch at 5,456 x 1,536 x 256 then took 2.512 ms in place of 1.948 ms (1.29 times).  With WebKit's bounds clamps as well, it took 2.905 ms (1.49 times).  The whole product is 1.76 times slower in Safari than in Chrome.

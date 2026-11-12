@@ -259,12 +259,12 @@ jobs:
     # and the crates for wasm32.  In run 43108510738 (2026-11-11), with no
     # cache, the job took 50.9 minutes.  The setup took 17.0, the Safari
     # `web-test` 15.6, the AAC step 0.5, and the two `e2e save` steps 4.7
-    # and 5.2.  So the other steps took 24.8 minutes.  That is the longest
+    # and 5.2.  So the other steps took 24.9 minutes.  That is the longest
     # of the macOS jobs from 2026-11-11 to 2026-11-12.  The limit holds:
     # * the two `e2e save` steps at their limits: 120 minutes;
     # * the two retry steps (TD-98): 3 attempts of 30 and of 15 minutes,
     #   and a wait of 10 s after each failed attempt: 136 minutes;
-    # * 25 minutes for the other steps.
+    # * 25 minutes for the other steps, 0.1 more than 24.9.
     # That is 281 minutes, and 4 to spare.  A hung browser must not hold
     # the runner for GitHub's 6 h default.
     # `the_ci_job_limit_holds_its_save_steps` (xtask/src/e2e/save.rs)
@@ -290,12 +290,12 @@ jobs:
       # and in Chrome.  `web-test` then exits with 75 when each failed crate
       # failed only by that hang (`exit_code` in xtask/src/web_test.rs).
       # Each other failure exits with 1, and the step fails at once.  So
-      # each `web-test` step runs up to 3 times on exit code 75 only, and
-      # each retry shows a warning.  An attempt that reaches
-      # `timeout_minutes` is not retried.  With no hang, an attempt took
-      # 15.6 minutes at most (run 43108510738, with no cache).  A hang adds
-      # the runner's limit of 10 minutes.  So 30 minutes hold an attempt
-      # with one hang, and 4.4 to spare.
+      # the action runs each `web-test` step again only on exit code 75, up
+      # to 3 attempts.  Each time it runs a step again, it shows a warning.
+      # An attempt that reaches `timeout_minutes` is not run again.  With
+      # no hang, an attempt took 15.6 minutes at most (run 43108510738,
+      # with no cache).  A hang adds the runner's limit of 10 minutes.  So
+      # 30 minutes hold an attempt with one hang (25.6), and 4.4 to spare.
       - name: The Safari web-test, run again only after the runner's hang (TD-98)
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
@@ -321,9 +321,9 @@ jobs:
       # no encoder.  Only this step sets it.
       # Run again only after the runner's hang, as the Safari web-test is
       # (TD-98).  With no hang, an attempt took 1.7 minutes at most (run
-      # 42991255256).  An attempt with a hang took 10.5 (run 43229036261,
-      # attempt 2).  So 15 minutes hold an attempt with one hang, and 3.3
-      # to spare.
+      # 42991255256).  A hang adds the runner's limit of 10 minutes.  So 15
+      # minutes hold an attempt with one hang (11.7), and 3.3 to spare.  An
+      # attempt with a hang took 10.5 (run 43229036261, run attempt 2).
       - name: The real AAC encode, in Chrome, run again only after the runner's hang (TD-98)
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:

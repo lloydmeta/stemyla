@@ -509,16 +509,28 @@ This entry concerns VERIFY-1.  The causes are outside the repo (step 9 of `plans
 This entry concerns VERIFY-1.  It is a workaround: a step that runs again can hide a hang that comes and goes.
 
 * The cause: on the `macos-latest` runner, `wasm-bindgen-test-runner` sometimes waits its 600 s limit for a test page that never reports.  It then prints "Failed to detect test as having been run. It might have timed out." (`headless.rs` of wasm-bindgen-cli 0.2.130).  Why the page does not report is not known.  It can be the hidden test page of [TD-96](#td-96-the-safari-tests-depend-on-the-macs-session-and-on-webkit), which also stopped Safari runs with no failure.
-* The failures on 2026-11-12, on branch `gpu-speed/2026-11-12`: 4 attempts in 3 runs.
-  * Run 43152005940, Safari: `app` `web_close` hung.  In the same run, `stem-worker` failed `a_mix_file_changed_after_the_open_gives_no_old_samples` ("shortened: the read gave the old samples"), with no hang.
+* The failures on 2026-11-12, on branch `gpu-speed/2026-11-12`: 4 run attempts in 3 runs.
+  * Run 43152005940, Safari: `app` `web_close` hung.  In the same run, `stem-worker` failed `a_mix_file_changed_after_the_open_gives_no_old_samples` ("shortened: the read gave the old samples"), with no hang ([TD-99](#td-99-a-stem-worker-test-read-old-samples-once-in-safari-on-ci)).
   * Run 43223719719, Safari, `engine --lib`: a WebDriver `execute/sync` request failed, with no hang.
-  * Run 43229036261, attempt 1, Safari: `app` `web_output` hung.
-  * Run 43229036261, attempt 2, Chrome: `stem-worker` `a_real_aac_decodes_to_the_source` hung.  The step took 10.5 minutes; the test takes 1.38 s on the maintainer's Mac.
+  * Run 43229036261, run attempt 1, Safari: `app` `web_output` hung.
+  * Run 43229036261, run attempt 2, Chrome: `stem-worker` `a_real_aac_decodes_to_the_source` hung.  The step took 10.5 minutes; the test takes 1.38 s on the maintainer's Mac.
 * The branch did not change the failed tests.  It did change `stem-worker` (`worker/src/web.rs`, `worker/src/web/tests.rs`), the crate of the AAC test and of `a_mix_file_changed_after_the_open_gives_no_old_samples`.  Each failed test passed on the maintainer's Mac.
 * The rates: from run 42952206488 (2026-11-11) to run 43229036261 (2026-11-12), 3 of 34 Safari `web-test` steps failed (8.8 %).  1 of 22 Chrome AAC steps failed (4.5 %).  Only 2 of the Safari failures were hangs.  The cancelled steps are not counted.  Source: the jobs of each run of `ci.yml` in that range (`gh api .../attempts/<n>/jobs`, read on 2026-11-13).  The attempts of a step run on one runner, so they may not fail independently.  So no rate is given for 3 attempts.
-* The workaround: `.github/workflows/ci.yml` runs the Safari `web-test` and the Chrome AAC step through `nick-fields/retry` v4.0.0, pinned by its SHA.  `web-test` exits with 75 when each failed crate failed only by the hang (`exit_code` in `xtask/src/web_test.rs`).  Each other failure exits with 1.  Each step runs again, up to 3 attempts, only on exit code 75 (`retry_on_exit_code`).  So a failed test, a panic or a failed WebDriver request fails the step at once.  Of the 4 failed attempts above, the retry covers the 2 hangs of run 43229036261.  It does not cover run 43152005940, where `stem-worker` also failed, or the `execute/sync` failure of run 43223719719.  An attempt that reaches its `timeout_minutes` is not run again.  Each retry shows a warning in the run.  The job's limit grew from 180 to 285 minutes for the attempts.
+* The workaround: `.github/workflows/ci.yml` runs the Safari `web-test` and the Chrome AAC step through `nick-fields/retry` v4.0.0, pinned by its SHA.  `web-test` exits with 75 when each failed crate failed only by the hang (`exit_code` in `xtask/src/web_test.rs`).  Each other failure exits with 1.  Each step runs again, up to 3 attempts, only on exit code 75 (`retry_on_exit_code`).  So a failed test, a panic or a failed WebDriver request fails the step at once.  Of the 4 failed run attempts above, the action runs again only after the 2 hangs of run 43229036261.  It does not cover run 43152005940, where `stem-worker` also failed, or the `execute/sync` failure of run 43223719719.  An attempt that reaches its `timeout_minutes` is not run again.  Each time the action runs a step again, it shows a warning in the run.  The job's limit grew from 180 to 285 minutes for the attempts.
 * Who looks: the person who reviews a PR.  Each "Attempt <n> failed" warning of a step of the `macos` job is a hang.  The attempt's log names the crate that hung.  If the PR changes that crate, the person runs `cargo run -p xtask -- web-test --browser <browser>` on a Mac before the merge.  It must pass.
-* Fix: find why the test page does not report on the runner, then remove the retry.  `web-test` could also run only the crate that hung again, in place of the whole step.
+* Fix: find why the test page does not report on the runner, then remove the action.  `web-test` could also run only the crate that hung again, in place of the whole step.
+
+### TD-99: a stem-worker test read old samples once in Safari on CI
+
+This entry concerns VERIFY-1.  The cause is not known.
+
+* The failure: CI run 43152005940, job 130963127170 (`browser tests (macOS)`), commit `c42c98ca`, image `macos-26-arm64` with Safari 27.2.  `a_mix_file_changed_after_the_open_gives_no_old_samples` in `worker/src/web/tests.rs` failed with no hang.  The panic: `worker/src/web/tests.rs:3576:24: shortened: the read gave the old samples`.
+* What it shows: the test writes 16 zero bytes over the mix after `StoredMix::open`, and awaits `close()`.  The read through the `File` from before the write then gave the old samples of channel 0.  WebKit's source on `main` gives the new bytes or NotFoundError after `close()` resolves.  No path to old bytes was found.
+* The rate: 1 of 37 macOS job attempts that ran the test (2.7 %), from run 42952206488 to run 43241235485.  In Chrome, 0 of 59 job attempts from 2026-11-09.  On the maintainer's Mac, 0 of 600 reads gave old bytes.
+* TD-98 does not cover it: the action runs a step again only after the runner's hang, and this failure exits with 1.  So it fails CI if it comes back.
+* The product risk is low.  The page never writes the mix during a separation (D6 of M4), and the end check of `StoredMix` sees a change of size ([TD-55](#td-55-safari-can-miss-a-mix-file-written-again-during-a-separation)).
+* Next step: in the test, after the change, read the mix again through a new `getFile()` before the old `File`.  Assert that the new read sees the change.  If that assert fails on CI, the write had not landed, and the test can wait for it.  If it passes and the old `File` still gives old samples, the cause is in WebKit, and it goes under TD-96.
+* Fix: find the cause, then fix the test or the code, or record a WebKit bug.
 
 ## Known breaches
 
