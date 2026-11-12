@@ -87,7 +87,7 @@ Two changes in `worker/src/web.rs`, each measured:
 
 * `Pace` keeps up to 2 steps in flight: it submits a step before it waits for the step before.  The step limit and the errors still stop a run.
 * The CPU work runs while the GPU works.  The STFT of chunk n + 1 runs while the GPU runs chunk n.  The mask of stem k is applied while the GPU runs the steps after it.  For the last stem of chunk n, these are the first steps of chunk n + 1.
-* The CPU holds at most one mask.  The order for each stem k: read mask k, submit the steps of stem k + 1, apply mask k, drop it, then read mask k + 1.  Read mask k before any step of stem k + 1 is submitted: `Job` has one `mask` buffer, which every stem's mask steps write.
+* The CPU holds at most one mask.  The order for each stem k: submit the copy of mask k, submit the steps of stem k + 1, wait for mask k, apply it, drop it, then do the same for mask k + 1.  Submit mask k's copy before any step of stem k + 1: `Job` has one `mask` buffer, which every stem's mask steps write, and the queue runs work in order.  `Gpu::read` submits and waits in one call today, so M6 splits it or reads before it submits.
 * Six masks held at once (113 MB at the default chunk) leave about 7 MB under `TAB_BUDGET_MB` in Chrome.  That is too little for the JS heap, which no check counts (TD-11).  So M6 does not do that.
 
 The stems stay the same byte for byte: only the order of the work changes.
@@ -104,7 +104,12 @@ Acceptance: `e2e stored-stems` gives the same hashes before and after.  The perf
 ## Validation and acceptance
 
 * `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.
-* `e2e memory-budget` passes in Safari and Chrome at the default chunk.  Its check 3 headroom (`WORKER_HEADROOM_MB`) is mostly heap that is free at the separation's start, which the model load and calibration set.  So M4 and M5, which change calibration, can move it, and so can M6, which changes `working_set` and its buffers.  Measure the headroom again at the end of M4, M5 and M6, and when check 3's printed margin is under 2.16 MB or over 9.44 MB.  Measure as M1 Step 8 did, with 3 runs in each browser.  Then set the constant midway between the noise (2.16 MB) and a lost cut 3 (9.44 MB), by the rule in the doc of `WORKER_HEADROOM_MB`, not at the largest headroom.  Change that doc and the figures in `the_worker_growth_must_fit_the_working_set_budget` in the same commit, and record the figures in the Decision log.
+* `e2e memory-budget` passes in Safari and Chrome at the default chunk.  Its check 3 headroom (`WORKER_HEADROOM_MB`) is mostly heap that is free at the separation's start, which the model load and calibration set.  So M4 and M5, which change calibration, can move it, and so can M6, which changes `working_set` and its buffers.  Measure the headroom again at the end of M4, M5 and M6, and when check 3's printed margin is under 2.16 MB or over the smallest lost-cut rise.  First show that the cause is free heap: the worker's wasm test passes, and a probe of the live heap at each phase, as in M1 Step 8, finds no held buffer.  A held buffer is a defect to fix, not a reason to measure again.  Then:
+
+* Compute the smallest lost-cut rise again from the current `working_set` (9.44 MB at M1, from cut 3).  M6 changes it.
+* Measure as M1 Step 8 did, with 3 runs in each browser.
+* Set the constant midway between the noise (2.16 MB) and that rise, by the rule in the doc of `WORKER_HEADROOM_MB`, not at the largest headroom.  If the noise is not less than the rise, decide in the Decision log.
+* Change that doc and the figures in `the_worker_growth_must_fit_the_working_set_budget` in the same commit, and record the figures in the Decision log.
 * `e2e selftest --weights <model>` passes in Safari and Chrome with the kernels that each browser chooses.
 * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passes on this Mac (Metal).
 * `cargo run -p xtask -- check --tier push` passes, and CI passes on the PR.
