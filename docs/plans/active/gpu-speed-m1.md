@@ -199,7 +199,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * [x] Step 0: the baselines (2026-11-12, at `32a25fc`, whose code is the code of `22cdd74`).
 * [x] Step 1: the working-set function and its measure (2026-11-12).  First failures: `the_working_set_at_the_default_chunk_has_the_sizes_of_its_buffers` at `assert_eq!(part(moment, name), bytes, ...)` ("demixer sums at the stub", left 0, right 28262400), and `the_working_set_follows_the_chunk_and_the_overlap` at `assert_eq!(part(upload, "chunk input"), 2 * chunk * 4)` (left 0), with a stub that gives no parts.  `a_chunk_of_the_default_length_holds_its_working_set` at `assert!(held.abs_diff(phase.bytes()) <= SMALL, ...)` ("the upload phase of chunk 2 holds 75436204 bytes, and the function gives 94312400"), with a fake GPU half that held no normalised input.
 * [x] Step 2: each stem goes to the demixer as it is made (2026-11-12).  First failures: `stems_one_at_a_time_give_the_sums_of_a_whole_chunk_exactly` at `assert_eq!(sums_of(&each), sums_of(&whole), ...)` ("n=15 chunk=10 overlap=2: the sums after chunk 0", left `(0, [])`), with stubs of `accept_stem` and `end_chunk`; `a_chunk_cannot_end_before_each_stem_comes` and `a_stem_cannot_come_twice_in_a_chunk` did not panic.  After the function's change, `a_chunk_of_the_default_length_holds_its_working_set` failed at `tests.rs:3347` ("the masks phase of chunk 2 holds 117900810 bytes, and the function gives 94311384").  After the cut it passed, and `stored-stems --hashes` passed in Chrome.
-* [ ] Step 3: the mask applies one frame at a time.
+* [x] Step 3: the mask applies one frame at a time (2026-11-12).  First failure: `frames_from_a_function_give_the_inverse_of_the_whole_spectrum` at `assert_eq!(asked, (0..s.frames).collect::<Vec<_>>(), "each frame once, in order")` (left `[]`), with a stub of `istft_frames` that gave zeros.  After the function's change, `a_chunk_of_the_default_length_holds_its_working_set` failed at `tests.rs:3360` ("the masks phase of chunk 2 holds 94348666 bytes, and the function gives 84873184").  After the cut it passed, and `stored-stems --hashes` passed in Chrome.
 * [ ] Step 4: `set_input` writes one band at a time.
 * [ ] Step 5: the chunk input drops after the STFT.
 * [ ] Step 6: the room for M6.
@@ -217,6 +217,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, Step 1: the between phase's peak today is the demixer's `accept`, with the six stems and the window clone: 68.3 MB.  The emit (53.0 MB) and the next read (42.4 MB) are less.  The plan's table had these parts, not this order.
 * 2026-11-12, Step 2: after cut 1, the wasm test measured (Chrome) upload 94,312,610 (+210 over the function), masks 94,348,666 (+37,282), between 52,992,402 (+402) for chunks 2 to 5.  The upload phase (94,312,400) is now the peak, 1,016 bytes over the masks phase (94,311,384).  The between phase's peak is the emit: the demixer, `x`, the segment and the PCM bytes.
 * 2026-11-12, Step 2, for M6: `Demixer::end_chunk` moves `pos`, and `next_input` reads at `pos`.  So the next chunk's input cannot be read before each stem of this chunk is accepted and the chunk ends.  `end_chunk` asserts that each stem came, and `accept_stem` that none came twice.  M6 needs a read cursor apart from the accept cursor to read chunk n + 1 while chunk n's stems come.
+* 2026-11-12, Step 3: after cut 2, the wasm test measured (Chrome) masks 84,910,466 (+37,282 over the function's 84,873,184).  Upload (94,312,610) and between (52,992,402) did not change.
 
 ## Decision log
 
@@ -236,6 +237,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, agent (implementer): the TD-11 bullet on the features, the MEM-4 "Enforced by" line and the ARCHITECTURE text change in Step 1's commit, not in Step 7.  Why: DOC-1; the wasm test sees the features drop from Step 1.
 * 2026-11-12, agent (implementer): `Network::stems` gives each stem through a callback `each(stem, stereo)`, and `separate_chunks` gives it to `Demixer::accept_stem`.  The fake networks give their six stems through it.  Why: the plan's example; it keeps the order of the work and needs no new type.
 * 2026-11-12, agent (implementer): `Demixer` keeps `accepted: Vec<bool>`, and `end_chunk` fails a chunk with a stem missing.  Why: with stems one at a time, a lost stem would else give wrong sums with no error.
+* 2026-11-12, agent (implementer): `istft_frames` gives the frame function the inverse FFT's own input buffer, and `istft` copies each frame into it.  Why: no frame buffer is added, and the floats are the same (a test against a copy of the old `istft`).
 
 ## Outcomes and retrospective
 

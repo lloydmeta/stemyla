@@ -13,7 +13,7 @@ use burn::tensor::{Tensor, TensorData};
 
 #[cfg(feature = "burn")]
 use crate::model::BsRoformer;
-use crate::stft::{Spectrum, frames_for, istft, stft};
+use crate::stft::{Spectrum, frames_for, istft_frames, stft};
 use crate::{BINS, CHANNELS, FEATURES, HOP, N_FFT, STEMS};
 
 /// Spectra of both channels and the network input `[T, FEATURES]`
@@ -36,24 +36,23 @@ pub fn analyse(channels: &[Vec<f32>; CHANNELS]) -> ([Spectrum; CHANNELS], Vec<f3
 }
 
 /// Multiplies both spectra by one stem's complex mask `[T, FEATURES]` and
-/// inverts them.
+/// inverts them.  Each frame is masked as the inverse STFT needs it, so
+/// no masked spectrum is held whole.
 pub fn apply_masks(spec: &[Spectrum; CHANNELS], mask: &[f32]) -> [Vec<f32>; CHANNELS] {
     let frames = spec[0].frames;
     assert_eq!(mask.len(), frames * FEATURES);
     let mut out: [Vec<f32>; CHANNELS] = Default::default();
     for (s, sp) in spec.iter().enumerate() {
-        let mut masked = sp.clone();
-        for t in 0..frames {
+        out[s] = istft_frames(frames, |t, bins| {
             for f in 0..BINS {
                 let i = t * FEATURES + (f * CHANNELS + s) * 2;
                 let (mr, mi) = (mask[i], mask[i + 1]);
-                let v = &mut masked.data[t * BINS + f];
+                let v = sp.data[t * BINS + f];
                 let (a, b) = (v.re, v.im);
-                v.re = a * mr - b * mi;
-                v.im = a * mi + b * mr;
+                bins[f].re = a * mr - b * mi;
+                bins[f].im = a * mi + b * mr;
             }
-        }
-        out[s] = istft(&masked);
+        });
     }
     out
 }
@@ -185,7 +184,6 @@ pub fn working_set(chunk: usize, overlap: usize) -> WorkingSet {
                     chunk_input,
                     spectra,
                     part("mask", frames * FEATURES * F32),
-                    part("masked spectrum", frames * BINS * COMPLEX),
                     part("inverse STFT sums", 2 * (N_FFT + HOP * (frames - 1)) * F32),
                     part("stem output, channel 0", stem_channel),
                     part("stem output, channel 1", stem_channel),
@@ -260,7 +258,58 @@ pub fn separate_chunk<B: Backend>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::stft::istft;
     use crate::{CHUNK, OVERLAP};
+
+    /// `apply_masks` as it was before it masked one frame at a time: it
+    /// clones each spectrum whole.  The reference for the new one.
+    fn apply_masks_to_clones(spec: &[Spectrum; CHANNELS], mask: &[f32]) -> [Vec<f32>; CHANNELS] {
+        let frames = spec[0].frames;
+        let mut out: [Vec<f32>; CHANNELS] = Default::default();
+        for (s, sp) in spec.iter().enumerate() {
+            let mut masked = sp.clone();
+            for t in 0..frames {
+                for f in 0..BINS {
+                    let i = t * FEATURES + (f * CHANNELS + s) * 2;
+                    let (mr, mi) = (mask[i], mask[i + 1]);
+                    let v = &mut masked.data[t * BINS + f];
+                    let (a, b) = (v.re, v.im);
+                    v.re = a * mr - b * mi;
+                    v.im = a * mi + b * mr;
+                }
+            }
+            out[s] = istft(&masked);
+        }
+        out
+    }
+
+    /// A value in -1..1 from `k`, spread with no pattern that the FFT
+    /// would hide.
+    fn noise(k: usize) -> f32 {
+        let h = (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+        (h % 2001) as f32 / 1000.0 - 1.0
+    }
+
+    /// Cut 2 of M1 of `plans/active/gpu-speed.md`: `apply_masks` masks one
+    /// frame at a time, and gives the samples of the masked whole
+    /// spectra, bit for bit.
+    #[test]
+    fn masks_applied_a_frame_at_a_time_give_the_samples_of_whole_spectra() {
+        let n = HOP * 30;
+        let channels = [0, 1].map(|c| (0..n).map(|i| noise(2 * i + c)).collect::<Vec<f32>>());
+        let (spec, _) = analyse(&channels);
+        let mask: Vec<f32> = (0..spec[0].frames * FEATURES)
+            .map(|k| 2.0 * noise(k + 7))
+            .collect();
+        let want = apply_masks_to_clones(&spec, &mask);
+        let got = apply_masks(&spec, &mask);
+        for c in 0..CHANNELS {
+            assert_eq!(got[c].len(), want[c].len(), "channel {c}");
+            for (k, (g, w)) in got[c].iter().zip(&want[c]).enumerate() {
+                assert_eq!(g.to_bits(), w.to_bits(), "channel {c} sample {k}");
+            }
+        }
+    }
 
     /// The bytes of the part `name` in `moment`, or 0 if it has none.
     fn part(moment: &Moment, name: &str) -> usize {
@@ -300,11 +349,11 @@ mod tests {
         assert_eq!(part(masks, "spectra"), 18_876_400);
         assert_eq!(part(masks, "five stems"), 0, "cut 1");
         assert_eq!(part(masks, "mask"), 18_876_400);
-        assert_eq!(part(masks, "masked spectrum"), 9_438_200);
+        assert_eq!(part(masks, "masked spectrum"), 0, "cut 2");
         assert_eq!(part(masks, "inverse STFT sums"), 4_726_784);
         assert_eq!(part(masks, "stem output, channel 0"), 2_355_200);
         assert_eq!(part(masks, "stem output, channel 1"), 2_355_200);
-        assert_eq!(w.masks.bytes(), 94_311_384);
+        assert_eq!(w.masks.bytes(), 84_873_184);
         assert_eq!(part(&w.masks.moments[1], "one stem"), 4_710_400);
 
         let between = w.between.largest();
