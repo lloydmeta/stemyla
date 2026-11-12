@@ -2562,8 +2562,10 @@ mod tests {
     /// longest measured run of those steps.  In `browser-tests`, they took
     /// 10.5, 15.3 and 19.7 minutes (runs 42777211457, 40894815433 and
     /// 42952206488).  In `macos`, they took 37.0 minutes in run
-    /// 42952206488, with no cache.
-    const OTHER_STEPS_MINUTES: [(&str, u64); 2] = [("browser-tests", 20), ("macos", 40)];
+    /// 42952206488, with no cache.  Its two `web-test` steps now run up to
+    /// 3 times (TD-98), 75 and 45 minutes at most, in place of the 14.2
+    /// and about 1 measured: 141.8 minutes at most.
+    const OTHER_STEPS_MINUTES: [(&str, u64); 2] = [("browser-tests", 20), ("macos", 145)];
 
     /// A job of a workflow with `e2e save` steps: its key, its
     /// `timeout-minutes`, and the limits of its save steps.
@@ -2703,9 +2705,9 @@ mod tests {
                 .is_some_and(|p| p.starts_with("job macos: ")),
             "{problem:?}"
         );
-        assert!(job_limit_problem(&the_job("macos", &limit(159), &[60, 60])).is_some());
+        assert!(job_limit_problem(&the_job("macos", &limit(264), &[60, 60])).is_some());
         assert_eq!(
-            job_limit_problem(&the_job("macos", &limit(160), &[60, 60])),
+            job_limit_problem(&the_job("macos", &limit(265), &[60, 60])),
             None
         );
         assert!(job_limit_problem(&the_job("browser-tests", &limit(79), &[60])).is_some());

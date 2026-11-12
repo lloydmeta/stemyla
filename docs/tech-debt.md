@@ -504,6 +504,20 @@ This entry concerns VERIFY-1.  The causes are outside the repo (step 9 of `plans
 * A hidden test page: on 2026-11-11, 2 Safari 27.2 runs of `app --lib` stopped with no failure, while a person used the Mac.  One stopped after 182 tests, in `playback_tests::the_page_reads_a_lane_one_block_at_a_time`.  The other stopped after 82 tests, in `save_tests::a_stopped_worker_leaves_no_save_files_and_takes_no_encode`.  Safari's unified log shows the cause.  Before each stop, the test page became hidden ("view visibility state changed 1 -> 0"), and stayed hidden.  WebKit then gave its process a background assertion only, and later tried to suspend it.  In the second run, a click in the automation window showed the "Automation Interruption" alert.  The runner's limit of 600 s ended the first run.  One run passed with the page hidden at times, so a hidden page does not always stop a run.  The logs are in `m2/i1-3/` (intent review I1-3 of M2).  Fix: none in the repo.  Do not use the Mac during a Safari run.
 * WebKit bug 246069 ([Use AbortSignal.reason in Fetch code](https://bugs.webkit.org/show_bug.cgi?id=246069), NEW on 2026-11-11): Safari 27.2 rejects an aborted fetch with its own `AbortError`.  The worker gives the abort reason in its place (`download_to_opfs` in `worker/src/web.rs`).  Fix: remove the workaround when WebKit gives the reason.
 
+### TD-98: CI retries the `web-test` steps of the macOS job
+
+This entry concerns VERIFY-1.  It is a workaround: a retried test can hide a failure that comes and goes.
+
+* The cause: on the `macos-latest` runner, `wasm-bindgen-test-runner` sometimes waits its 600 s limit for a test page that never reports.  It then prints "Failed to detect test as having been run.  It might have timed out."  On 2026-11-12 this failed 4 runs on branch `gpu-speed/2026-11-12`, in crates and tests that the branch did not change, and that passed on the maintainer's Mac:
+  * run 43152005940, Safari, `app` `web_close`;
+  * run 43223719719, Safari, `engine --lib` (a WebDriver `execute/sync` request failed);
+  * run 43229036261, Safari, `app` `web_output`;
+  * its rerun, Chrome, `stem-worker` `a_real_aac_decodes_to_the_source` (10 min to the timeout; 1.38 s on the Mac).
+* Of 21 runs of the Safari `web-test` step on 2026-11-11 and 2026-11-12, 3 failed.
+* The workaround: `.github/workflows/ci.yml` runs the Safari `web-test` and the Chrome AAC step through `nick-fields/retry` v4.0.0, pinned by its SHA.  Each step runs up to 3 times, with `warning_on_retry`, so each retry shows in the run's warnings.  At a failure rate of 14 % to 30 % for each attempt, 3 attempts leave 0.3 % to 2.7 %.  The job's limit grew from 180 to 285 minutes for the attempts.
+* Who looks: a person who sees a retry warning on a step that the branch changed treats it as a failure.
+* Fix: find why the test page does not report on the runner, then remove the retry.  `web-test` could also retry only the crate whose runner prints that text, in place of the whole step.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
