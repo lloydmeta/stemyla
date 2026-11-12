@@ -1201,8 +1201,15 @@ async fn separate_mix<N: Network>(
 /// The network that separates one chunk at a time: the GPU's in a real
 /// separation, a fake one in the tests.
 trait Network {
-    /// The stems of chunk `index`: one stereo pair for each of `STEMS`.
-    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String>;
+    /// Separates chunk `index`, and gives each stem to `each` as it is
+    /// made: its index in `STEMS` and its stereo pair.  Each stem comes
+    /// once.
+    async fn stems(
+        &mut self,
+        index: usize,
+        x: &Stereo,
+        each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String>;
     /// "so far ..." for the log line after each chunk.
     fn so_far(&self) -> String;
     /// Logs a summary after the song.
@@ -1221,17 +1228,25 @@ trait GpuHalf {
 }
 
 /// The CPU half of one chunk: the STFT, the upload through `gpu`, then
-/// each stem's mask applied to the spectra and inverted.
-async fn chunk_stems(gpu: &mut impl GpuHalf, x: &Stereo) -> Result<Vec<Stereo>, String> {
+/// each stem's mask applied to the spectra and inverted.  Each stem goes
+/// to `each` as it is made, so the worker holds one stem at a time.
+async fn chunk_stems(
+    gpu: &mut impl GpuHalf,
+    x: &Stereo,
+    mut each: impl FnMut(usize, Stereo),
+) -> Result<(), String> {
     let (spec, features) = analyse(x);
     gpu.upload(&features);
     // The GPU holds the input now; the spectra alone make the stems.
     drop(features);
-    let mut out = Vec::with_capacity(STEMS.len());
     for stem in 0..STEMS.len() {
-        out.push(apply_masks(&spec, &gpu.mask(stem).await?));
+        let mask = gpu.mask(stem).await?;
+        let stereo = apply_masks(&spec, &mask);
+        // The mask drops before the stem goes on.
+        drop(mask);
+        each(stem, stereo);
     }
-    Ok(out)
+    Ok(())
 }
 
 /// BS-RoFormer SW on the GPU, one paced step at a time.
@@ -1297,10 +1312,15 @@ impl GpuHalf for GpuNetwork<'_> {
 }
 
 impl Network for GpuNetwork<'_> {
-    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+    async fn stems(
+        &mut self,
+        index: usize,
+        x: &Stereo,
+        each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String> {
         self.index = index;
         self.started = now_s();
-        chunk_stems(self, x).await
+        chunk_stems(self, x, each).await
     }
 
     fn so_far(&self) -> String {
@@ -1430,9 +1450,11 @@ async fn separate_chunks<S: MixSource<Error: Display>>(
     });
     while let Some(x) = d.next_input().map_err(|e| Stop::Storage(e.to_string()))? {
         let tc = now_s();
-        let out = net.stems(d.chunk_index(), &x).await.map_err(Stop::Failed)?;
-        d.accept(&out);
-        drop(out);
+        let index = d.chunk_index();
+        net.stems(index, &x, |stem, stereo| d.accept_stem(stem, &stereo))
+            .await
+            .map_err(Stop::Failed)?;
+        d.end_chunk();
         if let Some(seg) = d.take_ready() {
             emit(seg, song_len, writer.as_deref_mut()).await?;
         }

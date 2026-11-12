@@ -178,31 +178,32 @@ pub fn working_set(chunk: usize, overlap: usize) -> WorkingSet {
     };
     let masks = Phase {
         name: "masks",
-        moments: vec![moment(
-            "the end of the last stem's inverse STFT of channel 1",
-            &[
-                chunk_input,
-                spectra,
-                part("five stems", (stems - 1) * CHANNELS * stem_channel),
-                part("mask", frames * FEATURES * F32),
-                part("masked spectrum", frames * BINS * COMPLEX),
-                part("inverse STFT sums", 2 * (N_FFT + HOP * (frames - 1)) * F32),
-                part("stem output, channel 0", stem_channel),
-                part("stem output, channel 1", stem_channel),
-            ],
-        )],
+        moments: vec![
+            moment(
+                "a stem's inverse STFT of channel 1",
+                &[
+                    chunk_input,
+                    spectra,
+                    part("mask", frames * FEATURES * F32),
+                    part("masked spectrum", frames * BINS * COMPLEX),
+                    part("inverse STFT sums", 2 * (N_FFT + HOP * (frames - 1)) * F32),
+                    part("stem output, channel 0", stem_channel),
+                    part("stem output, channel 1", stem_channel),
+                ],
+            ),
+            moment(
+                "the demixer's `accept_stem`",
+                &[
+                    chunk_input,
+                    spectra,
+                    part("one stem", CHANNELS * stem_channel),
+                ],
+            ),
+        ],
     };
     let between = Phase {
         name: "between",
         moments: vec![
-            moment(
-                "the demixer's `accept`",
-                &[
-                    chunk_input,
-                    part("six stems", stems * CHANNELS * stem_channel),
-                    part("window clone", chunk * F32),
-                ],
-            ),
             moment(
                 "the emit of the segment (`StemWriter::put`)",
                 &[
@@ -297,27 +298,27 @@ mod tests {
         let masks = w.masks.largest();
         assert_eq!(part(masks, "chunk input"), 4_710_400);
         assert_eq!(part(masks, "spectra"), 18_876_400);
-        assert_eq!(part(masks, "five stems"), 23_552_000);
+        assert_eq!(part(masks, "five stems"), 0, "cut 1");
         assert_eq!(part(masks, "mask"), 18_876_400);
         assert_eq!(part(masks, "masked spectrum"), 9_438_200);
         assert_eq!(part(masks, "inverse STFT sums"), 4_726_784);
         assert_eq!(part(masks, "stem output, channel 0"), 2_355_200);
         assert_eq!(part(masks, "stem output, channel 1"), 2_355_200);
-        assert_eq!(w.masks.bytes(), 117_863_384);
+        assert_eq!(w.masks.bytes(), 94_311_384);
+        assert_eq!(part(&w.masks.moments[1], "one stem"), 4_710_400);
 
         let between = w.between.largest();
         assert_eq!(part(between, "chunk input"), 4_710_400);
-        assert_eq!(part(between, "six stems"), 28_262_400);
-        assert_eq!(part(between, "window clone"), 2_355_200);
-        assert_eq!(w.between.bytes(), 68_300_800);
-        let emit = &w.between.moments[1];
-        assert_eq!(part(emit, "segment"), 14_131_200);
-        assert_eq!(part(emit, "PCM bytes"), 1_177_600);
-        let read = &w.between.moments[2];
+        assert_eq!(part(between, "six stems"), 0, "cut 1");
+        assert_eq!(part(between, "window clone"), 0, "cut 1");
+        assert_eq!(part(between, "segment"), 14_131_200);
+        assert_eq!(part(between, "PCM bytes"), 1_177_600);
+        assert_eq!(w.between.bytes(), 52_992_000);
+        let read = &w.between.moments[1];
         assert_eq!(part(read, "bytes of the span"), 4_710_400);
         assert_eq!(part(read, "span"), 4_710_400);
 
-        assert_eq!(w.peak().name, "masks");
+        assert_eq!(w.peak().name, "upload");
     }
 
     /// The sizes follow the chunk: a quarter of the default chunk at
@@ -330,7 +331,7 @@ mod tests {
         let upload = w.upload.largest();
         assert_eq!(part(upload, "chunk input"), 2 * chunk * 4);
         assert_eq!(part(upload, "spectra"), 2 * frames * BINS * 8);
-        let emit = &w.between.moments[1];
+        let emit = &w.between.moments[0];
         assert_eq!(part(emit, "segment"), STEMS.len() * 2 * (chunk / 4) * 4);
     }
 }

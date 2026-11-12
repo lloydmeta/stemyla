@@ -2731,11 +2731,19 @@ struct FakeNetwork {
 }
 
 impl Network for FakeNetwork {
-    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+    async fn stems(
+        &mut self,
+        index: usize,
+        x: &Stereo,
+        mut each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String> {
         if self.fail_at == Some(index) {
             return Err(format!("the fake network failed at chunk {index}"));
         }
-        Ok(fake_stems_of(x))
+        for (stem, stereo) in fake_stems_of(x).into_iter().enumerate() {
+            each(stem, stereo);
+        }
+        Ok(())
     }
 
     fn so_far(&self) -> String {
@@ -3241,12 +3249,17 @@ impl GpuHalf for FakeGpu {
 }
 
 impl Network for FakeGpu {
-    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+    async fn stems(
+        &mut self,
+        index: usize,
+        x: &Stereo,
+        each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String> {
         let peak = close_phase();
         if index > 0 {
             self.peaks.borrow_mut().between.push(peak);
         }
-        let out = chunk_stems(self, x).await;
+        let out = chunk_stems(self, x, each).await;
         let peak = close_phase();
         self.peaks.borrow_mut().masks.push(peak);
         out
@@ -3545,7 +3558,12 @@ struct RewritingNetwork {
 }
 
 impl Network for RewritingNetwork {
-    async fn stems(&mut self, _index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+    async fn stems(
+        &mut self,
+        _index: usize,
+        x: &Stereo,
+        mut each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String> {
         self.calls += 1;
         if self.calls == self.last {
             // Over a second, so that Safari's `lastModified`, in whole
@@ -3554,7 +3572,10 @@ impl Network for RewritingNetwork {
             let other: Stereo = fake_mix().map(|c| c.iter().map(|v| 0.5 * v).collect());
             plant_at(MIX_PATH, &mix_file(&other)).await;
         }
-        Ok(fake_stems_of(x))
+        for (stem, stereo) in fake_stems_of(x).into_iter().enumerate() {
+            each(stem, stereo);
+        }
+        Ok(())
     }
 
     fn so_far(&self) -> String {
