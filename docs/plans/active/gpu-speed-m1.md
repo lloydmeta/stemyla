@@ -202,7 +202,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * [x] Step 3: the mask applies one frame at a time (2026-11-12).  First failure: `frames_from_a_function_give_the_inverse_of_the_whole_spectrum` at `assert_eq!(asked, (0..s.frames).collect::<Vec<_>>(), "each frame once, in order")` (left `[]`), with a stub of `istft_frames` that gave zeros.  After the function's change, `a_chunk_of_the_default_length_holds_its_working_set` failed at `tests.rs:3360` ("the masks phase of chunk 2 holds 94348666 bytes, and the function gives 84873184").  After the cut it passed, and `stored-stems --hashes` passed in Chrome.
 * [x] Step 4: `set_input` writes one band at a time (2026-11-12).  First failure: `bands_normalised_one_at_a_time_equal_the_whole_input` at `assert_eq!(g.to_bits(), w.to_bits(), "float {k}")` ("float 0", left 0, right 3211480212), with a stub of `normalise_band` that gave zeros.  After the function's change, `a_chunk_of_the_default_length_holds_its_working_set` failed at `tests.rs:3360` ("the upload phase of chunk 2 holds 94312610 bytes, and the function gives 77811664").  After the fake called the real `normalise_band` it passed.  `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed on the M2 Pro (Metal), and `stored-stems --hashes` passed in Chrome.
 * [x] Step 5: the chunk input drops after the STFT (2026-11-12).  After the function's change, `a_chunk_of_the_default_length_holds_its_working_set` failed at `tests.rs:3377` ("the upload phase of chunk 2 holds 77812066 bytes, and the function gives 75436000").  After `Network::stems` took `x` by value and the CPU half dropped it after `analyse`, it passed.  The 109 wasm tests of `stem-worker` passed in Chrome, and `stored-stems --hashes` passed in Chrome.
-* [ ] Step 6: the room for M6.
+* [x] Step 6: the room for M6 (2026-11-12).  No larger cut is needed: see the Decision log.
 * [ ] Step 7: the four checks.
 * [ ] Step 8: the headroom.
 * [ ] Step 9: the docs and the debt.
@@ -243,6 +243,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, agent (implementer): `widest_band` is in `roformer`, beside `band_groups`, and `normalise_band` is in `roformer_gpu::net`.  Why: the working-set function (`roformer`) and `Job::set_input` need the same width; the normalisation belongs to the GPU network's input.
 * 2026-11-12, agent (implementer): the TD-11 bullet says that the fake GPU half calls the real normalisation, in Step 4's commit.  Why: DOC-1.
 * 2026-11-12, agent (implementer): Step 5 is done: a small change (`x` by value through `Network::stems`, one `drop`).
+* 2026-11-12, agent (implementer), Step 6: no larger cut.  Figures: after Steps 2 to 5, the function gives the masks phase 80,162,784 bytes (the peak), the upload phase 75,436,000 and the between phase 48,281,600.  M6 adds chunk n + 1's `x`, spectra and features: 4,710,400 + 18,876,400 + 18,876,400 = 42,463,200 bytes.  So M6's phase is about 80.16 + 42.46 = 122.6 MB.  Step 0's tab total, before the cuts, is 837 MB; with M6's 42.5 MB it is 879.5 MB, under `TAB_BUDGET_MB` (943 MB), by 63.5 MB.  Why: the plan's trigger is MEM-4's budget, and the sum is under it with the conservative figure.  Step 8 checks the tab totals again after the cuts.
 
 ## Outcomes and retrospective
 
