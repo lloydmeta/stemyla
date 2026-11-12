@@ -3304,13 +3304,11 @@ impl Network for FakeGpu {
 /// at most 37,420 bytes more than the function gives (the masks phase).
 const SMALL: usize = 128 << 10;
 
-/// MEM-4: one chunk of the default length holds the working set that
-/// `roformer::separate::working_set` gives, phase by phase, on both
-/// sides.  So a phase that holds a buffer that the function does not
-/// name fails, and so does a function that names a buffer that the
-/// phase no longer holds.  It separates a stored mix of 5 chunks at
-/// `CHUNK` and overlap 2 with the real CPU half and a fake GPU half, and
-/// checks chunks 2 and 3, after the warm-up.
+/// MEM-4.  It separates a stored mix of 5 chunks at `CHUNK` and overlap
+/// 2, with the real CPU half and a fake GPU half.  It asserts:
+/// * for each phase of chunks 2 and 3, the peak that it holds is within
+///   `SMALL` of what `roformer::separate::working_set` gives for that
+///   phase, on both sides.
 #[wasm_bindgen_test]
 async fn a_chunk_of_the_default_length_holds_its_working_set() {
     let frames = 3 * CHUNK / OVERLAP;
@@ -3387,12 +3385,12 @@ async fn a_chunk_of_the_default_length_holds_its_working_set() {
     }
 }
 
-/// M1 of `plans/active/gpu-speed.md`: `Demixer::next_input` holds only
-/// the span that it reads and the two channels of the chunk's input, each
-/// of `chunk` floats, also on the last chunks, which pad by reflection or
-/// with zeros.  So a temporary buffer of the unpadded length fails.  The
-/// mix is in memory, so a read is two channels of `min(chunk, frames)`
-/// floats.
+/// M1 of `plans/active/gpu-speed.md`.  The mix is in memory, so a read is
+/// two channels of `min(chunk, frames)` floats.  The cases put the last
+/// chunks on the reflection path and on the zero path.  It asserts:
+/// * the peak that each `Demixer::next_input` holds is the span that it
+///   reads plus the two channels of the chunk's input, each of `chunk`
+///   floats.
 #[wasm_bindgen_test]
 fn a_chunk_input_holds_only_its_span_and_its_two_channels() {
     // (frames, chunk, overlap): padded, with a last chunk of each path;

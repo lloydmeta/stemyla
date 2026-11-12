@@ -169,10 +169,11 @@ mod tests {
             .collect()
     }
 
-    /// Cut 2 of M1 of `plans/active/gpu-speed.md`: an inverse STFT that
-    /// takes each frame from a function gives the samples of the whole
-    /// spectrum's inverse, bit for bit.  The imaginary parts of the DC
-    /// and Nyquist bins are not 0, so the test sees that they are cleared.
+    /// Cut 2 of M1 of `plans/active/gpu-speed.md`.  The imaginary parts
+    /// of the DC and Nyquist bins are not 0.  It asserts:
+    /// * the function is asked for each frame once, in order;
+    /// * the samples equal those of the whole spectrum's inverse, bit for
+    ///   bit.
     #[test]
     fn frames_from_a_function_give_the_inverse_of_the_whole_spectrum() {
         let x: Vec<f32> = (0..HOP * 40)

@@ -395,10 +395,10 @@ fn net_f16_weights_match_f32() {
     }
 }
 
-/// `Job::set_input` writes the band-normalised input to the GPU: the
-/// read-back of `split_in` equals what `normalise_bands` gives with the
-/// model's gains, bit for bit.  The gains are not 1, and the buffer starts
-/// at zero, so a lost or misplaced write fails.
+/// `Job::set_input` writes the band-normalised input to the GPU.  The
+/// model's gains are not 1, and `split_in` starts at zero.  It asserts:
+/// * the read-back of `split_in` equals what `normalise_bands` gives with
+///   the model's gains, bit for bit.
 #[test]
 fn set_input_writes_the_normalised_bands_to_the_gpu() {
     let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
@@ -645,19 +645,17 @@ fn collected_profile_readbacks_are_freed() {
     assert!(errors.is_empty(), "{errors:?}");
 }
 
-/// `Job::shared_steps` lists the band split, every layer and the final
-/// norm.  `Job::steps` is those steps, then each stem's mask steps.  The
-/// two list checks catch a step that `shared_steps` or `steps` drops or
-/// puts in the wrong order.  They build their lists from `layer_steps` and
-/// `mask_steps` too, so they cannot see a step lost inside those.  Then
-/// each input runs on a new `Job`, so no state carries over between the
-/// runs.  The same input gives the same six masks, and a second input
-/// gives other masks.  So an input that does not reach the masks fails, as
-/// with a lost band split.  Two kinds of fault can pass: a step lost inside
-/// `layer_steps` or `mask_steps`, such as `ToTime`, and a step that
-/// `Job::run` runs wrong, such as a lost final norm.  Only
-/// `forward_matches_pytorch` sees those, and it needs fixtures that no
-/// machine has (TD-8).
+/// The steps of the forward pass, and masks that follow the input.  Each
+/// input runs on a new `Job`.  It asserts:
+/// * `Job::shared_steps` equals the band split, then `layer_steps` of each
+///   layer in order, then the final norm;
+/// * `Job::steps` equals `shared_steps`, then `mask_steps` of each stem in
+///   order;
+/// * each run gives six masks, each with finite values;
+/// * the same input gives the same masks;
+/// * a second input gives a different mask for each stem.
+///
+/// TD-8 gives what this test does not check.
 #[test]
 fn the_masks_follow_the_input_through_the_shared_steps() {
     let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());

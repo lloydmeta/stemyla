@@ -985,12 +985,11 @@ mod tests {
         (h % 2001) as f32 / 1000.0 - 1.0
     }
 
-    /// Cut 3 of M1 of `plans/active/gpu-speed.md`: the bands that
-    /// `normalise_bands` writes, put at the offsets that it gives (and
-    /// `Job::set_input` writes to the GPU), equal the normalised input
-    /// made whole, bit for bit.  One frame of one band is all zeros, so the
-    /// floor of the norm is in the test.  The buffer of the widest band
-    /// holds each band.
+    /// Cut 3 of M1 of `plans/active/gpu-speed.md`.  The input has one
+    /// frame of one band that is all zeros.  It asserts:
+    /// * the bands that `normalise_bands` writes, put at the offsets that
+    ///   it gives, equal the normalised input made whole, bit for bit;
+    /// * the widest band written is `widest_band`.
     #[test]
     fn bands_normalised_one_at_a_time_equal_the_whole_input() {
         let t = 37;
