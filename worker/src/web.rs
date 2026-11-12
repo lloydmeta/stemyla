@@ -141,6 +141,12 @@ export async function gpu_info(pref) {
   const i = a.info || {};
   return [i.vendor, i.architecture, i.description].filter((s) => s).join(" ") || "unknown adapter";
 }
+export async function gpu_fallback(pref) {
+  if (!navigator.gpu) return "unknown";
+  const a = await navigator.gpu.requestAdapter({ powerPreference: pref });
+  const f = a && a.info ? a.info.isFallbackAdapter : undefined;
+  return f === true ? "yes" : f === false ? "no" : "unknown";
+}
 export async function blob_bytes(blob) {
   return new Uint8Array(await blob.arrayBuffer());
 }
@@ -234,6 +240,10 @@ extern "C" {
     /// it is fully written.
     async fn cache_put(name: &str, bytes: &JsValue) -> JsValue;
     async fn gpu_info(pref: &str) -> JsValue;
+    /// `"yes"`, `"no"` or `"unknown"`: the adapter's
+    /// `GPUAdapterInfo.isFallbackAdapter`, or `"unknown"` where the browser
+    /// does not give it (GPU-3).
+    async fn gpu_fallback(pref: &str) -> JsValue;
     #[wasm_bindgen(catch)]
     async fn blob_bytes(blob: &JsValue) -> Result<JsValue, JsValue>;
     async fn fetch_bytes(url: &str) -> JsValue;
@@ -344,10 +354,15 @@ pub fn start() {
     send(Reply::Alive);
 }
 
-/// Adapter description and the limits the kernels are written to.
+/// Adapter description, whether it is a fallback adapter (GPU-3), and the
+/// limits the kernels are written to.
 async fn gpu_text(gpu: &Gpu) -> String {
     let pref = STATE.with_borrow(|s| s.power);
     let name = gpu_info(pref).await.as_string().unwrap_or_default();
+    let fallback = gpu_fallback(pref)
+        .await
+        .as_string()
+        .unwrap_or_else(|| "unknown".into());
     let l = gpu.limits();
     let usable: Vec<&str> = roformer_gpu::TILES
         .iter()
@@ -363,7 +378,7 @@ async fn gpu_text(gpu: &Gpu) -> String {
         "not used"
     };
     format!(
-        "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused attention {fused}",
+        "{name}, fallback adapter {fallback}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused attention {fused}",
         l.max_compute_invocations_per_workgroup,
         l.max_compute_workgroup_storage_size / 1024,
         l.max_storage_buffer_binding_size >> 20,

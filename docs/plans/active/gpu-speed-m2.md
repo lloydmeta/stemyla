@@ -164,7 +164,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 
 * [x] Plan review round 1 (2026-11-12): 8 should-fix and 3 nits, each applied.
 * [x] Plan review round 2 (2026-11-12): 2 should-fix (the asked tier; Safari's forced flip is `attn=freq`) and 3 nits, each applied.
-* [ ] Step 1: the worker names the adapter and `isFallbackAdapter`.
+* [x] Step 1: the worker names the adapter and `isFallbackAdapter` (2026-11-12).  No new test: the e2e runs of Step 5 are the evidence (Step 3's parse fails a `model loaded` line with no fallback text).  TD-10 now says what the log gives.
 * [ ] Step 2: profile labels name the axis of attention.
 * [ ] Step 3: the scenario `e2e perf`.
 * [ ] Step 4: the gate in `check --tier push`.

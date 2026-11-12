@@ -30,9 +30,9 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 
 ### TD-10: GPU-3 is not checked
 
-Nothing records which adapter a kernel passed on, and any new `TILES` entry becomes a calibration candidate on every user's GPU.
+Nothing ties a new default kernel to a pass on a named real GPU, and any new `TILES` entry becomes a calibration candidate on every user's GPU.  The worker's `model loaded`, `selftest: GPU` and `bench: GPU` lines name the adapter and its `isFallbackAdapter` value (`gpu_text` in `worker/src/web.rs`).
 
-* Fix: log `isFallbackAdapter` and the adapter name in selftest and e2e results.  Until then, the `gpu-reviewer` agent flags a diff that makes a kernel the default, on each diff that routes it.  It does not confirm the pass on a real GPU.  That evidence is in the PR description, which the agent does not read.
+* Fix: an e2e result that records the adapter and refuses a fallback or SwiftShader adapter as a pass.  Until then, the `gpu-reviewer` agent flags a diff that makes a kernel the default, on each diff that routes it.  It does not confirm the pass on a real GPU.  That evidence is in the PR description, which the agent does not read.
 
 ### TD-11: MEM-4 is asserted only in part
 
