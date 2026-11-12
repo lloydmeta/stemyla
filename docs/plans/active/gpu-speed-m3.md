@@ -181,9 +181,9 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * [x] Step 1 (2026-11-13): the sources.  `m3/sources.md` gives each fact with its file, lines and commit.  The table is in Surprises.
 * [x] Step 2 (2026-11-13): the scratch worktree and its harness, on `scratch/m3-variants` (`9a30c16`, `4cd30a2`, `047fbb8`).  The six matmul variants (with f16) and `attention-u` pass `every_kernel_fits_the_default_limits`, `sources_are_complete` and `workgroup_memory_within_defaults`.  `STEMYLA_REQUIRE=gpu,f16 cargo test --release --test kernels` passes natively (19 tests, `check_kernels_accepts_all` included).  `Gpu::check_kernels` accepted each variant in Safari 27.2 and Chrome 157 (`runs/smoke-*/bench.log`).  `attention-u` matches `attention_cpu` natively (relative error 6.4e-8).
 * [x] Step 3 (2026-11-13): the controls.  The controls are near 1 and `v64` is at 1.44 to 2.37, so the loss is in the code.  The loss falls as K grows: a fixed cost for each workgroup.  The table is in Surprises.
-* [ ] Step 4: matmul variants.
-* [ ] Step 5: the clamp's cost, alone.
-* [ ] Step 6: attention variants.
+* [x] Step 4 (2026-11-13): matmul variants, and `v64-g4` after them (Step 4b).  No variant is faster than `v64` in either browser.  The controls show that Safari sets 10 KiB of workgroup memory to zero 23 times slower.  The table is in Surprises.
+* [x] Step 5 (2026-11-13): the clamp's cost, alone.  Chrome's toggles, and Chrome's MSL for `v64` timed through Metal directly with WebKit's forms put in one at a time.  WebKit's zero-init with its clamps explains Safari's fixed cost for each workgroup; the thread maximum shows no effect.  The table is in Surprises.
+* [x] Step 6 (2026-11-13): attention variants.  `attention-u` is 3.6 times slower than fused in Safari and 1.33 times in Chrome.  Only one variant ran.  The table is in Surprises.
 * [ ] Step 7: the result.
 * [ ] Step 8: the checks before the review round.
 * [ ] Review rounds of the CI commit.
@@ -223,6 +223,64 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
   The ratio falls as K grows.  A least-squares fit of the time for each workgroup (19 cores, shapes with 300 workgroups or more) gives Safari 8.5 us fixed plus 24.5 us for each 256 of K, and Chrome 0.7 us plus 18.2 us.  So Safari has a fixed cost of about 7.8 us for each workgroup, and an inner loop 1.35 times slower.  At K = 256 the fixed cost is 55 % of the gap.
 
+* 2026-11-13, Step 4: one set of `?bench=i64,s64,v64,v64-u,v64-clamp2,v64-bar,v128,v128-u,s64-c&bench_rounds=5` on `freq qkv`, `time qkv` and `freq ff down` (`m3/runs/s4-{safari,chrome}-{1,2}.log`), then one set of `?bench=v64,v64-g4` (`m3/runs/s4b-*.log`).  Ratio: the variant's time over its reference's time in the same page, the range over both pages, shapes and formats.  A star: an effect in each page of that browser.  The full table is in `m3/findings.md`.
+
+  | Kernel (reference) | Ratio in Safari | Ratio in Chrome | Browser ratio, `freq qkv` f16 |
+  | - | - | - | - |
+  | `v64` | | | 1.767, 1.768 |
+  | `v64-u` (`v64`) | 1.49 to 1.73 * | 1.67 to 1.93 * | 1.413, 1.405 |
+  | `v64-clamp2` (`v64`) | 1.034 to 1.055 * | 1.039 to 1.056 * | 1.740, 1.749 |
+  | `v64-bar` (`v64`) | 1.003 to 1.015 | 0.997 to 1.006 | 1.777, 1.782 |
+  | `v128` (`v64`) | 1.30 to 1.59 * | 1.71 to 1.86 * | 1.290, 1.283 |
+  | `v128-u` (`v128`) | 1.50 to 1.58 * | 1.90 to 2.08 * | 1.030, 1.034 |
+  | `s64-c` (`s64`) | 0.115 to 0.152 * | 0.996 to 1.009 | 1.491, 1.481 |
+  | `i64` (`v64`) | 1.25 to 1.58 * | 1.44 to 1.50 * | 1.498, 1.494 |
+  | `v64-g4` (`v64`), K 256 | 1.014 to 1.033 | 1.196 to 1.225 | 1.496, 1.504 |
+
+  | Control (start of the page) | Safari 1, 2 | Chrome 1, 2 | Ratio |
+  | - | - | - | - |
+  | `fma`, GFLOP/s | 6,108, 6,131 | 6,432, 6,450 | 1.053, 1.052 |
+  | `fma64`, GFLOP/s | 5,807, 5,828 | 6,099, 6,104 | 1.050, 1.047 |
+  | `wg10k`, us for 2,064 workgroups | 408.0, 410.2 | 17.9, 17.8 | 22.8, 23.0 |
+  | `wg0`, us for 2,064 workgroups | 11.0, 11.0 | 6.3, 6.3 | 1.75, 1.75 |
+
+  The reading.  The zero-init of 10 KiB costs Safari 0.19 us of GPU time for each workgroup, so at most 0.39 ms of the 1.53 ms that Safari loses on each `v64` dispatch of `freq qkv` (25 %).  One clamp on each workgroup read costs about 5 % in both browsers.  `v64` has it only in Safari, since Chrome's range analysis removes it (`m3/v64-chrome.msl`).  Barriers, `unpack2x16float` (f16 / f32 0.96 to 1.06 in both) and 64 live values (`fma64`) show no effect.  The unrolled form and the 8 x 8 tile are slower in both browsers.  `s64`'s loss in Safari is its loop-indexed private array: `s64-c` with constant indices runs at `i64`'s rate.  `v64-g4` lowers the browser ratio to 1.50 at K 256 but costs Chrome 20 %, so it is not a design for M4.  In Safari 2, one round of `time qkv` was slow for every kernel (spreads to 126 %); the medians of 5 do not change.  Each Step 4 page logged "the bench finishes: FAIL": `bench::summary` panicked after the timings, on the shorter list of shapes (fixed on the scratch branch in `cc6cf54`).
+
+* 2026-11-13, Step 5: the cost of what each compiler adds.  The full tables are in `m3/findings.md`.
+
+  5.1, Chrome's toggles, pages in turns twice (`m3/runs/s5{def,rob,wgi,rng}-chrome-{1,2}.log`).  The time ratio to the default page, divided by each page's FMA control, for `v64`, `s64` and `s64-c` on `freq qkv`, `time qkv` and `freq ff down`:
+
+  | Toggle | `v64` | `s64`, `s64-c` |
+  | - | - | - |
+  | `disable_robustness` | 0.95 to 0.99 | 0.94 to 0.99 |
+  | `disable_workgroup_init` | 0.99 to 1.00 | 0.99 to 1.005 |
+  | range analysis off (`--disable-dawn-features=enable_integer_range_analysis_in_robustness`) | 1.01 to 1.03 | 1.09 to 1.14 * |
+
+  All clamps together cost Chrome 3 % to 5 % (no effect by the rule).  Chrome's zero-init of 10 KiB costs 9 us for 2,064 workgroups (`wg10k` 17.8 us, 8.7 us with it off).  With each clamp kept, as in Safari, `s64` is 11 % slower in Chrome, not 10 times: the clamp on a private array does not by itself put the array in memory.
+
+  5.2, Metal directly.  Chrome's MSL for `v64` (`m3/v64-chrome.msl`, from `dump_shaders`; Chrome writes it to its log file with `--enable-logging --log-file=<file>`) was compiled and timed through Metal (`m3/native/bench.swift`; logs `m3/runs/s5native-{1,2}.log`).  WebKit's forms were put in one at a time: no thread maximum, WebKit's zero-init (thread 0, byte by byte), and a clamp on each workgroup read.  The time ratio to Chrome's MSL, M 5,456, medians of 7, spreads 0.1 % to 0.9 %:
+
+  | Form | N 1,536, K 256 | N 256, K 1,024 | N 1,536, K 1,024 |
+  | - | - | - | - |
+  | Chrome's MSL | 1.948 ms | 1.282 ms | 7.294 ms |
+  | no thread maximum | 1.000 | 1.001 | 1.000 |
+  | WebKit's zero-init | 1.290 | 1.048 | 1.040 |
+  | clamps | 1.020 | 1.018 | 1.019 |
+  | zero-init and clamps | 1.491 | 1.133 | 1.131 |
+  | all three | 1.491 | 1.134 | 1.135 |
+
+  The thread maximum shows no effect.  WebKit's zero-init with the clamps adds 0.96 ms for 2,064 workgroups at each K: a fixed cost for each workgroup, near Step 3's fit for Safari (0.85 ms).  At K 256 this is 0.49 of the 0.76 by which Safari's ratio is over 1 (64 %), and at K 1,024 (`freq ff down`) 0.13 of 0.45 (29 %).  The rest is a K loop 1.35 times slower in Safari, which none of these forms gives: natively each form takes 5.35 ms for each 768 of K.
+
+* 2026-11-13, Step 6: one set of `?bench=v64&bench_rounds=5` with `attention-u` (`m3/runs/s6-{safari,chrome}-{1,2}.log`).  It passed the check against `attention_cpu` in each page (relative error 6.3e-8).  Time-axis attention, seconds for each chunk, medians of 5:
+
+  | Kernel | Safari 1, 2 | Chrome 1, 2 | Ratio to fused, Safari | Ratio to fused, Chrome | Browser ratio |
+  | - | - | - | - | - | - |
+  | split | 3.522, 3.534 | 1.852, 1.855 | 1.014, 1.018 | 0.808, 0.812 | 1.902, 1.905 |
+  | fused | 3.472, 3.472 | 2.291, 2.284 | 1 | 1 | 1.516, 1.520 |
+  | `attention-u` | 12.524, 12.415 | 3.024, 3.042 | 3.607, 3.576 | 1.320, 1.332 | 4.141, 4.081 |
+
+  The unrolled form is slower in both browsers, as in Step 4.  The fixed cost of Step 5 is about 2 % of a fused dispatch in Safari (576 workgroups, each over 1,151 keys), so fused attention's loss is the slower inner loop.
+
 ## Decision log
 
 * 2026-11-13, agent (team leader): the variants live on a local scratch branch in a scratch worktree, and a patch of them goes to `m3/variants/`.  Why: M3 only measures, and M4 and M5 add their kernels with tests.
@@ -236,6 +294,10 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * 2026-11-13, agent (implementer), Step 2: `v128-u` is timed in the set of Step 4, and its figure is read only if `v64-u` shows an effect.  Why: a second set costs more than one more kernel in the first set.
 * 2026-11-13, agent (implementer), Step 2: on the scratch branch, calibration chooses only among the four kernels of `main`, so split attention uses the same matmul as on `main`.  A build with `M3_SHAPES` set times only the shapes that it names.
 * 2026-11-13, agent (implementer), Step 2: `attention-u` is built now: fused attention with each loop over `kk` and `k` unrolled, so each read of `buf` and `red` there is a loop-invariant base plus a constant.  Step 6 times it only if Step 4 supports the unrolled form.
+* 2026-11-13, agent (implementer), Step 4: `v64-g4` is added after the set of Step 4, in a set of its own.  Why: Step 3's fit and the `wg10k` control show a fixed cost for each workgroup in Safari, and a kernel that sets its memory to zero once for 4 tiles tests that cost in a real kernel.
+* 2026-11-13, agent (implementer), Step 4: the pages built with `M3_SHAPES` time `freq ff down` (K 1,024) beside `freq qkv` and `time qkv`.  Why: a second K separates a fixed cost for each workgroup from a cost for each K step.
+* 2026-11-13, agent (implementer), Step 5: 5.1 has a third Chrome form, range analysis off, and 5.2 times Chrome's MSL through Metal directly, not wgpu.  Why: range analysis off makes Chrome keep each clamp as Safari does.  Chrome's MSL lets one WebKit form go in at a time, and no wgpu option gives WebKit's zero-init or removes the thread maximum.
+* 2026-11-13, agent (implementer), Step 6: only `attention-u` ran, not a second variant.  Why: no finding of Steps 3 to 5 gives an attention form that removes Safari's loss.  The fixed cost is about 2 % of a fused dispatch.
 
 ## Outcomes and retrospective
 
