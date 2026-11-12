@@ -69,6 +69,13 @@ fn old_session_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("old-session", "old-session", false);
 }
 
+/// Asserts that `e2e perf`, given a model file and no driver, reads the
+/// committed baselines and fails on the driver, not before it.
+#[test]
+fn perf_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("perf", "perf", true);
+}
+
 /// Finding 2-14 of review round 2 of M6: a `smoke` that does nothing
 /// fails this test.
 #[test]

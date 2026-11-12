@@ -25,16 +25,44 @@ pub(super) const MIN_RUNS: usize = 5;
 
 /// The query keys (`stem_protocol::Settings::from_query`) that change the
 /// work of a separation or the kernel choice: the chunk, its overlap, the
-/// GPU step budget, the kernels and the weight format.  The other keys
-/// measure nothing here.  `step_limit` is only a time-out.  `bench`,
-/// `bench_rounds` and `bench_quick` set only `?bench`, which calibration
-/// does not read.  `gpu` picks the adapter, whose text is in the key.
-/// `selftest` and `model_url` do not change a separation.  `profile` is
-/// never gated ([`gate`]).
-const MEASURE_KEYS: [&str; 6] = ["chunk", "overlap", "max_elems", "mm", "attn", "weights"];
+/// GPU step budget, the kernels and the weight format.  `bench` and
+/// `selftest` make the page run a bench or a self-test at the model load,
+/// which comes before the timed separation.  [`NOT_MEASURED`] gives each
+/// other key, with its reason.
+const MEASURE_KEYS: [&str; 8] = [
+    "chunk",
+    "overlap",
+    "max_elems",
+    "mm",
+    "attn",
+    "weights",
+    "bench",
+    "selftest",
+];
 
-/// A small slack for float compares of seconds and percents.
-const EPSILON: f64 = 1e-9;
+/// The query keys of `stem_protocol::Settings::from_query` that do not
+/// change what a run measures, each with the reason.
+/// `each_query_key_is_measured_or_not` keeps the two lists and the
+/// protocol the same.
+#[cfg(test)]
+const NOT_MEASURED: [(&str, &str); 6] = [
+    ("step_limit", "only a time-out for a GPU step"),
+    (
+        "bench_rounds",
+        "the rounds of `?bench`, which `bench` refuses; calibration has its own rounds",
+    ),
+    (
+        "bench_quick",
+        "the warm-up of `?bench`, which `bench` refuses; calibration has its own",
+    ),
+    ("gpu", "picks the adapter, whose text is in the key"),
+    ("model_url", "where Download model fetches the model from"),
+    ("profile", "a profile run is never gated (`gate`)"),
+];
+
+/// A small slack for float compares of seconds and percents.  A power of
+/// two (2^-30), so a test can add it to a value exactly.
+const EPSILON: f64 = 1.0 / 1_073_741_824.0;
 
 /// GPU seconds of a profile run, in four groups, and their total.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -627,20 +655,62 @@ pub(super) fn with_entry(baselines: Vec<Entry>, entry: Entry) -> Vec<Entry> {
     out
 }
 
+/// The bound of an entry: its baseline times (1 + tolerance / 100).
+fn bound_of(e: &Entry) -> f64 {
+    e.baseline * (1.0 + e.tolerance_pct / 100.0)
+}
+
 /// The reason to refuse an update from `old` to `new`, or `None`.  An
-/// update may not raise a baseline above the old baseline times (1 + old
-/// tolerance / 100), unless the browser version differs or `raise` gives
-/// a reason.
+/// update may not raise the bound, the baseline times (1 + tolerance /
+/// 100), unless the browser version differs from the old entry's, or
+/// `raise` gives a reason.  So a wider tolerance is a raise too.
 pub(super) fn update_refusal(old: Option<&Entry>, new: &Entry, raise: &str) -> Option<String> {
     let old = old?;
-    let bound = old.baseline * (1.0 + old.tolerance_pct / 100.0);
-    if new.baseline <= bound + EPSILON || new.version != old.version || !raise.trim().is_empty() {
+    let (old_bound, new_bound) = (bound_of(old), bound_of(new));
+    if new_bound <= old_bound + EPSILON || new.version != old.version || !raise.trim().is_empty() {
         return None;
     }
     Some(format!(
-        "the new baseline {:.2} s is over the old bound {bound:.2} s ({:.2} s + {:.0} %) with the same browser version {}: give --raise \"<reason>\" to raise it",
-        new.baseline, old.baseline, old.tolerance_pct, old.version
+        "the new bound {new_bound:.2} s ({:.2} s + {:.0} %) is over the old bound {old_bound:.2} s ({:.2} s + {:.0} %) with the same browser version {}: give --raise \"<reason>\" to raise it",
+        new.baseline, new.tolerance_pct, old.baseline, old.tolerance_pct, old.version
     ))
+}
+
+/// The line that an update prints: the key, and the old and the new
+/// baseline, tolerance, bound and browser version.
+pub(super) fn update_line(old: Option<&Entry>, new: &Entry) -> String {
+    let figures = |e: &Entry| {
+        format!(
+            "{:.2} s, tolerance {:.0} %, bound {:.2} s, browser {}",
+            e.baseline,
+            e.tolerance_pct,
+            bound_of(e),
+            e.version
+        )
+    };
+    format!(
+        "the baseline of {}: {}, from {} runs (was {})",
+        new.key,
+        figures(new),
+        new.runs.len(),
+        old.map_or("none".to_string(), figures)
+    )
+}
+
+/// The reason to refuse the baselines file at `path` before any run: the
+/// first entry with `entry_problems`.
+pub(super) fn file_refusal(entries: &[Entry], path: &std::path::Path) -> Option<String> {
+    entries.iter().find_map(|e| {
+        let problems = entry_problems(e);
+        (!problems.is_empty()).then(|| {
+            format!(
+                "the entry of {} in {} is not one that --update-baselines writes: {}",
+                e.key,
+                path.display(),
+                problems.join("; ")
+            )
+        })
+    })
 }
 
 #[cfg(test)]
@@ -867,14 +937,15 @@ mod tests {
     /// * `--swiftshader`;
     /// * `--headed` in Chrome;
     /// * f32 weights;
-    /// * a query with `chunk=`, `overlap=`, `max_elems=`, `mm=`, `attn=` or
-    ///   `weights=`;
+    /// * a query with each of `chunk=`, `overlap=`,
+    ///   `max_elems=`, `mm=`, `attn=`, `weights=`, `bench=` and
+    ///   `selftest=`;
     /// * the query `?chunk=16384`, with its `?`.
     ///
     /// Asserts that a run on `apple metal-3`, fallback `no`, f16 weights,
     /// gives no reason with no query, with `x=1`, with each of
-    /// `step_limit=9`, `bench_rounds=1`, `bench_quick=1`, `bench=v64`,
-    /// `gpu=integrated` and `model_url=m`, and in Safari with `--headed`.
+    /// `step_limit=9`, `bench_rounds=1`, `bench_quick=1`, `gpu=integrated`
+    /// and `model_url=m`, and in Safari with `--headed`.
     #[test]
     fn never_a_pass_names_each_reason() {
         let fallback = PerfResult {
@@ -908,7 +979,17 @@ mod tests {
             let reason = reason.unwrap_or_default();
             assert!(reason.contains(text), "{text}: {reason:?}");
         }
-        for key in ["chunk", "overlap", "max_elems", "mm", "attn", "weights"] {
+        let keys = [
+            "chunk",
+            "overlap",
+            "max_elems",
+            "mm",
+            "attn",
+            "weights",
+            "bench",
+            "selftest",
+        ];
+        for key in keys {
             let o = opts(&["--query", &format!("x=1&{key}=2")]);
             let reason = never_a_pass(&sample(), &o).unwrap_or_default();
             assert!(reason.contains(&format!("{key}=")), "{key}: {reason:?}");
@@ -919,7 +1000,6 @@ mod tests {
             "step_limit=9",
             "bench_rounds=1",
             "bench_quick=1",
-            "bench=v64",
             "gpu=integrated",
             "model_url=m",
         ] {
@@ -1136,9 +1216,12 @@ mod tests {
         }
     }
 
-    /// Asserts, with an old baseline of 5.0 s and a tolerance of 10 %:
-    /// * a lower baseline (4.0 s) passes;
-    /// * a baseline of 5.5 s (the bound) passes;
+    /// Asserts, with an old baseline of 5.0 s and a tolerance of 10 % (a
+    /// bound of 5.5 s):
+    /// * a lower baseline (4.0 s, bound 4.4 s) passes;
+    /// * the same baseline and tolerance (the same bound) pass;
+    /// * the same baseline with a tolerance of 20 % (bound 6.0 s) is
+    ///   refused;
     /// * a baseline of 5.6 s is refused, and the reason names `--raise`;
     /// * the same 5.6 s passes with a new browser version, or with a
     ///   reason;
@@ -1148,7 +1231,9 @@ mod tests {
     fn a_raise_over_the_tolerance_needs_a_reason() {
         let old = entry(5.0, 10.0);
         assert_eq!(update_refusal(Some(&old), &entry(4.0, 10.0), ""), None);
-        assert_eq!(update_refusal(Some(&old), &entry(5.5, 10.0), ""), None);
+        assert_eq!(update_refusal(Some(&old), &entry(5.0, 10.0), ""), None);
+        let wider = update_refusal(Some(&old), &entry(5.0, 20.0), "");
+        assert!(wider.is_some(), "a wider tolerance raises the bound");
         let reason = update_refusal(Some(&old), &entry(5.6, 10.0), "").unwrap_or_default();
         assert!(reason.contains("--raise"), "{reason:?}");
         let newer = Entry {
@@ -1170,7 +1255,9 @@ mod tests {
     ///   tolerance of 40 % and 1 run: too few runs, a baseline that is not
     ///   the median of the runs, and a tolerance that is not
     ///   `tolerance_pct` of them;
-    /// * finds 1 in an entry with a tolerance of 9 %.
+    /// * finds 1 in an entry with a tolerance of 9 %;
+    /// * finds none when the baseline is off the median by `EPSILON`, and 1
+    ///   when it is off by 2 x `EPSILON`.
     #[test]
     fn entry_problems_finds_a_hand_edit() {
         let runs: Vec<PerfResult> = [5.0, 5.3, 4.9, 5.1, 5.0]
@@ -1192,6 +1279,16 @@ mod tests {
         let mut low = entry(5.0, 9.0);
         low.raise = String::new();
         assert_eq!(entry_problems(&low).len(), 1, "{:?}", entry_problems(&low));
+        let mut near = entry(4.0, 10.0);
+        near.baseline = 4.0 + EPSILON;
+        assert_eq!(entry_problems(&near), Vec::<String>::new());
+        near.baseline = 4.0 + 2.0 * EPSILON;
+        assert_eq!(
+            entry_problems(&near).len(),
+            1,
+            "{:?}",
+            entry_problems(&near)
+        );
     }
 
     /// Asserts the text of a key: browser, adapter text and chip.
@@ -1300,5 +1397,155 @@ mod tests {
             ..with_quartile(9.0)
         };
         assert_eq!(case(&profiled, None, Some(&base), true, false).0, "note");
+    }
+
+    /// The keys of the `field::X =>` arms of `Settings::from_query` in
+    /// `protocol` (the text of `protocol/src/lib.rs`), resolved through
+    /// its `mod field`, that are in neither `MEASURE_KEYS` nor
+    /// `NOT_MEASURED`.  Also each entry of the two lists that is not a key.
+    fn unlisted_query_keys(protocol: &str) -> Result<Vec<String>, String> {
+        let field = protocol
+            .split_once("mod field {")
+            .and_then(|(_, rest)| rest.split_once("\n}"))
+            .map(|(body, _)| body)
+            .ok_or("no `mod field`")?;
+        let value = |name: &str| {
+            field.lines().find_map(|line| {
+                let rest = line.trim().strip_prefix("pub const ")?;
+                let (n, v) = rest.split_once(": &str = \"")?;
+                (n == name).then(|| v.trim_end_matches("\";").to_string())
+            })
+        };
+        let body = protocol
+            .split_once("pub fn from_query(")
+            .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+            .map(|(body, _)| body)
+            .ok_or("no `from_query`")?;
+        let mut keys = Vec::new();
+        for arm in body.split("field::").skip(1) {
+            let Some((name, _)) = arm.split_once(" =>") else {
+                continue;
+            };
+            keys.push(value(name).ok_or(format!("no `field::{name}`"))?);
+        }
+        if keys.is_empty() {
+            return Err("no `field::X =>` arm".into());
+        }
+        let listed: Vec<&str> = MEASURE_KEYS
+            .iter()
+            .copied()
+            .chain(NOT_MEASURED.iter().map(|(key, _)| *key))
+            .collect();
+        let mut problems: Vec<String> = keys
+            .iter()
+            .filter(|key| !listed.contains(&key.as_str()))
+            .cloned()
+            .collect();
+        problems.extend(
+            listed
+                .iter()
+                .filter(|key| !keys.iter().any(|k| k == *key))
+                .map(|key| format!("{key} (listed, not a key)")),
+        );
+        Ok(problems)
+    }
+
+    /// Asserts:
+    /// * each query key of `Settings::from_query` in
+    ///   `protocol/src/lib.rs` is in `MEASURE_KEYS` or `NOT_MEASURED`, and
+    ///   each listed key is a query key;
+    /// * a protocol text with a key `zzz` in neither list gives `zzz`.
+    #[test]
+    fn each_query_key_is_measured_or_not() {
+        let path = crate::workspace_root().join("protocol/src/lib.rs");
+        let protocol = std::fs::read_to_string(path).unwrap();
+        assert_eq!(unlisted_query_keys(&protocol), Ok(Vec::new()));
+        let more = protocol
+            .replacen(
+                "    pub const WEIGHTS: &str = \"weights\";",
+                "    pub const WEIGHTS: &str = \"weights\";\n    pub const ZZZ: &str = \"zzz\";",
+                1,
+            )
+            .replacen(
+                "                field::PROFILE =>",
+                "                field::ZZZ => {}\n                field::PROFILE =>",
+                1,
+            );
+        assert_eq!(unlisted_query_keys(&more), Ok(vec!["zzz".to_string()]));
+    }
+
+    /// Asserts that the line of an update gives, with an old entry, the
+    /// old and the new baseline, tolerance, bound and browser version, and
+    /// "none" with no old entry.
+    #[test]
+    fn the_update_line_gives_the_old_and_the_new_figures() {
+        let old = entry(5.0, 10.0);
+        let new = Entry {
+            version: "158.0.7100.0".into(),
+            ..entry(5.6, 12.0)
+        };
+        let line = update_line(Some(&old), &new);
+        for part in [
+            "chrome, apple metal-3, Apple M2 Pro",
+            "5.60 s",
+            "12 %",
+            "bound 6.27 s",
+            "158.0.7100.0",
+            "5.00 s",
+            "10 %",
+            "bound 5.50 s",
+            "157.0.7000.0",
+        ] {
+            assert!(line.contains(part), "{part}: {line}");
+        }
+        let first = update_line(None, &new);
+        assert!(first.contains("was none"), "{first}");
+    }
+
+    /// Asserts that `file_refusal`:
+    /// * refuses a file with one entry of 1 run, and names its key, the
+    ///   path and the problem;
+    /// * refuses nothing in the committed file.
+    #[test]
+    fn a_hand_edited_file_is_refused_before_any_run() {
+        let mut bad = entry(5.0, 10.0);
+        bad.runs.truncate(1);
+        let path = std::path::Path::new("xtask/perf-baselines.json");
+        let refusal = file_refusal(&[entry(4.0, 10.0), bad], path).unwrap_or_default();
+        for part in [
+            "chrome, apple metal-3, Apple M2 Pro",
+            "xtask/perf-baselines.json",
+            "1 runs",
+        ] {
+            assert!(refusal.contains(part), "{part}: {refusal:?}");
+        }
+        let text = std::fs::read_to_string(baselines_path()).unwrap();
+        let entries = read_baselines(&text).unwrap_or_default();
+        assert_eq!(file_refusal(&entries, &baselines_path()), None);
+    }
+
+    /// Asserts, for a log of two loads and a chunk line of an earlier run:
+    /// * the adapter, fallback value, kernels and weight format come from
+    ///   the last `model loaded` and `kernels:` lines;
+    /// * a `chunk 1/3` line before the run's `chunk k/4` lines is left out.
+    #[test]
+    fn the_last_load_and_the_run_s_own_chunks_count() {
+        let at = "[0.5s] console.info: [app] app/src/lib.rs:4329: separator: ";
+        let mut log = vec![
+            format!("{at}kernels: matmul i64,i64, attention split (stored; f32 weights)"),
+            format!(
+                "{at}model loaded in 9.0 s, saved in browser storage (old gpu, fallback adapter unknown; own WGSL kernels)"
+            ),
+            format!("{at}chunk 1/3: 9.9 s; so far 1 GPU steps"),
+        ];
+        log.extend(log_of(&[5.3, 4.7, 4.6, 4.8]));
+        let r = result_of(&log);
+        assert!(r.is_ok(), "{r:?}");
+        let r = r.unwrap();
+        assert_eq!(r.adapter, "apple metal-3");
+        assert_eq!(r.fallback, "no");
+        assert_eq!(r.kernels, "matmul v64,v64, attention freq");
+        assert_eq!(r.weights, "f16");
+        assert_eq!(r.chunks, [5.3, 4.7, 4.6, 4.8]);
     }
 }

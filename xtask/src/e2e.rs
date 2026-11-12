@@ -86,11 +86,12 @@
 //!   it is not gated; `--gate` makes that a failure.  A profile run is
 //!   never gated, also with `--gate`.  A fallback or SwiftShader adapter,
 //!   `--swiftshader`, `--headed` in Chrome, f32 weights, or a query that
-//!   sets `chunk`, `overlap`, `max_elems`, `mm`, `attn` or `weights` is
+//!   sets `chunk`, `overlap`, `max_elems`, `mm`, `attn`, `weights`, `bench`
+//!   or `selftest` is
 //!   never a pass: `--gate` and `--update-baselines` fail it.
 //!   `--update-baselines` with `--runs 5` or more writes the key's
 //!   baseline.  In an update, a run over the old bound gives a note, and
-//!   `update_refusal` decides: it refuses a raise over the old tolerance
+//!   `update_refusal` decides: it refuses a raise of the bound
 //!   with the same browser version, unless `--raise "<reason>"` gives the
 //!   reason.
 //!
@@ -173,7 +174,7 @@ pub struct Opts {
     pub gate: bool,
     /// `perf`: the runs write the baseline of their key.
     pub update_baselines: bool,
-    /// `perf`: the reason of a raise over the old tolerance.
+    /// `perf`: the reason of a raise of the bound.
     pub raise: Option<String>,
     pub play_x: f64,
     pub tempo_x: f64,
@@ -2064,16 +2065,8 @@ fn perf(o: &Opts) -> Result<()> {
     let path = perf::baselines_path();
     let baselines =
         perf::read_baselines(&std::fs::read_to_string(&path)?).map_err(anyhow::Error::msg)?;
-    for e in &baselines {
-        let problems = perf::entry_problems(e);
-        if !problems.is_empty() {
-            bail!(
-                "perf: the entry of {} in {} is not one that --update-baselines writes: {}",
-                e.key,
-                path.display(),
-                problems.join("; ")
-            );
-        }
+    if let Some(refusal) = perf::file_refusal(&baselines, &path) {
+        bail!("perf: {refusal}");
     }
     let mut mounts = vec![("/test/1/".to_string(), long_song(&o.out, 1)?)];
     let model = weights_mount(o, &mut mounts)?;
@@ -2150,17 +2143,7 @@ fn perf(o: &Opts) -> Result<()> {
         if let Some(refusal) = perf::update_refusal(old, &entry, raise) {
             bail!("perf: the update is refused: {refusal}");
         }
-        println!(
-            "perf: the baseline of {}: {:.2} s, tolerance {:.0} %, from {} runs (was {})",
-            entry.key,
-            entry.baseline,
-            entry.tolerance_pct,
-            entry.runs.len(),
-            old.map_or("none".to_string(), |e| format!(
-                "{:.2} s, tolerance {:.0} %",
-                e.baseline, e.tolerance_pct
-            ))
-        );
+        println!("perf: {}", perf::update_line(old, &entry));
         std::fs::write(
             &path,
             perf::write_baselines(&perf::with_entry(baselines, entry)),
