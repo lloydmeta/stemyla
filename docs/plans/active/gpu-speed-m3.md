@@ -184,7 +184,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * [x] Step 4 (2026-11-13): matmul variants, and `v64-g4` after them (Step 4b).  No variant is faster than `v64` in either browser.  The controls show that Safari sets 10 KiB of workgroup memory to zero 23 times slower.  The table is in Surprises.
 * [x] Step 5 (2026-11-13): the clamp's cost, alone.  Chrome's toggles, and Chrome's MSL for `v64` timed through Metal directly with WebKit's forms put in one at a time.  WebKit's zero-init with its clamps explains Safari's fixed cost for each workgroup; the thread maximum shows no effect.  The table is in Surprises.
 * [x] Step 6 (2026-11-13): attention variants.  `attention-u` is 3.6 times slower than fused in Safari and 1.33 times in Chrome.  Only one variant ran.  The table is in Surprises.
-* [ ] Step 7: the result.
+* [x] Step 7 (2026-11-13): the result.  `m3/findings.md` (each table, each log, the explanation, each candidate, the design), `m3/parent-m3.diff` (`git apply --check` passes on `7f5dba6`, and `docs-check` passes with it applied), the `browser-quirks.md` entry (`7f5dba6`), `m3/webkit-bug.md`, and `m3/variants/` (5 patches from `scratch/m3-variants`).  The worktree and the scratch branch are removed.  No variant is kept as code.
 * [ ] Step 8: the checks before the review round.
 * [ ] Review rounds of the CI commit.
 
@@ -281,6 +281,8 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 
   The unrolled form is slower in both browsers, as in Step 4.  The fixed cost of Step 5 is about 2 % of a fused dispatch in Safari (576 workgroups, each over 1,151 keys), so fused attention's loss is the slower inner loop.
 
+* 2026-11-13, Step 7: the best-supported explanation (`m3/findings.md`, Step 7).  Safari's loss on `v64` has two parts.  First, a fixed cost for each workgroup: WebKit sets workgroup memory to zero with thread 0, byte by byte, and with WebKit's clamps this makes Chrome's MSL 1.49 times slower at K 256 (Step 5.2).  It is 64 % of `v64`'s loss at K 256 and 29 % at K 1,024, and about 2 % of fused attention's.  Second, a K loop about 1.35 times slower, whose cause is not found: it is the rest, and most of fused attention's loss of 1.52.  A dump of Safari's own MSL would settle the second part.  WebKit's toggle for it is `com.apple.WebKit.WebGPU.TogglePrintMetalCode`, but where the GPU process writes it is not confirmed, so M3 did not try it.
+
 ## Decision log
 
 * 2026-11-13, agent (team leader): the variants live on a local scratch branch in a scratch worktree, and a patch of them goes to `m3/variants/`.  Why: M3 only measures, and M4 and M5 add their kernels with tests.
@@ -298,6 +300,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * 2026-11-13, agent (implementer), Step 4: the pages built with `M3_SHAPES` time `freq ff down` (K 1,024) beside `freq qkv` and `time qkv`.  Why: a second K separates a fixed cost for each workgroup from a cost for each K step.
 * 2026-11-13, agent (implementer), Step 5: 5.1 has a third Chrome form, range analysis off, and 5.2 times Chrome's MSL through Metal directly, not wgpu.  Why: range analysis off makes Chrome keep each clamp as Safari does.  Chrome's MSL lets one WebKit form go in at a time, and no wgpu option gives WebKit's zero-init or removes the thread maximum.
 * 2026-11-13, agent (implementer), Step 6: only `attention-u` ran, not a second variant.  Why: no finding of Steps 3 to 5 gives an attention form that removes Safari's loss.  The fixed cost is about 2 % of a fused dispatch.
+* 2026-11-13, agent (implementer), Step 7: the cause in WebKit is the zero-init of workgroup memory, so it gets a `browser-quirks.md` entry and `m3/webkit-bug.md`.  The design for M4: `v64`'s tile with fewer bytes of workgroup memory for each unit of work (`v64` with BK 8, and a kernel with no workgroup memory), no 8 x 8 tile, no unrolled loop.  For M5: the fused structure, each query block loaded once, no unrolled loop.  Each choice and its figure is in `m3/findings.md` and `m3/parent-m3.diff`.
 
 ## Outcomes and retrospective
 
