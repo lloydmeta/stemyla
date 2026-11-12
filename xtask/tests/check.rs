@@ -477,7 +477,7 @@ fn the_dry_run_of_tier_push_with_no_origin_main_warns() {
 /// Asserts, with `STEMYLA_PERF_WEIGHTS` set to a path with a space:
 /// * the dry run of tier `push`, with no path known, prints the run line
 ///   of the perf gate in Chrome, then in Safari, right after the Trunk
-///   line, each with the path;
+///   line, each with the path in single quotes;
 /// * the dry run of tier `commit`, with a strict path in `worker/`, prints
 ///   no line of the perf gate, run or skip.
 #[test]
@@ -502,7 +502,7 @@ fn the_perf_gate_follows_the_variable_and_the_asked_tier() {
     });
     let gate = |browser: &str| {
         format!(
-            "check: run: cargo run -p xtask -- e2e perf --gate --browser {browser} --weights {model} ("
+            "check: run: cargo run -p xtask -- e2e perf --gate --browser {browser} --weights '{model}' ("
         )
     };
     assert_eq!(next.len(), 2, "{push}");

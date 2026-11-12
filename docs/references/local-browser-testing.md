@@ -17,6 +17,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 `cargo run -p xtask -- check --tier push` can run `e2e perf --gate` in Chrome, then in Safari (decision 0031).  It runs them when `STEMYLA_PERF_WEIGHTS` names the model file and the changed paths can change the speed.  Without the variable, it prints a skip line.
 
 * Set `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` for the push check before a review round and before a push, on the M2 Pro whose baselines `xtask/perf-baselines.json` holds.
+* The gate fails a run whose browser gives no `isFallbackAdapter` (`fallback adapter unknown`), with that reason.
 * The gate adds about 3 minutes: one run in each browser (2.8 minutes on 2026-11-12: Chrome 70 s, Safari 99 s).
 * Keep the screen unlocked and do not use the Mac during the Safari run.  A locked screen fails the Safari line at once.
 * A Chrome update can stop the Chrome line until `CHROMEDRIVER` names a driver of the new version.  An old driver may still drive the new Chrome, with a warning.

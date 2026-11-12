@@ -84,8 +84,10 @@
 //!   host's chip (`sysctl`).  A run fails when its chunk lower quartile is
 //!   over the key's baseline by more than the tolerance.  With no baseline,
 //!   it is not gated; `--gate` makes that a failure.  A profile run is
-//!   never gated, also with `--gate`.  A fallback or SwiftShader adapter,
-//!   `--swiftshader`, `--headed` in Chrome, f32 weights, or a query that
+//!   never gated, also with `--gate`.  A fallback adapter value other than
+//!   `no`, a software adapter (SwiftShader, llvmpipe, lavapipe, Basic
+//!   Render), `--swiftshader`, `--headed` in Chrome, f32 weights, or a
+//!   query that
 //!   sets `chunk`, `overlap`, `max_elems`, `mm`, `attn`, `weights`, `bench`
 //!   or `selftest` is
 //!   never a pass: `--gate` and `--update-baselines` fail it.
@@ -2059,7 +2061,11 @@ fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<
 /// run writes `<out>/perf-<browser>-<n>.json` and is gated against the
 /// baseline of its key (`perf.rs`).
 fn perf(o: &Opts) -> Result<()> {
-    if let Some(refusal) = perf::runs_refusal(o.runs, o.update_baselines) {
+    if let Some(refusal) = perf::runs_refusal(
+        o.runs,
+        o.update_baselines,
+        o.query.as_deref().unwrap_or_default(),
+    ) {
         bail!("perf: {refusal}");
     }
     let path = perf::baselines_path();

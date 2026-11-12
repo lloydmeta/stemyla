@@ -60,6 +60,11 @@ const NOT_MEASURED: [(&str, &str); 6] = [
     ("profile", "a profile run is never gated (`gate`)"),
 ];
 
+/// Texts of software adapters, in lower case: SwiftShader (Chrome),
+/// llvmpipe and lavapipe (Mesa), and the Microsoft Basic Render Driver
+/// (WARP).  An adapter text that holds one is never a pass (GPU-3).
+const SOFTWARE_ADAPTERS: [&str; 4] = ["swiftshader", "llvmpipe", "lavapipe", "basic render"];
+
 /// A small slack for float compares of seconds and percents.  A power of
 /// two (2^-30), so a test can add it to a value exactly.
 const EPSILON: f64 = 1.0 / 1_073_741_824.0;
@@ -146,7 +151,7 @@ pub(super) struct Entry {
     /// The median of the runs' chunk lower quartiles, in seconds.
     pub baseline: f64,
     pub tolerance_pct: f64,
-    /// The reason of a raise over the old tolerance, or empty.
+    /// The reason of a raise of the bound (`update_refusal`), or empty.
     pub raise: String,
 }
 
@@ -354,12 +359,19 @@ pub(super) fn profile_groups(log: &[String], frames: usize, bands: usize) -> Opt
 /// The reason that a run can never pass the gate or be a baseline, or
 /// `None`.
 pub(super) fn never_a_pass(result: &PerfResult, o: &Opts) -> Option<String> {
-    if result.fallback == "yes" {
-        return Some("the adapter is a fallback adapter (GPU-3)".into());
-    }
-    if result.adapter.to_lowercase().contains("swiftshader") {
+    if result.fallback != "no" {
         return Some(format!(
-            "the adapter {} is swiftshader, a software adapter (GPU-3)",
+            "the fallback adapter value is {:?}, not \"no\": a fallback adapter, or one that the browser does not name (GPU-3)",
+            result.fallback
+        ));
+    }
+    let adapter = result.adapter.to_lowercase();
+    if let Some(name) = SOFTWARE_ADAPTERS
+        .iter()
+        .find(|name| adapter.contains(*name))
+    {
+        return Some(format!(
+            "the adapter {} is {name}, a software adapter (GPU-3)",
             result.adapter
         ));
     }
@@ -556,8 +568,19 @@ pub(super) fn entry_of<'a>(baselines: &'a [Entry], key: &Key) -> Option<&'a Entr
     baselines.iter().find(|e| e.key == *key)
 }
 
-/// The reason to refuse `--runs` before any run, or `None`.
-pub(super) fn runs_refusal(runs: usize, update: bool) -> Option<String> {
+/// The reason to refuse `--runs` and the query before any run, or `None`:
+/// no run, too few runs for an update, or an update of profile runs.
+pub(super) fn runs_refusal(runs: usize, update: bool, query: &str) -> Option<String> {
+    // As `stem_protocol::Settings::from_query`: a flag is on unless empty
+    // or zero, and a key with no `=` sets nothing.
+    let profile = query.trim_start_matches('?').split('&').any(|pair| {
+        pair.split_once('=').is_some_and(|(key, value)| {
+            key == "profile" && !value.is_empty() && value.parse::<f64>().ok() != Some(0.0)
+        })
+    });
+    if update && profile {
+        return Some("--update-baselines with profile=1: a profile run is never a baseline".into());
+    }
     if runs == 0 {
         return Some("--runs 0 runs nothing".into());
     }
@@ -932,15 +955,18 @@ mod tests {
 
     /// Asserts that `never_a_pass` gives a reason that holds the given
     /// text for each of:
-    /// * the fallback value `yes`;
-    /// * an adapter text with `SwiftShader` (any case);
+    /// * each fallback value but `no`: `yes`, `unknown` and an empty one;
+    /// * an adapter text with `SwiftShader`, `llvmpipe`, `lavapipe` or
+    ///   `Basic Render` (any case);
     /// * `--swiftshader`;
     /// * `--headed` in Chrome;
     /// * f32 weights;
     /// * a query with each of `chunk=`, `overlap=`,
     ///   `max_elems=`, `mm=`, `attn=`, `weights=`, `bench=` and
     ///   `selftest=`;
-    /// * the query `?chunk=16384`, with its `?`.
+    /// * the query `?chunk=16384`, with its `?`;
+    /// * a bare `bench` or `selftest` key, alone, after `x=1&`, or after
+    ///   a `?`.
     ///
     /// Asserts that a run on `apple metal-3`, fallback `no`, f16 weights,
     /// gives no reason with no query, with `x=1`, with each of
@@ -961,6 +987,38 @@ mod tests {
             ..sample()
         };
         let none = opts(&[]);
+        for value in ["unknown", ""] {
+            let other = PerfResult {
+                fallback: value.into(),
+                ..sample()
+            };
+            let reason = never_a_pass(&other, &none).unwrap_or_default();
+            assert!(reason.contains("fallback"), "{value:?}: {reason:?}");
+        }
+        for adapter in [
+            "mesa llvmpipe (LLVM 19.1.0, 256 bits)",
+            "mesa Lavapipe",
+            "microsoft Microsoft Basic Render Driver",
+        ] {
+            let software = PerfResult {
+                adapter: adapter.into(),
+                ..sample()
+            };
+            let reason = never_a_pass(&software, &none).unwrap_or_default();
+            assert!(reason.contains("software adapter"), "{adapter}: {reason:?}");
+        }
+        for query in [
+            "bench",
+            "selftest",
+            "x=1&bench",
+            "?bench",
+            "x=1&selftest",
+            "?selftest",
+        ] {
+            let reason = never_a_pass(&sample(), &opts(&["--query", query])).unwrap_or_default();
+            let key = query.trim_start_matches("x=1&").trim_start_matches('?');
+            assert!(reason.contains(key), "{query}: {reason:?}");
+        }
         let cases = [
             (never_a_pass(&fallback, &none), "fallback"),
             (never_a_pass(&swiftshader, &none), "swiftshader"),
@@ -1316,14 +1374,20 @@ mod tests {
     /// Asserts that `runs_refusal`:
     /// * refuses `--runs 0`, also with `--update-baselines`;
     /// * refuses 4 runs with `--update-baselines`;
-    /// * accepts 5 runs with `--update-baselines`, and 1 run without it.
+    /// * accepts 5 runs with `--update-baselines`, and 1 run without it;
+    /// * refuses `--update-baselines` with `profile=1` (also after `?x=1&`),
+    ///   and accepts it with `profile=0`, and `profile=1` without it.
     #[test]
     fn the_run_count_is_checked_before_any_run() {
-        assert!(runs_refusal(0, false).is_some());
-        assert!(runs_refusal(0, true).is_some());
-        assert!(runs_refusal(4, true).is_some());
-        assert_eq!(runs_refusal(5, true), None);
-        assert_eq!(runs_refusal(1, false), None);
+        assert!(runs_refusal(0, false, "").is_some());
+        assert!(runs_refusal(0, true, "").is_some());
+        assert!(runs_refusal(4, true, "").is_some());
+        assert_eq!(runs_refusal(5, true, ""), None);
+        assert_eq!(runs_refusal(1, false, ""), None);
+        assert!(runs_refusal(5, true, "profile=1").is_some());
+        assert!(runs_refusal(5, true, "?x=1&profile=1").is_some());
+        assert_eq!(runs_refusal(5, true, "profile=0"), None);
+        assert_eq!(runs_refusal(1, false, "profile=1"), None);
     }
 
     /// Asserts that:
@@ -1424,7 +1488,10 @@ mod tests {
         let mut keys = Vec::new();
         for arm in body.split("field::").skip(1) {
             let Some((name, _)) = arm.split_once(" =>") else {
-                continue;
+                return Err(format!(
+                    "an arm without its own ` =>`: `field::{}`",
+                    arm.trim()
+                ));
             };
             keys.push(value(name).ok_or(format!("no `field::{name}`"))?);
         }
@@ -1454,7 +1521,11 @@ mod tests {
     /// * each query key of `Settings::from_query` in
     ///   `protocol/src/lib.rs` is in `MEASURE_KEYS` or `NOT_MEASURED`, and
     ///   each listed key is a query key;
-    /// * a protocol text with a key `zzz` in neither list gives `zzz`.
+    /// * a protocol text with a key `zzz` in neither list gives `zzz`;
+    /// * a protocol text with no `WEIGHTS` const and arm gives
+    ///   `weights (listed, not a key)`, and `weights` is in `MEASURE_KEYS`;
+    /// * an arm of alternatives (`field::WEIGHTS | field::GPU =>`) is an
+    ///   error.
     #[test]
     fn each_query_key_is_measured_or_not() {
         let path = crate::workspace_root().join("protocol/src/lib.rs");
@@ -1472,6 +1543,24 @@ mod tests {
                 1,
             );
         assert_eq!(unlisted_query_keys(&more), Ok(vec!["zzz".to_string()]));
+        assert!(MEASURE_KEYS.contains(&"weights"));
+        let fewer = protocol
+            .replacen("    pub const WEIGHTS: &str = \"weights\";\n", "", 1)
+            .replacen(
+                "                field::WEIGHTS => s.weights = text,\n",
+                "",
+                1,
+            );
+        assert_eq!(
+            unlisted_query_keys(&fewer),
+            Ok(vec!["weights (listed, not a key)".to_string()])
+        );
+        let alternatives = protocol.replacen(
+            "                field::WEIGHTS => s.weights = text,",
+            "                field::WEIGHTS | field::GPU => s.weights = text,",
+            1,
+        );
+        assert!(unlisted_query_keys(&alternatives).is_err());
     }
 
     /// Asserts that the line of an update gives, with an old entry, the

@@ -6,8 +6,9 @@
 //! `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands.  A commit
 //! that touches a strict path ([`STRICT_PATHS`]) runs tier `push`.  When
 //! tier `push` is asked and `STEMYLA_PERF_WEIGHTS` names the model, it
-//! also runs the perf gate, `e2e perf --gate`, in Chrome and Safari for a
-//! change of GPU or worker code (decision 0031).  No other check is a
+//! also runs the perf gate, `e2e perf --gate`, in Chrome and Safari
+//! (decision 0031).  It does so for a path in `roformer/`, `roformer-gpu/`
+//! or `worker/`, a workspace file, or no known path.  No other check is a
 //! browser test, no check is `publish`, and CI stays the authority.
 //!
 //! The code has parts, so the tests can check the rules without a run.
@@ -67,12 +68,14 @@ impl Check {
 
     /// The command as `CLAUDE.md`'s Commands gives it: the environment and
     /// the argv, joined by spaces, in `(cd <folder> && ...)` for a folder.
+    /// A word or a value with whitespace is in single quotes
+    /// ([`shell_word`]).
     pub fn line(&self) -> String {
         let words: Vec<String> = self
             .env
             .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .chain(self.argv.iter().cloned())
+            .map(|(key, value)| format!("{key}={}", shell_word(value)))
+            .chain(self.argv.iter().map(|word| shell_word(word)))
             .collect();
         let words = words.join(" ");
         if self.folder.is_empty() {
@@ -80,6 +83,16 @@ impl Check {
         } else {
             format!("(cd {} && {words})", self.folder)
         }
+    }
+}
+
+/// `word`, in single quotes when it holds whitespace, so a copied line
+/// keeps it as one shell word.
+fn shell_word(word: &str) -> String {
+    if word.chars().any(char::is_whitespace) {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    } else {
+        word.to_string()
     }
 }
 
@@ -1854,13 +1867,28 @@ mod tests {
         assert_eq!(GPU_WORDS, ["gpu", "f16", "timestamps"]);
     }
 
+    /// Asserts that `shell_word`:
+    /// * keeps a word with no whitespace;
+    /// * puts a word with a space or a tab in single quotes;
+    /// * writes a single quote in such a word as `'\''`.
+    #[test]
+    fn a_word_with_whitespace_is_quoted() {
+        assert_eq!(shell_word("--weights"), "--weights");
+        assert_eq!(shell_word("/models/a b/m"), "'/models/a b/m'");
+        assert_eq!(shell_word("a\tb"), "'a\tb'");
+        assert_eq!(shell_word("lloyd's m"), "'lloyd'\\''s m'");
+    }
+
     /// A value replaces `gpu,f16` when one of its words, trimmed, is
     /// `gpu`, `f16` or `timestamps`.
     #[test]
     fn a_stemyla_require_with_a_gpu_word_replaces_gpu_f16() {
         let before = plan(Tier::Push, &[], None);
         for given in ["gpu,fixtures", "fixtures, f16", "timestamps"] {
-            let line = format!("STEMYLA_REQUIRE={given} cargo test -p roformer-gpu --release");
+            let line = format!(
+                "STEMYLA_REQUIRE={} cargo test -p roformer-gpu --release",
+                shell_word(given)
+            );
             let after = with_gpu_require(before.clone(), Some(given));
             assert_eq!(decisions(&after), push_list(run(&line)), "{given:?}");
             assert_eq!(
