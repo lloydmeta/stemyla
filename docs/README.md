@@ -18,6 +18,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
 * `plans/active/gpu-speed.md`: faster separation on Apple GPUs, in Safari first, with no loss on other GPUs.  A perf gate, and `memory-budget` at the default chunk.
+* `plans/active/gpu-speed-m2.md`: M2 of `plans/active/gpu-speed.md`: the scenario `e2e perf`, its baselines on the M2 Pro, and its gate in `check --tier push`.
 * `plans/completed/gpu-speed-m1.md`: M1 of `plans/active/gpu-speed.md`, done on 2026-11-12: `memory-budget` at the default chunk, with four checks for MEM-4, and cuts of the worker's working set.
 * `plans/active/tech-debt-rungs.md`: the open entries of `tech-debt.md`, sorted by impact and effort, and closed in three PRs.
 * `plans/completed/tech-debt-rungs-m2.md`: M2 of `plans/active/tech-debt-rungs.md`, rung 2, done on 2026-11-11: the dev tools at their new pins, Safari in `web-test` and CI, TD-8 (the wasm GPU tests), the resampler on wasm32, the decode worker's tests in Safari, TD-92 and TD-93.
