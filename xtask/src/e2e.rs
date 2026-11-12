@@ -46,11 +46,17 @@
 //! * `memory-budget`: separate songs of 1 and 4 minutes, each in a new
 //!   browser, and print the peak memory of each and the difference
 //!   (`--weights`).  M2 of `docs/plans/completed/stream-from-storage.md`.
-//! * `memory-budget` also prints how much the page's and the worker's
-//!   WebAssembly memory grew during each separation, and fails if either
-//!   is more than 4 MB (D9 of M3 in
+//! * `memory-budget` runs at the default chunk, with no query unless
+//!   `--query` gives one.  It prints how much the page's and the worker's
+//!   WebAssembly memory grew during each separation.  It fails if the
+//!   page's is more than 4 MB (D9 of M3 in
 //!   `docs/plans/completed/stream-from-storage-m3.md`, step 4 of M4).  The
-//!   page's growth includes its write of the mix.  A fallback to the
+//!   page's growth includes its write of the mix.  The worker grows by
+//!   one chunk's working set, so it has four checks (M1 of
+//!   `docs/plans/active/gpu-speed.md`).  It stays flat after chunk 2.  It
+//!   grows by at most 4 MB more for the 4-minute song than for the
+//!   1-minute song.  Its growth fits the working set's peak plus a
+//!   measured headroom.  The tab total fits the iPhone's budget (MEM-4).  A fallback to the
 //!   memory path fails it.  It also checks that the page and the decode
 //!   worker grow by at most 4 MB while the song opens, and that Separate
 //!   writes no second mix (M5); `separate` checks that too.  Since M7, the
@@ -1412,7 +1418,8 @@ struct MemoryPeak {
 }
 
 impl MemoryPeak {
-    /// The sum of the parts' peaks: at most the peak of their sum.
+    /// The sum of the parts' peaks: at least the peak of their sum, so a
+    /// budget on it is safe.
     fn total(&self) -> f64 {
         self.page_wasm + self.worker_wasm + self.decoder_wasm + self.gpu_live
     }
@@ -1454,8 +1461,12 @@ fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
 
 /// The tolerance of M10 for memory that must not grow with the song, in
 /// MB.  The checks that use it:
-/// * the page's and the worker's growth during a separation (D9 of M3,
-///   step 4 of M4: [`growth_check`]);
+/// * the page's growth during a separation (D9 of M3, step 4 of M4:
+///   [`growth_check`]);
+/// * the worker's growth after chunk 2 of a separation (M1 of the GPU
+///   speed plan: [`flat_after_warm_up_check`]);
+/// * the worker's growth during the separation of the 4-minute song
+///   against the 1-minute song (M1: [`song_growth_check`]);
 /// * the page's and the decode worker's growth during an open (D12 of M5:
 ///   [`open_growth_check`]);
 /// * the page's growth to show the stems, the 4-minute song against the
@@ -1470,8 +1481,8 @@ fn separation_shown(line: &str) -> bool {
     line.contains("with the stems shown") || is_page_error(line)
 }
 
-/// The check of D9 of M3 on the growth of `part` (the page or the
-/// worker) during a separation.
+/// The check of D9 of M3 on the growth of `part` (the page) during a
+/// separation.  The worker has the checks of M1 of the GPU speed plan.
 fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
     (
         growth.is_some_and(|g| g <= MAX_GROWTH_MB),
@@ -1479,6 +1490,192 @@ fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
             "the {part} grew by {growth:?} MB during the separation, at most {MAX_GROWTH_MB} MB"
         ),
     )
+}
+
+/// The headroom of the worker's growth during a separation above the
+/// peak of its working set (`roformer::separate::working_set`), in MB,
+/// at the default chunk and overlap with f16 weights.  It is the
+/// allocator's overhead, its fragmentation and the rounding to 64 KiB
+/// pages, less the heap that is free at the separation's start.  So it
+/// can be less than 0.  Before M1's cuts, in Chrome, the worker grew by
+/// 95 MB with a peak of 117.86 MB: -22.86 MB.  Step 8 of M1 measures it
+/// after the cuts.
+const WORKER_HEADROOM_MB: f64 = -22.0;
+
+/// MEM-4's budget for the tab during a separation, in MB: page wasm,
+/// worker wasm, decoder wasm and GPU live bytes.  It is the 1,100 MB of
+/// M10 of `plans/completed/stream-from-storage.md`, less an MP3 save's
+/// frames (141 MB) and a save's page memory (16 MB), since
+/// `memory-budget` runs no save.  The 1,100 MB leaves about 950 MB under
+/// the iPhone's 2,048 MB for WebKit, the JS heap and WebGL, which no check
+/// measures (TD-11).  It assumes f16 weights.
+const TAB_BUDGET_MB: f64 = 943.0;
+
+/// The text that the worker logs with f32 weights on the GPU.
+const F32_WEIGHTS: &str = "f32 weights";
+
+/// The chunk that a worker's line `chunk k/N: ...` reports done: k.
+fn chunk_done(line: &str) -> Option<u32> {
+    let rest = &line[line.find("chunk ")? + "chunk ".len()..];
+    let (done, rest) = rest.split_once('/')?;
+    let total = rest.split(':').next()?;
+    if total.is_empty() || !total.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    done.parse().ok()
+}
+
+/// Check 1 of M1: flat after the warm-up.  The worker's WebAssembly
+/// memory grows by at most [`MAX_GROWTH_MB`] from its line after chunk 2
+/// to each later chunk's line and to the separation's end.  A missing
+/// line of chunk 2 or of the end fails it.
+fn flat_after_warm_up_check(log: &[String]) -> (bool, String) {
+    let chunks: Vec<(u32, f64)> = log
+        .iter()
+        .filter_map(|l| Some((chunk_done(l)?, number_after(l, "worker wasm ")?)))
+        .collect();
+    let at_two = chunks.iter().find(|(k, _)| *k == 2).map(|(_, mb)| *mb);
+    let end = log
+        .iter()
+        .find(|l| l.contains("at the separation's end"))
+        .and_then(|l| number_after(l, "worker wasm "));
+    let highest = chunks
+        .iter()
+        .filter(|(k, _)| *k > 2)
+        .map(|(_, mb)| *mb)
+        .chain(end)
+        .reduce(f64::max);
+    match (at_two, end, highest) {
+        (Some(base), Some(_), Some(top)) => (
+            top <= base + MAX_GROWTH_MB,
+            format!(
+                "the worker stays flat after the warm-up: {base:.0} MB after chunk 2, at most {top:.0} MB after it, at most {MAX_GROWTH_MB} MB more (margin {:.1} MB)",
+                base + MAX_GROWTH_MB - top
+            ),
+        ),
+        _ => (
+            false,
+            format!(
+                "the worker stays flat after the warm-up: no line of chunk 2 ({at_two:?}) or of the separation's end ({end:?})"
+            ),
+        ),
+    }
+}
+
+/// Check 2 of M1: no growth with the song.  The 4-minute song's worker
+/// growth during the separation is at most [`MAX_GROWTH_MB`] above the
+/// 1-minute song's.
+fn song_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
+    let text = format!(
+        "the worker grows by {long:?} MB during the separation of the long song, and by {short:?} MB for the short one: at most {MAX_GROWTH_MB} MB more"
+    );
+    match (short, long) {
+        (Some(s), Some(l)) => (
+            l <= s + MAX_GROWTH_MB,
+            format!("{text} (margin {:.1} MB)", s + MAX_GROWTH_MB - l),
+        ),
+        _ => (false, text),
+    }
+}
+
+/// The budget of check 3, in MB: the peak of the working set at the
+/// default chunk and overlap, plus [`WORKER_HEADROOM_MB`].
+fn working_set_budget_mb() -> f64 {
+    roformer::separate::working_set(roformer::CHUNK, roformer::OVERLAP)
+        .peak()
+        .bytes() as f64
+        / 1e6
+        + WORKER_HEADROOM_MB
+}
+
+/// Whether the page query `query` sets the chunk or the overlap.
+fn sets_the_chunk(query: &str) -> bool {
+    query
+        .split('&')
+        .map(|kv| kv.split('=').next().unwrap_or(""))
+        .any(|key| key == "chunk" || key == "overlap")
+}
+
+/// Check 3 of M1: a working-set budget.  The worker's growth during a
+/// separation is at most [`working_set_budget_mb`].  It gives `None`, not
+/// checked, for a query that sets the chunk or the overlap, or a log with
+/// f32 weights: the headroom is measured only at the default chunk with
+/// f16 weights.  Its text names the peak's phase, moment and parts, so a
+/// failure names the buffers to look at.
+fn working_set_check(growth: Option<f64>, query: &str, log: &[String]) -> (Option<bool>, String) {
+    let set = roformer::separate::working_set(roformer::CHUNK, roformer::OVERLAP);
+    let peak = set.peak();
+    let parts: Vec<String> = peak
+        .largest()
+        .parts
+        .iter()
+        .map(|p| format!("{} {:.2}", p.name, p.bytes as f64 / 1e6))
+        .collect();
+    let budget = working_set_budget_mb();
+    let text = format!(
+        "the worker grew by {growth:?} MB during the separation, at most {budget:.2} MB: the working set's peak {:.2} MB (the {} phase, at {}: {}) plus a headroom of {WORKER_HEADROOM_MB} MB",
+        peak.bytes() as f64 / 1e6,
+        peak.name,
+        peak.largest().at,
+        parts.join(", ")
+    );
+    if sets_the_chunk(query) {
+        return (
+            None,
+            format!(
+                "{text}: not checked, since the query {query:?} sets the chunk or the overlap, and the headroom is measured at the default chunk"
+            ),
+        );
+    }
+    if log.iter().any(|l| l.contains(F32_WEIGHTS)) {
+        return (
+            None,
+            format!(
+                "{text}: not checked, since the worker has f32 weights, and the headroom is measured with f16 weights"
+            ),
+        );
+    }
+    match growth {
+        Some(g) => (
+            Some(g <= budget),
+            format!("{text} (margin {:.2} MB)", budget - g),
+        ),
+        None => (Some(false), text),
+    }
+}
+
+/// Check 4 of M1: a tab total for the iPhone (MEM-4).  The sum of the
+/// four peaks ([`MemoryPeak::total`]) is at most [`TAB_BUDGET_MB`].  It
+/// gives `None`, not checked, for a log with f32 weights, since the
+/// budget assumes f16 weights (TD-63).
+fn tab_total_check(peak: Option<MemoryPeak>, log: &[String]) -> (Option<bool>, String) {
+    if log.iter().any(|l| l.contains(F32_WEIGHTS)) {
+        return (
+            None,
+            format!(
+                "the tab total {:?} MB: not checked, since the budget assumes f16 weights (TD-63)",
+                peak.map(|p| p.total())
+            ),
+        );
+    }
+    match peak {
+        Some(p) => (
+            Some(p.total() <= TAB_BUDGET_MB),
+            format!(
+                "the tab total is {:.0} MB (page wasm {:.0}, worker wasm {:.0}, decoder wasm {:.0}, GPU live {:.0}), at most {TAB_BUDGET_MB} MB (margin {:.0} MB)",
+                p.total(),
+                p.page_wasm,
+                p.worker_wasm,
+                p.decoder_wasm,
+                p.gpu_live,
+                TAB_BUDGET_MB - p.total()
+            ),
+        ),
+        None => (
+            Some(false),
+            "the tab total: a part of the memory lines is missing".into(),
+        ),
+    }
 }
 
 /// How much the worker's WebAssembly memory grew from the start of a
@@ -1611,21 +1808,29 @@ fn shown_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
 /// starts with empty WebAssembly memory.  Prints the peak of page wasm,
 /// worker wasm, decoder wasm and GPU live bytes for each, and their
 /// difference.  It also prints how much the page and the worker grew during
-/// each separation.  It fails if the song does not open, the model does not
-/// load, the song does not separate, or the memory lines are missing.  The
-/// growth and path checks fail it too:
-/// * if the page or the worker grows by more than [`MAX_GROWTH_MB`] during
-///   a separation ([`growth_check`]);
-/// * if the page or the decode worker grows by more than that during the
-///   open ([`open_growth_check`]);
+/// each separation.  It runs at the default chunk, the chunk that users
+/// run.  It fails if the song does not open, the model does not load, the
+/// song does not separate, or the memory lines are missing.  The growth,
+/// memory and path checks fail it too:
+/// * if the page grows by more than [`MAX_GROWTH_MB`] during a separation
+///   ([`growth_check`]);
+/// * if the worker grows by more than that after chunk 2
+///   ([`flat_after_warm_up_check`]);
+/// * if the worker grows by more than that more for the 4-minute song than
+///   for the 1-minute song ([`song_growth_check`]);
+/// * if the worker grows by more than the working set's peak plus the
+///   headroom ([`working_set_check`]), at the default chunk with f16
+///   weights;
+/// * if the sum of the four peaks is over [`TAB_BUDGET_MB`]
+///   ([`tab_total_check`]), with f16 weights;
+/// * if the page or the decode worker grows by more than [`MAX_GROWTH_MB`]
+///   during the open ([`open_growth_check`]);
 /// * if the page decodes the song on the main thread
 ///   ([`open_on_the_worker_check`]);
 /// * if Separate writes a second mix ([`no_mix_write_check`]);
 /// * if the 4-minute song's growth to show the stems is more than that
 ///   above the 1-minute song's ([`shown_growth_check`]);
 /// * if a separation falls back to the memory path ([`no_fallback_check`]).
-///
-/// It asserts no budget for the peak yet; M10 of the plan does.
 fn memory_budget(o: &Opts) -> Result<()> {
     let mut mounts = Vec::new();
     for minutes in BUDGET_MINUTES {
@@ -1633,9 +1838,11 @@ fn memory_budget(o: &Opts) -> Result<()> {
     }
     let model = weights_mount(o, &mut mounts)?;
     let base = start_server(&o.dist, mounts, &["console.js"])?;
-    let q = query(o, "chunk=16384&overlap=1&mm=s64");
+    // Users run the defaults, so the scenario does too.
+    let q = query(o, "");
     let mut peaks = Vec::new();
     let mut shown_growths = Vec::new();
+    let mut worker_growths = Vec::new();
     for minutes in BUDGET_MINUTES {
         let mut p = Page::open(
             o,
@@ -1694,17 +1901,29 @@ fn memory_budget(o: &Opts) -> Result<()> {
         p.check(ok, &what);
         let (ok, what) = no_mix_write_check(&p.log[from..]);
         p.check(ok, &what);
-        for (part, growth) in [
-            ("page", page_growth(&p.log[from..])),
-            ("worker", worker_growth(&p.log[from..])),
-        ] {
-            let (ok, what) = growth_check(part, growth);
-            p.check(ok, &what);
-            if let Some(g) = growth {
-                p.note(&format!(
-                    "memory-budget: the {minutes}-minute song: {part} wasm grew by {g:.0} MB during the separation"
-                ));
-            }
+        let growth = page_growth(&p.log[from..]);
+        let (ok, what) = growth_check("page", growth);
+        p.check(ok, &what);
+        if let Some(g) = growth {
+            p.note(&format!(
+                "memory-budget: the {minutes}-minute song: page wasm grew by {g:.0} MB during the separation"
+            ));
+        }
+        // M1 of `plans/active/gpu-speed.md`: the worker grows by one
+        // chunk's working set, then stays flat.
+        let growth = worker_growth(&p.log[from..]);
+        if let Some(g) = growth {
+            p.note(&format!(
+                "memory-budget: the {minutes}-minute song: worker wasm grew by {g:.0} MB during the separation"
+            ));
+        }
+        worker_growths.push(growth);
+        let (ok, what) = flat_after_warm_up_check(&p.log[from..]);
+        p.check(ok, &what);
+        let (ok, what) = working_set_check(growth, &q, &p.log);
+        match ok {
+            Some(ok) => p.check(ok, &what),
+            None => p.note(&what),
         }
         let growth = shown_growth(&p.log[from..]);
         p.note(&format!(
@@ -1724,6 +1943,11 @@ fn memory_budget(o: &Opts) -> Result<()> {
             ));
             peaks.push((minutes, peak));
         }
+        let (ok, what) = tab_total_check(peak, &p.log);
+        match ok {
+            Some(ok) => p.check(ok, &what),
+            None => p.note(&what),
+        }
         p.finish()?;
     }
     if let [(short, a), (long, b)] = peaks[..] {
@@ -1733,14 +1957,25 @@ fn memory_budget(o: &Opts) -> Result<()> {
         );
     }
     // M7: the stems show with no read-back, so showing them does not grow
-    // with the song.
-    let (ok, what) = shown_growth_check(
-        shown_growths.first().copied().flatten(),
-        shown_growths.last().copied().flatten(),
-    );
-    println!("memory-budget: {} {what}", if ok { "ok:" } else { "FAIL:" });
-    if !ok {
-        bail!("memory-budget FAILED: {what}");
+    // with the song.  M1 of the GPU speed plan: nor does the worker.
+    let mut failed = Vec::new();
+    for (ok, what) in [
+        shown_growth_check(
+            shown_growths.first().copied().flatten(),
+            shown_growths.last().copied().flatten(),
+        ),
+        song_growth_check(
+            worker_growths.first().copied().flatten(),
+            worker_growths.last().copied().flatten(),
+        ),
+    ] {
+        println!("memory-budget: {} {what}", if ok { "ok:" } else { "FAIL:" });
+        if !ok {
+            failed.push(what);
+        }
+    }
+    if !failed.is_empty() {
+        bail!("memory-budget FAILED: {}", failed.join("; "));
     }
     Ok(())
 }
@@ -2814,6 +3049,157 @@ mod tests {
         ));
         assert!(holds_or_error("PAGE ERROR: x is not defined", want));
         assert!(!holds_or_error("console.info: fine", want));
+    }
+
+    /// The worker's lines of one separation of 6 chunks, with f16
+    /// weights: `wasm[k]` after chunk k + 1, then at the end.
+    fn chunk_log(wasm: &[f64], end: f64) -> Vec<String> {
+        let mut log = vec![
+            "[0.0s] separator: memory: worker wasm 30 MB at the separation's start".to_string(),
+            "[0.1s] separator: separating 6 chunks; memory: worker wasm 58 MB, model on the GPU 350 MB (f16 weight matrices), chunk buffers 322 MB, GPU buffers live 673 MB".to_string(),
+        ];
+        for (k, mb) in wasm.iter().enumerate() {
+            log.push(format!(
+                "[{}.0s] separator: chunk {}/6: 4.7 s; so far 1022 GPU steps, 1.36 TFLOP/s; memory: worker wasm {mb} MB, model on the GPU 350 MB (f16 weight matrices), chunk buffers 322 MB, GPU buffers live 673 MB",
+                k + 1,
+                k + 1
+            ));
+            log.push(format!(
+                "[{}.1s] separator: chunk {}/6 after 4.7 s",
+                k + 1,
+                k + 1
+            ));
+        }
+        log.push(format!(
+            "[9.0s] separator: memory: worker wasm {end} MB at the separation's end"
+        ));
+        log
+    }
+
+    /// Check 1 of M1: flat after the warm-up, from chunk 2's line on.
+    #[test]
+    fn the_worker_must_stay_flat_after_the_warm_up() {
+        let flat = chunk_log(&[92.0, 125.0, 125.0, 125.0, 125.0, 125.0], 125.0);
+        let (ok, what) = flat_after_warm_up_check(&flat);
+        assert!(ok, "flat figures pass: {what}");
+        let at_most = chunk_log(&[92.0, 125.0, 125.0, 129.0, 125.0, 125.0], 129.0);
+        assert!(flat_after_warm_up_check(&at_most).0, "4 MB passes");
+        let rise = chunk_log(&[92.0, 125.0, 125.0, 125.0, 129.1, 129.1], 129.1);
+        let (ok, what) = flat_after_warm_up_check(&rise);
+        assert!(!ok, "a rise of 4.1 MB at chunk 5 fails: {what}");
+        let end = chunk_log(&[92.0, 125.0, 125.0, 125.0, 125.0, 125.0], 129.1);
+        assert!(!flat_after_warm_up_check(&end).0, "a rise at the end fails");
+        let no_two: Vec<String> = flat
+            .iter()
+            .filter(|l| !l.contains("chunk 2/6:"))
+            .cloned()
+            .collect();
+        let (ok, what) = flat_after_warm_up_check(&no_two);
+        assert!(!ok, "no chunk 2 line fails: {what}");
+        assert!(
+            !flat_after_warm_up_check(&flat[..flat.len() - 1]).0,
+            "no end line fails"
+        );
+        assert_eq!(
+            chunk_done(&flat[1]),
+            None,
+            "the line of the job is no chunk line"
+        );
+        assert_eq!(chunk_done(&flat[4]), Some(2));
+        assert_eq!(chunk_done("separator: chunk 12/48: 1.0 s"), Some(12));
+    }
+
+    /// Check 2 of M1: no growth with the song.
+    #[test]
+    fn the_long_song_must_not_grow_the_worker_more() {
+        assert!(
+            song_growth_check(Some(95.0), Some(95.0)).0,
+            "equal growths pass"
+        );
+        assert!(
+            song_growth_check(Some(95.0), Some(99.0)).0,
+            "4 MB more passes"
+        );
+        let (ok, what) = song_growth_check(Some(95.0), Some(99.1));
+        assert!(!ok, "4.1 MB more fails: {what}");
+        assert!(
+            !song_growth_check(None, Some(95.0)).0,
+            "a missing growth fails"
+        );
+        assert!(
+            !song_growth_check(Some(95.0), None).0,
+            "a missing growth fails"
+        );
+    }
+
+    /// Check 3 of M1: the worker's growth is at most the working set's
+    /// peak plus the measured headroom, at the default chunk with f16
+    /// weights.
+    #[test]
+    fn the_worker_growth_must_fit_the_working_set_budget() {
+        let log = chunk_log(&[92.0, 125.0], 125.0);
+        let peak = roformer::separate::working_set(roformer::CHUNK, roformer::OVERLAP);
+        let budget = working_set_budget_mb();
+        assert_eq!(
+            budget,
+            peak.peak().bytes() as f64 / 1e6 + WORKER_HEADROOM_MB
+        );
+        let (ok, what) = working_set_check(Some(budget), "", &log);
+        assert_eq!(ok, Some(true), "growth at the budget passes: {what}");
+        let (over, over_what) = working_set_check(Some(budget + 0.1), "x=1", &log);
+        assert_eq!(over, Some(false), "0.1 MB over fails: {over_what}");
+        assert!(what.contains("masks"), "it names the peak's phase: {what}");
+        assert_eq!(
+            working_set_check(None, "", &log).0,
+            Some(false),
+            "no growth fails"
+        );
+        let (ok, what) =
+            working_set_check(Some(budget + 50.0), "chunk=16384&overlap=1&mm=s64", &log);
+        assert_eq!(ok, None, "a chunk in the query is not checked: {what}");
+        assert_eq!(
+            working_set_check(Some(budget + 50.0), "overlap=4", &log).0,
+            None
+        );
+        assert_eq!(
+            working_set_check(Some(budget + 0.1), "mm=v64&xchunk=1", &log).0,
+            Some(false),
+            "only a chunk or an overlap parameter is not checked"
+        );
+        let f32_log: Vec<String> = log
+            .iter()
+            .map(|l| l.replace("f16 weight matrices", "f32 weights"))
+            .collect();
+        let (ok, what) = working_set_check(Some(budget + 50.0), "", &f32_log);
+        assert_eq!(ok, None, "f32 weights are not checked: {what}");
+    }
+
+    /// Check 4 of M1: the tab total under the iPhone's budget.
+    #[test]
+    fn the_tab_total_must_fit_the_budget() {
+        let log = chunk_log(&[92.0, 125.0], 125.0);
+        let peak = |gpu_live| MemoryPeak {
+            page_wasm: 33.0,
+            worker_wasm: 125.0,
+            decoder_wasm: 6.0,
+            gpu_live,
+        };
+        let (ok, what) = tab_total_check(Some(peak(779.0)), &log);
+        assert_eq!(ok, Some(true), "943 passes: {what}");
+        let (ok, what) = tab_total_check(Some(peak(779.1)), &log);
+        assert_eq!(ok, Some(false), "943.1 fails: {what}");
+        assert_eq!(
+            tab_total_check(None, &log).0,
+            Some(false),
+            "a missing part fails"
+        );
+        let f32_log: Vec<String> = log
+            .iter()
+            .map(|l| l.replace("f16 weight matrices", "f32 weights"))
+            .collect();
+        let (ok, what) = tab_total_check(Some(peak(979.0)), &f32_log);
+        assert_eq!(ok, None, "f32 weights are not checked: {what}");
+        assert!(what.contains("TD-63"), "{what}");
     }
 
     /// The peak of each part, from the worker's lines after the model
