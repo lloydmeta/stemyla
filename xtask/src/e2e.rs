@@ -109,7 +109,9 @@
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
 //!
 //! Each scenario has a time limit from its start ([`scenario_limit_secs`]).
-//! At the limit, a wait fails with one line ([`limit_line`]).  Its error
+//! Each run of `perf` has its own limit, from when the run opens its page
+//! ([`Opts::deadline`]).  At the limit, a wait fails with one line
+//! ([`limit_line`]).  Its error
 //! drops the page, which ends the WebDriver session and stops the driver.
 //!
 //! Classic WebDriver has no console events and no init scripts, so the
@@ -176,8 +178,9 @@ const NO_MODEL_LIMIT_S: u64 = 15 * 60;
 /// The time limit of `storage`, in seconds.  With `--weights`, it also loads
 /// a real model, and no run of that was measured.
 const STORAGE_LIMIT_S: u64 = 30 * 60;
-/// The time limit of one run of `perf`, in seconds.  On 2026-11-12, a run
-/// took 99 s in Safari and 70 s in Chrome on the M2 Pro.
+/// The time limit of one run of `perf`, in seconds, from when the run opens
+/// its page.  On 2026-11-12, a run took 99 s in Safari and 70 s in Chrome
+/// on the M2 Pro.
 const PERF_RUN_LIMIT_S: u64 = 10 * 60;
 /// The time limit of `bench`, `selftest`, `separate`, `worker-check`,
 /// `stored-stems` and `memory-budget`, in seconds.  No whole run of these was
@@ -189,11 +192,17 @@ const GPU_LIMIT_S: u64 = 60 * 60;
 const WEIGHTS_LIMIT_S: u64 = 2 * 60 * 60;
 
 /// The time limit of a scenario, in seconds, from the start of `xtask e2e`;
-/// `None` for a name that is not a scenario.  `save` has the limit of its CI
-/// step.  `perf` has a limit for each of its `runs`.  A scenario that runs the
-/// model has [`MODEL_RUN_SECS`] with `swiftshader`, since no such run was
-/// measured.
-fn scenario_limit_secs(scenario: &str, runs: usize, swiftshader: bool) -> Option<u64> {
+/// `None` for a name that is not a scenario.  `perf` has this limit for each
+/// run, from when the run opens its page ([`Opts::deadline`]).  A scenario
+/// that runs the model has [`MODEL_RUN_SECS`] with `swiftshader`, since no
+/// such run was measured.
+///
+/// `save` has the limit of its CI step.  On CI, the step's clock starts
+/// before `cargo` builds xtask, so the step limit ends `save` first, with no
+/// limit line (TD-100).  Each wait of `save` has its own end, so a run that
+/// waits in vain still ends on a check of its own ([`save::STEP_LIMIT_S`]).
+/// CI discards a hosted runner after the job, with its browser and driver.
+fn scenario_limit_secs(scenario: &str, swiftshader: bool) -> Option<u64> {
     let model_run = |secs| if swiftshader { MODEL_RUN_SECS } else { secs };
     Some(match scenario {
         "smoke" | "decode" | "playback" | "old-session" | "audio-resume" | "flac" => {
@@ -205,7 +214,7 @@ fn scenario_limit_secs(scenario: &str, runs: usize, swiftshader: bool) -> Option
             model_run(GPU_LIMIT_S)
         }
         "weights" => model_run(WEIGHTS_LIMIT_S),
-        "perf" => model_run(PERF_RUN_LIMIT_S).saturating_mul(runs.max(1) as u64),
+        "perf" => model_run(PERF_RUN_LIMIT_S),
         _ => return None,
     })
 }
@@ -292,7 +301,8 @@ pub struct Opts {
     pub item_y: f64,
     /// The rows of the Save menu's items, in CSS pixels.
     pub item_dy: f64,
-    /// When the options were read, the start of the scenario's time limit.
+    /// When the options were read, the start of the scenario's time limit
+    /// ([`Opts::deadline`]).
     pub started: Instant,
     /// The scenario's time limit, in seconds ([`scenario_limit_secs`]).
     pub limit_secs: u64,
@@ -384,9 +394,23 @@ impl Opts {
             }
             i += 1;
         }
-        o.limit_secs = scenario_limit_secs(&o.scenario, o.runs, o.swiftshader)
+        o.limit_secs = scenario_limit_secs(&o.scenario, o.swiftshader)
             .with_context(|| format!("unknown scenario {}", o.scenario))?;
         Ok(o)
+    }
+
+    /// The end of the time limit of a page that opens at `opened`.  The
+    /// limit of `perf` starts when each run opens its page, so each run has
+    /// its own.  The limit of another scenario starts at [`Opts::started`].
+    fn deadline(&self, opened: Instant) -> Result<Instant> {
+        let start = if self.scenario == "perf" {
+            opened
+        } else {
+            self.started
+        };
+        start
+            .checked_add(Duration::from_secs(self.limit_secs))
+            .context("the time limit is too long")
     }
 
     fn weights(&self) -> Result<&Path> {
@@ -454,7 +478,8 @@ fn start_server(dist: &Path, mut mounts: serve::Mounts, inject: &[&str]) -> Resu
 /// scenario's time limit gives an error, so its `?` drops the page.
 struct Page {
     session: Session,
-    _driver: Driver,
+    /// `None` only for a page on a fake driver in a test.
+    _driver: Option<Driver>,
     base: String,
     t0: Instant,
     log: Vec<String>,
@@ -480,15 +505,12 @@ impl Page {
         // draws with, unless it may fall back to SwiftShader.
         args.push("--enable-unsafe-swiftshader".into());
         args.push(format!("--window-size={},{}", VIEWPORT.0, VIEWPORT.1));
-        let deadline = o
-            .started
-            .checked_add(Duration::from_secs(o.limit_secs))
-            .context("the time limit is too long")?;
+        let deadline = o.deadline(Instant::now())?;
         let (driver, session) = start_session(o.browser, &args)?;
         let tries = session.set_viewport(VIEWPORT.0, VIEWPORT.1)?;
         let mut page = Self {
             session,
-            _driver: driver,
+            _driver: Some(driver),
             base,
             t0: Instant::now(),
             log: Vec::new(),
@@ -3678,15 +3700,28 @@ mod tests {
 
     /// Findings 1-47, 1-103, 2-30 and 2-58 of review rounds 1 and 2 of
     /// M3: a wait for the model was 4 hours in `memory_budget` with no test.
+    /// Finding 4-2 of review round 4 of M3: each run of `perf` has its own
+    /// limit.  Asserts:
     /// * `perf` has 10 minutes for each run, not the old 4 hours.
     /// * `perf` with `--swiftshader` has 4 hours for each run.
+    /// * `--runs 5` does not change the limit.
+    /// * The limit of a `perf` page ends 10 minutes after the page opens.
+    /// * The limit of a `smoke` page ends 15 minutes after `Opts::started`.
     #[test]
     fn perf_has_ten_minutes_for_each_run() {
-        assert_eq!(scenario_limit_secs("perf", 1, false), Some(600));
-        assert_eq!(scenario_limit_secs("perf", 5, false), Some(3_000));
+        assert_eq!(scenario_limit_secs("perf", false), Some(600));
+        assert_eq!(scenario_limit_secs("perf", true), Some(MODEL_RUN_SECS));
+        let perf = Opts::parse(&args("perf --runs 5")).unwrap();
+        assert_eq!(perf.limit_secs, 600);
+        let opened = perf.started + Duration::from_secs(3_000);
         assert_eq!(
-            scenario_limit_secs("perf", 2, true),
-            Some(2 * MODEL_RUN_SECS)
+            perf.deadline(opened).unwrap(),
+            opened + Duration::from_secs(600)
+        );
+        let smoke = Opts::parse(&args("smoke")).unwrap();
+        assert_eq!(
+            smoke.deadline(opened).unwrap(),
+            smoke.started + Duration::from_secs(900)
         );
     }
 
@@ -3696,16 +3731,12 @@ mod tests {
     /// * `save` has the limit of its CI step, also with `--swiftshader`.
     /// * The scenarios that run the model have 1 hour, and `weights` 2
     ///   hours.  With `--swiftshader`, each has 4 hours.
-    /// * `--runs` changes only the limit of `perf`.
     #[test]
     fn each_scenario_has_a_time_limit() {
         for scenario in SCENARIOS {
-            assert!(
-                scenario_limit_secs(scenario, 1, false).is_some(),
-                "{scenario}"
-            );
+            assert!(scenario_limit_secs(scenario, false).is_some(), "{scenario}");
         }
-        assert_eq!(scenario_limit_secs("perfs", 1, false), None);
+        assert_eq!(scenario_limit_secs("perfs", false), None);
         for scenario in [
             "smoke",
             "decode",
@@ -3715,25 +3746,15 @@ mod tests {
             "flac",
         ] {
             assert_eq!(
-                scenario_limit_secs(scenario, 1, false),
+                scenario_limit_secs(scenario, false),
                 Some(900),
                 "{scenario}"
             );
-            assert_eq!(
-                scenario_limit_secs(scenario, 1, true),
-                Some(900),
-                "{scenario}"
-            );
+            assert_eq!(scenario_limit_secs(scenario, true), Some(900), "{scenario}");
         }
-        assert_eq!(scenario_limit_secs("storage", 1, false), Some(1_800));
-        assert_eq!(
-            scenario_limit_secs("save", 1, false),
-            Some(save::STEP_LIMIT_S)
-        );
-        assert_eq!(
-            scenario_limit_secs("save", 1, true),
-            Some(save::STEP_LIMIT_S)
-        );
+        assert_eq!(scenario_limit_secs("storage", false), Some(1_800));
+        assert_eq!(scenario_limit_secs("save", false), Some(save::STEP_LIMIT_S));
+        assert_eq!(scenario_limit_secs("save", true), Some(save::STEP_LIMIT_S));
         for scenario in [
             "bench",
             "selftest",
@@ -3743,27 +3764,18 @@ mod tests {
             "memory-budget",
         ] {
             assert_eq!(
-                scenario_limit_secs(scenario, 1, false),
+                scenario_limit_secs(scenario, false),
                 Some(3_600),
                 "{scenario}"
             );
             assert_eq!(
-                scenario_limit_secs(scenario, 3, false),
-                Some(3_600),
-                "{scenario}"
-            );
-            assert_eq!(
-                scenario_limit_secs(scenario, 1, true),
+                scenario_limit_secs(scenario, true),
                 Some(MODEL_RUN_SECS),
                 "{scenario}"
             );
         }
-        assert_eq!(scenario_limit_secs("weights", 1, false), Some(7_200));
-        assert_eq!(
-            scenario_limit_secs("weights", 1, true),
-            Some(MODEL_RUN_SECS)
-        );
-        assert_eq!(scenario_limit_secs("smoke", 5, false), Some(900));
+        assert_eq!(scenario_limit_secs("weights", false), Some(7_200));
+        assert_eq!(scenario_limit_secs("weights", true), Some(MODEL_RUN_SECS));
     }
 
     /// * The line names the scenario, its limit and what it waited for.
@@ -3775,10 +3787,7 @@ mod tests {
             limit_line("perf-safari-1", 600, "the stems to show"),
             "e2e perf-safari-1 FAILED: its time limit of 600 s ended while it waited for the stems to show"
         );
-        assert_eq!(
-            Opts::parse(&args("perf --runs 3")).unwrap().limit_secs,
-            1_800
-        );
+        assert_eq!(Opts::parse(&args("perf --runs 3")).unwrap().limit_secs, 600);
         assert_eq!(
             Opts::parse(&args("perf --swiftshader")).unwrap().limit_secs,
             MODEL_RUN_SECS
@@ -3803,6 +3812,326 @@ mod tests {
         assert_eq!(wait_state(at(15), at(30), at(20)), WaitState::Going);
         assert_eq!(wait_state(at(20), at(30), at(20)), WaitState::OverLimit);
         assert_eq!(wait_state(at(35), at(30), at(20)), WaitState::OverLimit);
+    }
+
+    /// What a fake driver gives for `execute/async`: after `delay`, a reply
+    /// with `status` and `value`.
+    struct ScriptReply {
+        delay: Duration,
+        status: u16,
+        value: Value,
+    }
+
+    impl ScriptReply {
+        fn ok(value: Value) -> Self {
+            Self {
+                delay: Duration::ZERO,
+                status: 200,
+                value,
+            }
+        }
+    }
+
+    /// One request that a fake driver received: its method and path, and
+    /// its JSON body.
+    type Request = (String, Value);
+
+    /// A fake WebDriver on a free port.  `execute/sync` gives `console`
+    /// first and then no line, `execute/async` gives `script`, and each
+    /// other request gives `null`.  It sends each request it receives.
+    fn fake_driver(
+        console: &'static [&'static str],
+        script: ScriptReply,
+    ) -> (u16, std::sync::mpsc::Receiver<Request>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut console_sent = false;
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+                let request = request_line
+                    .rsplit_once(' ')
+                    .map_or(request_line.as_str(), |(head, _)| head)
+                    .to_string();
+                let (status, value) = if request.ends_with("/execute/sync") {
+                    let lines = if console_sent { &[][..] } else { console };
+                    console_sent = true;
+                    (200, json!(lines))
+                } else if request.ends_with("/execute/async") {
+                    std::thread::sleep(script.delay);
+                    (script.status, script.value.clone())
+                } else {
+                    (200, Value::Null)
+                };
+                let reply = json!({ "value": value }).to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}",
+                    reply.len()
+                );
+                let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let _ = tx.send((request, body));
+            }
+        });
+        (port, rx)
+    }
+
+    /// A page of the scenario `lloyd` on the fake driver at `port`, whose
+    /// time limit of `limit_secs` ends at `deadline`.
+    fn fake_page(port: u16, deadline: Instant, limit_secs: u64) -> Page {
+        let out = std::env::temp_dir().join(format!("xtask-e2e-page-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        Page {
+            session: Session::at(port, "lloyd"),
+            _driver: None,
+            base: "http://127.0.0.1:1".to_string(),
+            t0: Instant::now(),
+            log: Vec::new(),
+            out,
+            scenario: "lloyd".to_string(),
+            failures: Vec::new(),
+            deadline,
+            limit_secs,
+        }
+    }
+
+    /// The requests that a fake driver received until now.
+    fn received(rx: &std::sync::mpsc::Receiver<Request>) -> Vec<Request> {
+        rx.try_iter().collect()
+    }
+
+    /// The script timeout in milliseconds of each `timeouts` request.
+    fn script_timeouts(requests: &[Request]) -> Vec<u64> {
+        requests
+            .iter()
+            .filter(|(request, _)| request.ends_with("/timeouts"))
+            .filter_map(|(_, body)| body["script"].as_u64())
+            .collect()
+    }
+
+    /// A deadline `secs` from now.
+    fn in_secs(secs: f64) -> Instant {
+        Instant::now() + Duration::from_secs_f64(secs)
+    }
+
+    /// Finding 4-1 of review round 4 of M3.  Asserts:
+    /// * a wait gives the first console line that matches;
+    /// * a wait with no match ends at its own end with none, before the limit;
+    /// * a wait with no match whose own end is after the limit fails at the
+    ///   limit with the limit line, which the log also holds.
+    #[test]
+    fn a_page_wait_gives_its_line_or_stops_at_the_limit() {
+        let (port, _rx) = fake_driver(&["lloyd: ready"], ScriptReply::ok(Value::Null));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let line = p
+            .wait_for(0, 5, "the app", |l| l.contains("ready"))
+            .unwrap();
+        assert!(
+            line.as_deref()
+                .is_some_and(|l| l.ends_with("] lloyd: ready")),
+            "{line:?}"
+        );
+
+        let started = Instant::now();
+        let none = p.wait_for(1, 1, "a second line", |_| true).unwrap();
+        assert_eq!(none, None);
+        assert!(started.elapsed() >= Duration::from_secs(1));
+
+        let mut p = fake_page(port, in_secs(1.0), 7);
+        let started = Instant::now();
+        let e = p
+            .wait_for(0, 60, "the stems to show", |_| false)
+            .unwrap_err();
+        let line = limit_line("lloyd", 7, "the stems to show");
+        assert_eq!(e.to_string(), line);
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(
+            p.log.last().is_some_and(|l| l.ends_with(&line)),
+            "{:?}",
+            p.log
+        );
+    }
+
+    /// Finding 4-1 of review round 4 of M3.  Asserts:
+    /// * an idle before the limit runs to its own end, and takes the
+    ///   console into the log;
+    /// * an idle whose own end is after the limit fails at the limit with
+    ///   the limit line.
+    #[test]
+    fn a_page_idle_runs_to_its_end_or_stops_at_the_limit() {
+        let (port, _rx) = fake_driver(&["lloyd: idle"], ScriptReply::ok(Value::Null));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let started = Instant::now();
+        p.idle(0.5).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        assert!(
+            p.log.iter().any(|l| l.ends_with("] lloyd: idle")),
+            "{:?}",
+            p.log
+        );
+
+        let mut p = fake_page(port, in_secs(1.0), 7);
+        let started = Instant::now();
+        let e = p.idle(60.0).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            limit_line("lloyd", 7, "the page to run for 60 s")
+        );
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    /// Finding 4-1 of review round 4 of M3.  Asserts:
+    /// * a script gives the value of the driver's reply;
+    /// * its script timeout is its own `secs`, when the limit ends later;
+    /// * its script timeout ends at the limit, when the limit ends first.
+    #[test]
+    fn a_page_script_gives_its_value_within_the_limit() {
+        let (port, rx) = fake_driver(&[], ScriptReply::ok(json!(42)));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let value = p.run_script("lloyd", json!([]), 5, "a value").unwrap();
+        assert_eq!(value, json!(42));
+        let timeouts = script_timeouts(&received(&rx));
+        assert_eq!(timeouts.len(), 1, "{timeouts:?}");
+        assert!((4_000..=5_000).contains(&timeouts[0]), "{timeouts:?}");
+
+        let mut p = fake_page(port, in_secs(2.0), 7);
+        p.run_script("lloyd", json!([]), 60, "a value").unwrap();
+        let timeouts = script_timeouts(&received(&rx));
+        assert_eq!(timeouts.len(), 1, "{timeouts:?}");
+        assert!((1_000..=2_000).contains(&timeouts[0]), "{timeouts:?}");
+    }
+
+    /// Finding 4-1 of review round 4 of M3.  Asserts:
+    /// * a driver error before the limit gives the driver's error, not the
+    ///   limit line;
+    /// * a driver error after the limit gives the limit line;
+    /// * a script that starts after the limit gives the limit line, and
+    ///   sends no script to the driver.
+    #[test]
+    fn a_page_script_error_names_the_limit_only_past_the_limit() {
+        let error = json!({ "error": "javascript error", "message": "lloyd" });
+        let (port, _rx) = fake_driver(
+            &[],
+            ScriptReply {
+                delay: Duration::ZERO,
+                status: 500,
+                value: error,
+            },
+        );
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let e = p.run_script("lloyd", json!([]), 5, "a value").unwrap_err();
+        assert!(
+            format!("{e:#}").contains("javascript error: lloyd"),
+            "{e:#}"
+        );
+        assert!(!format!("{e:#}").contains("time limit"), "{e:#}");
+
+        let timeout = json!({ "error": "script timeout", "message": "lloyd" });
+        let (port, rx) = fake_driver(
+            &[],
+            ScriptReply {
+                delay: Duration::from_millis(1_500),
+                status: 500,
+                value: timeout,
+            },
+        );
+        let mut p = fake_page(port, in_secs(1.0), 7);
+        let e = p.run_script("lloyd", json!([]), 60, "a value").unwrap_err();
+        assert_eq!(e.to_string(), limit_line("lloyd", 7, "a value"));
+        assert_eq!(script_timeouts(&received(&rx)).len(), 1);
+
+        let mut p = fake_page(port, Instant::now(), 7);
+        let e = p.run_script("lloyd", json!([]), 60, "a value").unwrap_err();
+        assert_eq!(e.to_string(), limit_line("lloyd", 7, "a value"));
+        assert_eq!(script_timeouts(&received(&rx)), Vec::<u64>::new());
+    }
+
+    /// Finding 4-19 of review round 4 of M3.  Asserts:
+    /// * a drop sends each file's URL, name and type to the page;
+    /// * a drop that the page counts in full passes;
+    /// * a drop that the page counts short fails, with the count.
+    #[test]
+    fn a_page_drop_fails_unless_the_page_has_each_file() {
+        let files = [
+            ("/lloyd.wav", "lloyd.wav", "audio/wav"),
+            ("/acme.wav", "acme.wav", "audio/wav"),
+        ];
+        let (port, rx) = fake_driver(&[], ScriptReply::ok(json!(2)));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        p.drop_files(&files).unwrap();
+        let sent: Vec<Value> = received(&rx)
+            .into_iter()
+            .filter(|(request, _)| request.ends_with("/execute/async"))
+            .map(|(_, body)| body["args"][0].clone())
+            .collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let text = |file: &Value, key: &str| file[key].as_str().unwrap_or_default().to_string();
+        let sent_files: Vec<(String, String, String)> = sent[0]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|file| (text(file, "url"), text(file, "name"), text(file, "type")))
+            .collect();
+        let wanted: Vec<(String, String, String)> = files
+            .iter()
+            .map(|(url, name, kind)| (url.to_string(), name.to_string(), kind.to_string()))
+            .collect();
+        assert_eq!(sent_files, wanted);
+
+        let (port, _rx) = fake_driver(&[], ScriptReply::ok(json!(1)));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let e = p.drop_files(&files).unwrap_err();
+        assert_eq!(e.to_string(), "the drop failed: 1");
+    }
+
+    /// Finding 4-20 of review round 4 of M3.  Asserts:
+    /// * a page script's `ok` is its value;
+    /// * a page script's `error` is an error that holds its text;
+    /// * a time limit line names the place of the call.
+    #[test]
+    fn a_page_script_gives_its_ok_or_its_error() {
+        let (port, _rx) = fake_driver(&[], ScriptReply::ok(json!({ "ok": "lloyd" })));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        assert_eq!(
+            in_page(&mut p, "return 1;", json!([]), 5).unwrap(),
+            json!("lloyd")
+        );
+
+        let (port, _rx) = fake_driver(&[], ScriptReply::ok(json!({ "error": "boom" })));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let e = in_page(&mut p, "return 1;", json!([]), 5).unwrap_err();
+        assert_eq!(e.to_string(), "in the page: boom");
+
+        let mut p = fake_page(port, Instant::now(), 7);
+        let line = line!() + 1;
+        let e = in_page(&mut p, "return 1;", json!([]), 5).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            limit_line(
+                "lloyd",
+                7,
+                &format!("the page script of {}:{line}", file!())
+            )
+        );
     }
 
     #[test]

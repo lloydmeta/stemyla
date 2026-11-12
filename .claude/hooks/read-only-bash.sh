@@ -6,10 +6,11 @@
 # review round, and `xtask clean`, which removes worktrees, branches and
 # folders.  It refuses them through `cargo run` of xtask too.
 # It also refuses a wide search, which can run for hours and read private
-# files.  That is `find` or `du` from `/`, `~`, `$HOME`, `/Users`,
-# `/Users/<name>` or `/Volumes`.  It is also `mdfind` without `-onlyin`, or
-# with `-onlyin` on one of those folders.  It reads only the paths in the
-# command, so `cd / && find .` still passes.
+# files.  That is `find` or `du` from `/`, `~`, `~<name>`, `$HOME`, `/Users`,
+# `/Users/<name>`, `/Volumes` or `/System/Volumes/Data` (with its `Users`
+# folders), also with a final `/.` or `/*`.  It is also `mdfind` without
+# `-onlyin`, or with `-onlyin` on one of those folders.  It reads only the
+# paths in the command, so `cd / && find .` still passes.
 # It matches text, so it stops mistakes, not an agent that tries to escape.
 # Redirections and `sed -i` still pass.  Known gaps: TD-34 in docs/tech-debt.md.
 # For bash 3.2 (macOS): no `declare -A`, no `${x,,}`, no `mapfile`.
@@ -276,19 +277,27 @@ check_git() {
 }
 
 # True if the path $1 is the whole disk, a home folder, the folder of all
-# users or the folder of all volumes: `/`, `~`, `$HOME`, `${HOME}`,
-# `/Users`, `/Users/<name>` or `/Volumes`, with or without a final `/`.
+# users or the folder of all volumes: `/`, `~`, `~<name>`, `$HOME`,
+# `${HOME}`, `/Users`, `/Users/<name>` or `/Volumes`.  The data volume of
+# macOS, `/System/Volumes/Data`, with its `Users` folders, is the same.  Each
+# can have a final `/`, `/.` or `/*`.
 is_wide_path() {
-  local path=$1
-  while [ "${path%/}" != "$path" ]; do path=${path%/}; done
+  local path=$1 shorter
+  while :; do
+    shorter=${path%/}
+    shorter=${shorter%/.}
+    shorter=${shorter%/\*}
+    if [ "$shorter" = "$path" ]; then break; fi
+    path=$shorter
+  done
   case $path in
     '$HOME' | '${HOME}') return 0 ;;
   esac
   lower "$path"
   case $LOWERED in
-    '' | '~' | /users | /volumes) return 0 ;;
-    /users/*/*) return 1 ;;
-    /users/*) return 0 ;;
+    '' | '~' | /users | /volumes | /system/volumes/data | /system/volumes/data/users) return 0 ;;
+    /users/*/* | /system/volumes/data/users/*/* | '~'*/*) return 1 ;;
+    /users/* | /system/volumes/data/users/* | '~'*) return 0 ;;
   esac
   return 1
 }
@@ -309,7 +318,7 @@ check_find() {
   done
   while [ $j -lt $end ]; do
     case ${WORDS[j]} in
-      -* | '!' | '(') return 0 ;;
+      -*) return 0 ;;
     esac
     if is_wide_path "${WORDS[j]}"; then refuse "wide search" "$text"; fi
     j=$((j + 1))
@@ -320,10 +329,7 @@ check_find() {
 check_du() {
   local j=$((k + 1))
   while [ $j -lt $end ]; do
-    case ${WORDS[j]} in
-      -*) ;;
-      *) if is_wide_path "${WORDS[j]}"; then refuse "wide search" "$text"; fi ;;
-    esac
+    if is_wide_path "${WORDS[j]}"; then refuse "wide search" "$text"; fi
     j=$((j + 1))
   done
 }
@@ -378,6 +384,28 @@ check_part() {
           esac
         done
         k=$((k + 1))
+        continue
+        ;;
+      nice)
+        k=$((k + 1))
+        while [ $k -lt $end ]; do
+          case ${WORDS[k]} in
+            -n) k=$((k + 2)) ;;
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        continue
+        ;;
+      sudo)
+        k=$((k + 1))
+        while [ $k -lt $end ]; do
+          case ${WORDS[k]} in
+            -C | -D | -g | -h | -p | -R | -r | -T | -t | -U | -u) k=$((k + 2)) ;;
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
         continue
         ;;
       env | command | exec | time | nohup | export | declare | typeset | readonly | local)

@@ -198,7 +198,7 @@ These pass the guard.  Each item gives examples only, and the list is not comple
 
 * `git --exec-path=`, and `git grep -O`, which starts a pager program;
 * `find -exec` and `find -delete`;
-* a wide search in another form, such as `cd / && find .`, `find ~/Pictures`, `grep -r x /`, `ls -R ~` or `rg x /`;
+* a wide search in another form, such as `cd / && find .`, `find ~/Pictures`, `find /U*`, `find /Users/lloyd/..`, `grep -r x /`, `ls -R ~` or `rg x /`;
 * `$(...)` inside double quotes, `$'...'` quoting, `$"..."` quoting such as `$"git" commit`, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
 * a redirection before the command, such as `2>/dev/null git commit`;
 * a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
@@ -208,7 +208,8 @@ These pass the guard.  Each item gives examples only, and the list is not comple
 * `cargo new` and `cargo init`, which write a new package;
 * an xtask command in a form that `names_xtask` does not match, such as `cargo run -p xtask@0.1.0`, `-p path+file:///.../xtask`, `-mxtask/Cargo.toml`, and `cd xtask` before `cargo run`.  The deny rules in `.claude/settings.json` still refuse `cargo r* publish*` (TD-28);
 * other variables, such as `CARGO_*` and `RUSTC_WRAPPER`;
-* interpreters, such as `perl -e` and `awk`, and wrappers, such as `sudo` and `nice`;
+* interpreters, such as `perl -e` and `awk`, and wrappers other than `nice` and `sudo`, such as `caffeinate -i` and `xcrun`;
+* a long option of `sudo` or `nice` that takes a value, such as `sudo --user lloyd find /`;
 * brace expansion and globs, such as `{git,commit} -m x` and `/usr/bin/gi? commit`;
 * `git worktree prune` and `git worktree move`, since the guard allows each `worktree` subcommand;
 * zsh's `=git commit`, `noglob git commit` and `nocorrect git commit`.  The Bash tool runs the person's shell, which is zsh on macOS.  The parse follows bash and zsh only for the forms that it covers.
@@ -261,11 +262,12 @@ This entry concerns no rule.  It concerns the measure of D4 of `plans/completed/
 
 Much of `xtask/src/webdriver.rs`, `xtask/src/e2e.rs`, `xtask/src/web_test.rs`, `xtask/src/serve.rs` and `xtask/src/roformer_cli.rs` runs only against a live browser, a driver or the model weights (VERIFY-1).  The checker found no `cargo test` that kills these mutants.  The checker of M5 read the code on `main` and ran no mutant, so a bullet marked "(not run)" rests on that reading only.
 
-Part B of `plans/completed/stream-from-storage-catchup.md` (2026-10-28) handled the deferred rows of M3 to M6.  `xtask/tests/e2e_cli.rs` runs `e2e smoke`, `separate`, `memory-budget`, `stored-stems`, `weights` and `old-session` with a `CHROMEDRIVER` that is not a file.  Review round 1 of M9 added `weights`.  Review round 2 of M9 added `selftest`, which stops on the missing reference files.  Review round 1 of that plan added `audio-resume`, `bench` and `playback`.  Review round 1 of M8 added `flac` and `save`.  Each run must fail on the driver, before a browser starts.  So a scenario body or an e2e `run` that returns `Ok(())` fails a test.  The 4-hour wait for the model is the constant `MODEL_RUN_SECS`, with a test.  The waits of `e2e decode` and the model wait of `memory-budget` use `holds_or_error`, with a test.  `roformer_refuses_bad_input_before_the_model` runs `xtask roformer`.  `StemApp::audio_stats_lines` and `StemApp::open_folder` have native tests.  What is left, each with its reason:
+Part B of `plans/completed/stream-from-storage-catchup.md` (2026-10-28) handled the deferred rows of M3 to M6.  `xtask/tests/e2e_cli.rs` runs `e2e smoke`, `separate`, `memory-budget`, `stored-stems`, `weights` and `old-session` with a `CHROMEDRIVER` that is not a file.  Review round 1 of M9 added `weights`.  Review round 2 of M9 added `selftest`, which stops on the missing reference files.  Review round 1 of that plan added `audio-resume`, `bench` and `playback`.  Review round 1 of M8 added `flac` and `save`.  Review round 4 of M3 of `plans/active/gpu-speed.md` added `storage` and `decode`.  Each run must fail on the driver, before a browser starts.  So a scenario body or an e2e `run` that returns `Ok(())` fails a test.  The 4-hour wait for the model is the constant `MODEL_RUN_SECS`, with a test.  The waits of `e2e decode` and the model wait of `memory-budget` use `holds_or_error`, with a test.  `roformer_refuses_bad_input_before_the_model` runs `xtask roformer`.  `StemApp::audio_stats_lines` and `StemApp::open_folder` have native tests.  What is left, each with its reason:
 
 * the scenario bodies after the driver starts, such as `storage`, `smoke`, `bench`, `separate`, `decode`, `playback`, `old-session`, `memory-budget`, `stored-stems` and `weights`: their steps and waits need a browser (not run).  So do `restore`, `save_once` and `wait_for_offer` of `xtask/src/e2e/save.rs`, and `__e2e_progress` of `xtask/e2e/save_spy.js` (findings 2-15 and 2-17 of review round 2 of M8).  Since step 6 of M8, `click_save`, `save_playing` and the reads of the WebAssembly memory and the long tasks in `save_once` are on this list too (findings 3-12 to 3-15 of review round speed 3 of M8, 4-19 and 4-20 of round speed 4, and 5-18 and 5-19 of round speed 5: a `save_once` or a `save_playing` that returns a default survives `cargo test`).  Their pure parts, `growth`, `long_tasks`, `slice_line`, `slice_of`, `slice_check`, `read_end_line`, `read_end_of`, `read_end_check`, `mean_frame_ms`, `not_frame_bound`, `throttled`, `save_checks` and `playing_checks`, have tests.  Since M4 of `plans/completed/m4a.md`, `check_heap` is on this list too.  It is browser-only glue: it hands the result of `heap_report` to a `Page`, which only a live WebDriver session makes.  So `replace check_heap with ()` survives `cargo test` (finding 2-10 of review round 2 of M4).  `heap_report` has a test.  Also in `save_spy.js`: `__e2e_long_in_save`, `__e2e_long_calibrate`, the throttle and the long frames (`__e2e_long_frame_ms`) of the animation frames, and the heap readings at each write.  CI's run of `e2e save` reaches them.  Their pure parts are functions with tests.  CI's `browser-tests` job runs `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage`, `flac` and `save`.  `separate`, `memory-budget`, `stored-stems`, `bench`, `selftest`, `worker-check` and `weights` also need a GPU and the model, which CI does not have, so a person runs them.  Their checks are pure functions with unit tests (`all_from_storage`, `stored_stems_checks`, `flac_checks`, the growth checks, `old_session_checks` and others).  For example, deleting the `!` of the last `if !ok` in `memory_budget` still survives `cargo test`;
 * `drop_and_open` of `xtask/src/e2e/decode.rs`: only a browser reaches it, after the driver starts, so a body that returns `Ok(())` survives `cargo test`.  CI's `browser-tests` job runs `e2e decode`, which fails without it;
-* the `Page` methods, such as `wait_for`, `errors` and `click`, which need a live browser session (not run);
+* the `Page` methods, such as `errors` and `click`, which need a live browser session (not run).  Since review round 4 of M3 of `plans/active/gpu-speed.md`, `wait_for`, `idle`, `run_script`, `drop_files` and `in_page` have tests on a fake driver;
+* `open_song` and `load_and_separate` of `xtask/src/e2e.rs`: only the GPU scenarios reach them, in a browser.  So an `open_song` that returns `Ok(0)` or `Ok(1)` survives `cargo test`.  So does a `load_and_separate` that returns `Ok(0)` or `Ok(1)` (findings 4-23 to 4-26 of review round 4 of M3 of `plans/active/gpu-speed.md`);
 * `Driver::start` after the driver is found, `free_port`, `Session::execute` and the `set_viewport` wrapper, which need a driver (not run);
 * `query`, which `parses_scenario_and_options` never calls (not run);
 * `run` in `xtask/src/web_test.rs` and in `xtask/src/serve.rs`, which no test calls (not run);
@@ -532,6 +534,15 @@ This entry concerns VERIFY-1.  The cause is not known.
 * The product risk is low.  The page never writes the mix during a separation (D6 of `plans/completed/stream-from-storage-m4.md`), and the end check of `StoredMix` sees a change of size ([TD-55](#td-55-safari-can-miss-a-mix-file-written-again-during-a-separation)).
 * Next step: in the test, after the change, read the mix again through a new `getFile()` before the old `File`.  Assert that the new read sees the change.  If that assert fails on CI, the write had not landed, and the test can wait for it.  If it passes and the old `File` still gives old samples, the cause is in WebKit, and it goes under TD-96.
 * Fix: find the cause, then fix the test or the code, or record a WebKit bug.
+
+### TD-100: on CI, the step limit ends `e2e save` before the scenario's limit
+
+This entry concerns no rule.  It concerns the time limit of each browser e2e scenario (the maintainer's request of 2026-11-13).
+
+* `e2e save` has a time limit of 60 minutes (`save::STEP_LIMIT_S`), from when xtask reads its options.  Its step in CI's `browser-tests` job has `timeout-minutes: 60`, from the start of the step.
+* The step starts before `cargo` builds xtask.  So on CI, the step limit always ends `save` first, and the run writes no limit line.
+* The risk is low.  Each wait of `save` has its own end, and all the waits together end within the limit (`WAITS_S`).  So a run that waits in vain ends on a check of its own.  CI discards a hosted runner after the job, with its browser and driver.
+* Fix: give the CI step a limit above the scenario's, for example 65 minutes.  Then raise the job limit (`timeout-minutes: 85`), so that it still holds the step.  Change `the_ci_job_limit_holds_its_save_steps` and the step's pin in `xtask/src/e2e/save.rs` with them.
 
 ## Known breaches
 

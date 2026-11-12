@@ -707,6 +707,26 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (WIDE_SEARCH, "find /Volumes/ -name x"),
     (WIDE_SEARCH, "find -L / -name x"),
     (WIDE_SEARCH, "find -f / -name x"),
+    // Only the `-f` arm finds the second start path.
+    (WIDE_SEARCH, "find -f . -f / -name x"),
+    // Finding 4-6 of review round 4 of M3: a final `/.` or `/*`, the data
+    // volume of macOS, `~<name>`, `nice` and `sudo`.
+    (WIDE_SEARCH, "du -sh ~/*"),
+    (WIDE_SEARCH, "find /*"),
+    (WIDE_SEARCH, "find /."),
+    (WIDE_SEARCH, "find /Users/lloyd/."),
+    (WIDE_SEARCH, "find ~lloyd -name x"),
+    (WIDE_SEARCH, "find /System/Volumes/Data -name x"),
+    (WIDE_SEARCH, "find /System/Volumes/Data/Users/lloyd -name x"),
+    (WIDE_SEARCH, "nice find / -name x"),
+    (WIDE_SEARCH, "sudo find / -name x"),
+    (WIDE_SEARCH, "find /Users/lloyd/* -name x"),
+    (WIDE_SEARCH, "find $HOME/. -name x"),
+    (WIDE_SEARCH, "find ~lloyd/ -name x"),
+    (WIDE_SEARCH, "find /system/volumes/data/users -name x"),
+    (WIDE_SEARCH, "nice -n 10 find / -name x"),
+    (WIDE_SEARCH, "sudo -u lloyd du -sh ~"),
+    (GIT_SUB, "sudo git commit -m x"),
     (WIDE_SEARCH, "find . / -name x"),
     (WIDE_SEARCH, "find /"),
     (WIDE_SEARCH, "FIND / -name x"),
@@ -803,6 +823,14 @@ const GUARD_PASSES: &[&str] = &[
     "find . -name x",
     "find docs -name '~'",
     "find -L . -name x -path /",
+    "find . ! -name x",
+    "find ./. -name x",
+    "find docs/* -name x",
+    "find ~/Documents/rustt/stemyla -name x",
+    "find /Users/lloyd/Documents/rustt/stemyla/. -name x",
+    "find /System/Volumes/Data/Users/lloyd/Documents -name x",
+    "nice -n 10 find . -name x",
+    "sudo -u lloyd du -sh target",
     "rtk find . -name x",
     "du -sh target",
     "du -sh /Users/lloyd/Documents/rustt/stemyla/target",
@@ -1419,7 +1447,13 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 ///
 /// The maintainer's request of 2026-11-13 adds the absolute paths of each
 /// prompt template, and the check that no agent of the round still runs.
+/// Findings 4-3 and 4-4 of review round 4 of M3 of `gpu-speed.md` add the
+/// report of an agent that a team leader cannot stop, and the processes
+/// that an agent may stop.
 const REVIEW_SKILL_TEXT: &[&str] = &[
+    "Stop only a process that you can tie to your own agents.",
+    "report it to the orchestrator with SendMessage, as for a stalled subagent.  The orchestrator stops it with TaskStop.",
+    "Never stop `caffeinate`, a person's browser or driver, or a process that you cannot tie to your own agents.",
     "* Before you say that the round's agents have ended, or give your final answer, check that none of them still runs.",
     "An agent's final report does not stop its background commands.",
     "Each prompt template below names a path only through a slot that holds an absolute path, such as `<target>`.",
@@ -1779,7 +1813,13 @@ const SIZING_SIGNALS: &[&str] = &[
 /// M7 adds the PR body steps and the attention review (decision 0027).
 /// The maintainer's request of 2026-11-13 adds the absolute paths of each
 /// brief and template, and the check that no subagent still runs.
+/// Findings 4-3 and 4-4 of review round 4 of M3 of `gpu-speed.md` add the
+/// report of an agent that a team leader cannot stop, and the processes
+/// that an agent may stop.
 const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
+    "Stop only a process that you can tie to your own agents.",
+    "report it to the orchestrator with SendMessage, as for a stalled subagent.  The orchestrator stops it with TaskStop.",
+    "Never stop `caffeinate`, a person's browser or driver, or a process that you cannot tie to your own agents.",
     "A slot that names a path gets an absolute path.  The text that the agent gets holds no unfilled slot.",
     "* Before you say that your agents have ended, or give a final report, check that none of them still runs.",
     "Fill in each slot that names a path with an absolute path.  The text holds no unfilled slot:",

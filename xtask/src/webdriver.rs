@@ -318,6 +318,16 @@ impl Session {
         })
     }
 
+    /// The session `id` of a fake driver on `port`, for a test.
+    #[cfg(test)]
+    pub(crate) fn at(port: u16, id: &str) -> Self {
+        Self {
+            port,
+            id: id.to_string(),
+            version: "lloyd".to_string(),
+        }
+    }
+
     fn call(&self, method: &str, path: &str, body: Option<Value>) -> Result<Value> {
         self.call_within(method, path, body, COMMAND_TIMEOUT)
     }

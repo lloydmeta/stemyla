@@ -168,6 +168,20 @@ fn flac_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("flac", "flac", false);
 }
 
+/// Finding 4-21 of review round 4 of M3: a `storage` that does nothing
+/// fails this test.
+#[test]
+fn storage_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("storage", "storage", false);
+}
+
+/// Finding 4-22 of review round 4 of M3: a `run` of `e2e decode` that does
+/// nothing fails this test.
+#[test]
+fn decode_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("decode", "decode", false);
+}
+
 /// `xtask web-test` with an option it does not know fails before it builds
 /// or runs anything (the mutants of review round speed 2 of M8: a `run`
 /// that returns `Ok(())` would pass).  Asserts:

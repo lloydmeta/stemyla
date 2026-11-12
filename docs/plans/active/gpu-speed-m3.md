@@ -252,7 +252,7 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
   | `s64-c` (`s64`) | 0.115 to 0.152 * | 0.996 to 1.009 | 1.491, 1.481 |
   | `i64` (`v64`) | 1.25 to 1.58 * | 1.44 to 1.50 * | 1.498, 1.494 |
   | `v64-g4` (`v64`), K 256 | 1.014 to 1.033 | 1.196 to 1.225 * | 1.496, 1.504 |
-| `v64-g4` (`v64`), K 1,024 | 1.339 to 1.354 * | 1.254 to 1.266 * | |
+  | `v64-g4` (`v64`), K 1,024 | 1.339 to 1.354 * | 1.254 to 1.266 * | |
 
   | Control (start of the page) | Safari 1, 2 | Chrome 1, 2 | Ratio |
   | - | - | - | - |
