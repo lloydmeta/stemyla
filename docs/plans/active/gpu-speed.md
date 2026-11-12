@@ -86,13 +86,15 @@ A new fused attention kernel for the time axis (1,151 tokens, 8 heads of 64), fr
 Two changes in `worker/src/web.rs`, each measured:
 
 * `Pace` keeps up to 2 steps in flight: it submits a step before it waits for the step before.  The step limit and the errors still stop a run.
-* The CPU work of one chunk runs while the GPU runs the next: the STFT of chunk n + 1 and the inverse STFT of chunk n.
+* The CPU work runs while the GPU works.  The STFT of chunk n + 1 runs while the GPU runs chunk n.  The mask of stem k is applied while the GPU runs the steps after it.  For the last stem of chunk n, these are the first steps of chunk n + 1.
+* The CPU holds at most one mask.  The worker submits the steps after stem k's last mask step, then applies mask k, then reads mask k + 1.  Six masks held at once (113 MB at the default chunk) put the tab over `TAB_BUDGET_MB`, so M6 does not do that.
 
 The stems stay the same byte for byte: only the order of the work changes.
 
 Memory, from M1 (`plans/completed/gpu-speed-m1.md`, Step 6):
 
 * The worker's working set is the function in `roformer::separate`, which `memory-budget` and the worker's wasm test use.  M6 adds the buffers that it holds as named parts of that function, in the same commit as the code.  The next chunk's input, spectra and features are about 42.5 MB at the default chunk.
+* `roformer::separate::WorkingSet` and the phase boundaries of the worker's wasm test assume one chunk at a time.  M6 defines its phases again for the overlap, with the next chunk's parts in the phases where they are live.  Added parts alone only raise check 3's budget and test nothing.
 * `Demixer::end_chunk` moves the read position.  So the next chunk's input cannot be read before every stem of this chunk is accepted.  M6 gives the demixer a read cursor apart from the accept cursor.
 * The limit is MEM-4: the tab total of `memory-budget` stays at most `TAB_BUDGET_MB` (943 MB).  If it does not, M1's Step 6 names the next cuts, in order of cost.
 
@@ -101,7 +103,7 @@ Acceptance: `e2e stored-stems` gives the same hashes before and after.  The perf
 ## Validation and acceptance
 
 * `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.
-* `e2e memory-budget` passes in Safari and Chrome at the default chunk.
+* `e2e memory-budget` passes in Safari and Chrome at the default chunk.  Its check 3 headroom (`WORKER_HEADROOM_MB`) is mostly heap that is free at the separation's start, which the model load and calibration set.  So M4 and M5, which change calibration, can move it.  If check 3 fails, the worker's wasm test passes, and `working_set` did not change, measure the headroom again as M1 Step 8 did, at that commit.  Record the figures in the Decision log.  The margin stays below a lost cut 3 (9.44 MB).
 * `e2e selftest --weights <model>` passes in Safari and Chrome with the kernels that each browser chooses.
 * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passes on this Mac (Metal).
 * `cargo run -p xtask -- check --tier push` passes, and CI passes on the PR.
@@ -186,7 +188,8 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-12, agent (orchestrator): no f16 arithmetic.  Why: on M1 and M2 GPUs, f16 FMA runs at the f32 rate, and decision 0022 keeps f32 sums.
 * 2026-11-12, agent (orchestrator): no `subgroups` and no subgroup matrices.  Why: Safari 27.2 offers neither, and the maintainer chose the default limits and features (decision 1).
 * 2026-11-12, agent (orchestrator): the Radeon and the iPhone are protected by calibration, not by required runs.  Each new kernel is a candidate that a GPU keeps only if it measures faster there.
-* 2026-11-12, agent (orchestrator): M1's worker headroom is -17 MB, not the team's -22 MB.  Why: -22 MB left 1.16 MB above the noise, which the maintainer's "not too tight" rules out.  -17 MB is midway between the noise (2.16 MB) and the smallest loss that it must catch (9.44 MB, a lost cut).
+* 2026-11-12, agent (orchestrator): M1's worker headroom is -17 MB, not the team's -22 MB.  Why: -22 MB left a margin of 1.16 MB, which the maintainer's "not too tight" rules out.  The measured noise is 1 MB (the log's whole MB), and 2.16 MB was taken for it.  -17 MB is midway between that 2.16 MB and the smallest loss that it must catch (9.44 MB, a lost cut).
+* 2026-11-12, agent (orchestrator), intent review of M1: M6 holds at most one mask on the CPU, and defines `WorkingSet`'s phases again for the overlap (finding i1-1).  A failure of check 3 with no change to `working_set` gets a new headroom measurement, not a wider constant (finding i1-2).
 * 2026-11-12, agent (orchestrator): from M1 review round 6, each test doc in this plan's diffs says only what its test asserts, as a list.  Why: rounds 4 and 5 each found a new overclaim in one test's doc.
 
 ## Outcomes and retrospective
