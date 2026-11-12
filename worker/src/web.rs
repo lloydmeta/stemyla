@@ -1291,13 +1291,14 @@ impl GpuHalf for GpuNetwork<'_> {
 
     async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String> {
         let j = self.job.as_ref().expect("a chunk was uploaded");
-        // The first stem also runs the layers that every stem shares, in
-        // the order of `Job::steps`.
-        let shared = if stem == 0 { j.steps() } else { Vec::new() };
-        let shared = shared
-            .into_iter()
-            .filter(|step| !matches!(step, Step::Mask { .. }));
-        for step in shared.chain(j.mask_steps(stem)) {
+        // The first stem also runs the steps that every stem shares.  So the
+        // stems in order run `Job::steps` in order.
+        let shared = if stem == 0 {
+            j.shared_steps()
+        } else {
+            Vec::new()
+        };
+        for step in shared.into_iter().chain(j.mask_steps(stem)) {
             self.pace.run(self.gpu, j, &step).await?;
         }
         let mask = j.mask().await?;

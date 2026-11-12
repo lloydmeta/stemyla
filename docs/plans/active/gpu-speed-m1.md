@@ -218,6 +218,7 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
   * 1-28: `one_frame_gives_no_samples`.  `+` to `*` in `istft_frames`'s `full` fails it (an index out of range at `stft.rs:95`).
   * 1-4: the cut-1 test compares with `accept_with_a_window_clone`, the old `accept`.  The `weight` mutant `-` to `+` now fails it too.
   * 1-1, 1-6, 1-7, 1-8, 1-9, 1-10, 1-11: the docs.
+  * Round 2 fixes (2026-11-12): 4 confirmed doc and test findings, and 4 nits.  `Job::shared_steps` gives the steps that every stem's mask needs.  `Job::steps` and `GpuNetwork::mask` both use it, so their orders are the same by construction (2-4).  `split_gains` no longer takes `sub_batch`'s doc (2-1).  The TD-8 line names the real gap: CI and a machine with no adapter skip the GPU test (2-3).  So no `KNOWN_MISSED` entry is needed for `set_input`.
 
 ## Surprises and discoveries
 

@@ -272,8 +272,6 @@ impl Net {
         })
     }
 
-    /// Sequences per transformer step for sequences of `seq` tokens, with
-    /// fused attention or without.
     /// Each band group of the band split with its gains (`[count, width]`,
     /// times the square root of the width), as [`normalise_bands`] takes
     /// them.
@@ -281,6 +279,8 @@ impl Net {
         self.split.iter().map(|sg| (&sg.g, sg.gamma.as_slice()))
     }
 
+    /// Sequences per transformer step for sequences of `seq` tokens, with
+    /// fused attention or without.
     pub fn sub_batch(&self, batch: usize, seq: usize, fused: bool) -> usize {
         (self.budget / per_seq(seq, fused)).clamp(1, batch)
     }
@@ -647,13 +647,21 @@ impl<'a> Job<'a> {
         out
     }
 
-    /// Every step of the forward pass, in order.
-    pub fn steps(&self) -> Vec<Step> {
+    /// The steps that every stem's mask needs, in order: the band split,
+    /// the layers and the final norm.
+    pub fn shared_steps(&self) -> Vec<Step> {
         let mut out = vec![Step::Split];
         for i in 0..DEPTH {
             out.extend(self.layer_steps(i));
         }
         out.push(Step::FinalNorm);
+        out
+    }
+
+    /// Every step of the forward pass, in order: [`Job::shared_steps`],
+    /// then [`Job::mask_steps`] for each stem.
+    pub fn steps(&self) -> Vec<Step> {
+        let mut out = self.shared_steps();
         for s in 0..STEMS.len() {
             out.extend(self.mask_steps(s));
         }
@@ -1012,7 +1020,11 @@ mod tests {
         for (k, (g, w)) in got.iter().zip(&want).enumerate() {
             assert_eq!(g.to_bits(), w.to_bits(), "float {k}");
         }
-        assert_eq!(widest, widest_band(), "the widest band fits its buffer");
+        assert_eq!(
+            widest,
+            widest_band(),
+            "the widest band written is `widest_band`"
+        );
     }
 
     /// Without the scores buffer, a time-axis step takes 4 bands of a full

@@ -25,7 +25,7 @@ Entries found on 2026-10-19 by a survey of the code for the harness plan (`plans
 * The PyTorch comparisons run nowhere, because neither CI nor the maintainer's Mac has the fixtures.  Fix: the maintainer makes them on the Mac with `tools/roformer_export.py` and the PyTorch checkpoint.  Then `STEMYLA_REQUIRE=fixtures` is the evidence for the CPU, and `STEMYLA_REQUIRE=gpu,fixtures` for the GPU.
 * GPU and fixture evidence holds only when a person sets `STEMYLA_REQUIRE`, and nothing checks that a PR's evidence did.  Fix: phase 4's evaluator sets the variable in its contract.
 * `every_skip_can_be_required` sees only messages that start with `skipping` or `skipped`, in any case, so a silent early `return` passes it.  Fix: the `reviewer` agent looks for it.
-* `Job::set_input`'s write to the GPU is checked only on a GPU (`set_input_writes_the_normalised_bands_to_the_gpu` in `roformer-gpu/tests/memory.rs`).  So cargo-mutants, which runs with no GPU, cannot catch `set_input` replaced with `()`.  The pure part, `normalise_bands`, has a test with no GPU.  Fix: a cargo-mutants run on a machine with a GPU and `STEMYLA_REQUIRE=gpu`.
+* `Job::set_input`'s write to the GPU is checked only on a GPU (`set_input_writes_the_normalised_bands_to_the_gpu` in `roformer-gpu/tests/memory.rs`).  CI and a machine with no adapter skip it, and the skip passes without `STEMYLA_REQUIRE=gpu`.  The pure part, `normalise_bands`, has a test with no GPU.  Fix: as the bullet on `STEMYLA_REQUIRE` above.
 * The three `timestamps` tests, and the kernel check in `forward_matches_pytorch`, run nowhere.  CI excludes them, and the Mac's adapter has no `timestamp-query`.  Fix: run them on an adapter with `timestamp-query`, and name it in the PR.
 
 ### TD-10: GPU-3 is not checked

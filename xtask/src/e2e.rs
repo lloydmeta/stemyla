@@ -56,13 +56,13 @@
 //!   `docs/plans/active/gpu-speed.md`).  It stays flat after chunk 2.  It
 //!   grows by at most 4 MB more for the 4-minute song than for the
 //!   1-minute song.  Its growth fits the working set's peak plus a
-//!   measured headroom.  The tab total fits the iPhone's budget (MEM-4).  A fallback to the
-//!   memory path fails it.  It also checks that the page and the decode
-//!   worker grow by at most 4 MB while the song opens, and that Separate
-//!   writes no second mix (M5); `separate` checks that too.  Since M7, the
-//!   page's growth from the separation's end to the stems shown must be at
-//!   most 4 MB more for the 4-minute song than for the 1-minute song: the
-//!   stems show as stored lanes, with no read-back.
+//!   measured headroom.  The tab total fits the iPhone's budget (MEM-4).
+//!   A fallback to the memory path fails it.  It also checks that the
+//!   page and the decode worker grow by at most 4 MB while the song opens,
+//!   and that Separate writes no second mix (M5); `separate` checks that
+//!   too.  Since M7, the page's growth from the separation's end to the
+//!   stems shown must be at most 4 MB more for the 4-minute song than for
+//!   the 1-minute song: the stems show as stored lanes, with no read-back.
 //! * `stored-stems`: one worker separates 3 seconds of the synthetic mix on the
 //!   memory path, then on the storage path into a session folder, from a mix
 //!   file there (`--weights`).  Each stem file equals the memory path's stem as
@@ -1503,8 +1503,9 @@ fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
 /// weights): 3 runs of `memory-budget` in Chrome 157 and 3 in Safari 27.2
 /// gave 12 growths, each 57 MB.  The peak is 80.16 MB, so each headroom is
 /// -23.16 MB, with a spread of 0.  The worker logs whole MB, so a growth
-/// has an error of up to 1 MB.  The noise is at most 2.16 MB: the spread,
-/// the log's error and the rounding to a whole MB.  The smallest rise of
+/// has an error of up to 1 MB.  So the measured noise is 1 MB: the spread
+/// and the log's error.  The orchestrator took 2.16 MB as the noise, which
+/// adds 1.16 MB of an earlier rounding as more margin.  The smallest rise of
 /// the peak from a lost cut in the GPU half is 9.44 MB (cut 3: the whole
 /// normalised input, 89.60 MB against 80.16 MB).  The margin above the
 /// measured headroom is midway between the two, so that the check is no

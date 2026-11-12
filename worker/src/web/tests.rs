@@ -3234,7 +3234,8 @@ struct PhasePeaks {
 /// between phase runs to the next chunk's start.
 struct FakeGpu {
     frames: usize,
-    /// The band groups, and gains of 1 for the largest group.
+    /// The band groups, and gains of 1: `FEATURES` of them, as many as the
+    /// model has.  Each group takes its first `count x width`.
     groups: Vec<BandGroup>,
     gains: Vec<f32>,
     peaks: Rc<RefCell<PhasePeaks>>,
