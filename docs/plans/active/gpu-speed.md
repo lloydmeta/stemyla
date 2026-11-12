@@ -90,7 +90,7 @@ Two changes in `worker/src/web.rs`, each measured:
 
 The stems stay the same byte for byte: only the order of the work changes.
 
-Memory, from M1 (`plans/active/gpu-speed-m1.md`, Step 6):
+Memory, from M1 (`plans/completed/gpu-speed-m1.md`, Step 6):
 
 * The worker's working set is the function in `roformer::separate`, which `memory-budget` and the worker's wasm test use.  M6 adds the buffers that it holds as named parts of that function, in the same commit as the code.  The next chunk's input, spectra and features are about 42.5 MB at the default chunk.
 * `Demixer::end_chunk` moves the read position.  So the next chunk's input cannot be read before every stem of this chunk is accepted.  M6 gives the demixer a read cursor apart from the accept cursor.
@@ -165,7 +165,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 ## Progress
 
 * [x] 2026-11-12: baselines measured (Context), the maintainer's decisions recorded, the plan written.
-* [ ] M1: `memory-budget` at the default chunk.
+* [x] 2026-11-12: M1: `memory-budget` at the default chunk (`22cdd74..156324a`, plan `plans/completed/gpu-speed-m1.md`, reviews `docs/reviews/gpu-speed-2026-11-12-m1.md`, 8 rounds).  `e2e memory-budget` runs at the defaults with four checks: flat after chunk 2, no growth with the song, a working-set budget (`roformer::separate::working_set` plus a measured headroom of -17 MB), and a tab total of at most 943 MB (MEM-4).  It passes in Chrome and Safari.  Four bit-identical cuts and a read fix took the worker's working-set peak from 117.86 to 80.16 MB and its growth from 95 to 57 MB; the tab total is 799 MB (Chrome) and 758 MB (Safari).  `stored-stems` hashes did not change.  Stats: 8 rounds, 51 agents, 2,863,709 tokens, 107.2 wall minutes, 0 interventions; rounds 4 to 8 fixed 6 findings, all in one new GPU test, its doc and TD-8.  Debt: TD-11 lost its chunk bullet; TD-8 gained a line on what the new GPU tests do not check.
 * [ ] M2: the perf scenario and its gate.
 * [ ] M3: spike on Safari's overhead.
 * [ ] M4: a larger register-tiled matmul.
@@ -176,7 +176,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * 2026-11-12: the session runs Opus 5.5 (`claude-opus-5-5`, the system prompt) at effort `high` (`modelSettings` for `claude-opus-5-5` in `~/.claude/settings.json`, over `effortLevel: xhigh`).
 * 2026-11-12: Safari has `timestamp-query`, so `?profile=1` gives GPU times in Safari as in Chrome.
-* 2026-11-12, M1: the worker's WebAssembly memory at the default chunk is now 87 MB from chunk 1 to the end, a growth of 57 MB (95 MB before).  The tab total is 799 MB in Chrome and 758 MB in Safari.  After the cuts the heap has little free space.  So a buffer of a new size, such as a shorter last chunk, grew the worker by 19 MB until M1 read and padded each chunk at one size (`plans/active/gpu-speed-m1.md`, Step 8).  M6 keeps its buffers at fixed sizes for the same reason.
+* 2026-11-12, M1: the worker's WebAssembly memory at the default chunk is now 87 MB from chunk 1 to the end, a growth of 57 MB (95 MB before).  The tab total is 799 MB in Chrome and 758 MB in Safari.  After the cuts the heap has little free space.  So a buffer of a new size, such as a shorter last chunk, grew the worker by 19 MB until M1 read and padded each chunk at one size (`plans/completed/gpu-speed-m1.md`, Step 8).  M6 keeps its buffers at fixed sizes for the same reason.
 * 2026-11-12: Chrome's calibration chose split attention on the time axis (split 1.90 s, fused 2.26 s for each chunk).  Safari's chose fused (split 3.43 s, fused 3.27 s).  `docs/ARCHITECTURE.md` says Apple GPUs choose fused, which holds only for Safari.
 
 ## Decision log
@@ -186,6 +186,8 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-12, agent (orchestrator): no f16 arithmetic.  Why: on M1 and M2 GPUs, f16 FMA runs at the f32 rate, and decision 0022 keeps f32 sums.
 * 2026-11-12, agent (orchestrator): no `subgroups` and no subgroup matrices.  Why: Safari 27.2 offers neither, and the maintainer chose the default limits and features (decision 1).
 * 2026-11-12, agent (orchestrator): the Radeon and the iPhone are protected by calibration, not by required runs.  Each new kernel is a candidate that a GPU keeps only if it measures faster there.
+* 2026-11-12, agent (orchestrator): M1's worker headroom is -17 MB, not the team's -22 MB.  Why: -22 MB left 1.16 MB above the noise, which the maintainer's "not too tight" rules out.  -17 MB is midway between the noise (2.16 MB) and the smallest loss that it must catch (9.44 MB, a lost cut).
+* 2026-11-12, agent (orchestrator): from M1 review round 6, each test doc in this plan's diffs says only what its test asserts, as a list.  Why: rounds 4 and 5 each found a new overclaim in one test's doc.
 
 ## Outcomes and retrospective
 
