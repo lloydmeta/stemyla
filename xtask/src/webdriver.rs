@@ -273,6 +273,17 @@ pub fn start_session(browser: Browser, args: &[String]) -> Result<(Driver, Sessi
 pub struct Session {
     port: u16,
     id: String,
+    /// The browser's version, from the new session's capabilities.
+    pub version: String,
+}
+
+/// The browser version of a new session's reply: its
+/// `capabilities.browserVersion`, or `unknown`.
+fn browser_version(reply: &Value) -> String {
+    reply["capabilities"]["browserVersion"]
+        .as_str()
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 impl Session {
@@ -303,6 +314,7 @@ impl Session {
         Ok(Self {
             port: driver.port,
             id,
+            version: browser_version(&value),
         })
     }
 
@@ -727,6 +739,19 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::sync::mpsc;
+
+    /// Asserts:
+    /// * a reply with `capabilities.browserVersion` gives that version;
+    /// * a reply without it gives `unknown`.
+    #[test]
+    fn the_browser_version_comes_from_the_capabilities() {
+        let reply = json!({
+            "sessionId": "1",
+            "capabilities": { "browserName": "chrome", "browserVersion": "157.0.7000.0" },
+        });
+        assert_eq!(browser_version(&reply), "157.0.7000.0");
+        assert_eq!(browser_version(&json!({ "sessionId": "1" })), "unknown");
+    }
 
     #[test]
     fn safari_ends_the_stale_sessions_and_tries_twice() {

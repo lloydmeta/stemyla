@@ -166,7 +166,23 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * [x] Plan review round 2 (2026-11-12): 2 should-fix (the asked tier; Safari's forced flip is `attn=freq`) and 3 nits, each applied.
 * [x] Step 1: the worker names the adapter and `isFallbackAdapter` (2026-11-12).  No new test: the e2e runs of Step 5 are the evidence (Step 3's parse fails a `model loaded` line with no fallback text).  TD-10 now says what the log gives.
 * [x] Step 2: profile labels name the axis of attention (2026-11-12).  First failure: `attention_labels_name_their_shapes` at `roformer-gpu/src/lib.rs:3704` (`assert_eq!(softmax_label(9208, 1151), "softmax 9208x1151")`, left `""`), with stubs that gave an empty label.  `cargo test -p roformer-gpu --lib` (50 passed) and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed on the M2 Pro (Metal).  The three profile tests that read the softmax label passed with `STEMYLA_REQUIRE=gpu,f16,timestamps`.
-* [ ] Step 3: the scenario `e2e perf`.
+* [x] Step 3: the scenario `e2e perf` (2026-11-12).  First failures, with stubs that gave empty or default values (`read_baselines` gave `Err("stub")`), each in `xtask/src/e2e/perf.rs`:
+  * `a_full_log_gives_each_value` at `assert_eq!(r.browser, "chrome")` (line 198, left `""`).
+  * `the_chunk_median_leaves_chunk_1_out` at `assert_eq!(r.chunk_median, 5.0)` (line 218, left 0.0).
+  * `a_log_without_a_needed_line_fails` at its `matches!(&got, Err(e) if e.contains(text))` (line 251, "fallback adapter: Ok(PerfResult { .. })").
+  * `each_profile_line_goes_to_its_group` at `assert_eq!(g.time_attention, 15.0)` (line 296, left 0.0).
+  * `a_log_without_profile_lines_gives_no_groups` (line 310, left `Some(Groups { .. })`, right `None`).
+  * `never_a_pass_names_each_reason` at `assert!(reason.contains(text))` (line 360, "fallback: \"\"").
+  * `the_gate_fails_only_over_the_bound` at `assert!(text.contains(part))` (line 429, "5.50 s: ").
+  * `the_tolerance_is_twice_the_spread_and_at_least_10` (line 470, left `Ok(0.0)`, right `Ok(10.0)`).
+  * `an_entry_holds_the_runs_and_their_median` at `assert_eq!(e.key, key())` (line 493, left a key of empty texts).
+  * `baselines_keep_each_field_through_a_round_trip` (line 518, left `Err("stub")`).
+  * `with_entry_replaces_only_the_entry_of_its_key` (line 532, left the old Chrome entry).
+  * `the_committed_baselines_hold_tolerances_and_no_machine_path` at `assert!(entries.is_ok())` (line 547, `Err("stub")`).
+  * `a_raise_over_the_tolerance_needs_a_reason` at `assert!(reason.contains("--raise"))` (line 569, `""`).
+  * `the_browser_version_comes_from_the_capabilities` at `xtask/src/webdriver.rs:750` (left `""`, right `"157.0.7000.0"`).
+  * On the first try, two tests stopped on an `expect_err` and a `let ... else { panic!() }`, not on an assert.  They now assert.
+  * One run of `e2e perf` in each browser passed with no baseline (Surprises).
 * [ ] Step 4: the gate in `check --tier push`.
 * [ ] Step 5: the baselines, measured.
 * [ ] Step 6: the docs and the debt.
@@ -176,6 +192,8 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 ## Surprises and discoveries
 
 * 2026-11-12, plan: M1's logs at `0c56d0a` give the adapter texts `apple metal-3` (Chrome 157) and `apple apple apple` (Safari 27.2).  Neither names the chip.
+* 2026-11-12, Step 3: `GPUAdapterInfo.isFallbackAdapter` is `false` in Safari 27.2 and in Chrome 157.0.8103.51 on the M2 Pro: both `model loaded` lines give `fallback adapter no`.
+* 2026-11-12, Step 3: one trial run in each browser, before the baselines.  Chrome: chunk median 4.70 s, 52.1 s in all, 1.33 TFLOP/s, `matmul v64,v64, attention freq`.  Safari 27.2: chunk median 7.50 s, 82.2 s in all, 0.83 TFLOP/s, `matmul v64,i64, attention fused`.  So Safari's calibration chose `i64` for the small products in this run, not `v64` as in M1's logs (small: `i64` 1.20 s, `v64` 1.16 s there).  The near choice flips between runs.
 
 ## Decision log
 
@@ -191,6 +209,12 @@ Each step is one commit or more, signed, on `gpu-speed/2026-11-12`.  A session t
 * 2026-11-12, agent (team leader, plan review round 1): the cost of a kernel flip is measured with the other choice forced, not estimated from the calibration line.  Why: the calibration times cover only sample shapes, and attention flips at `FUSED_MARGIN`, not at a free 10 %.
 * 2026-11-12, agent (team leader, plan review round 1): an update may not raise a baseline over its tolerance without a new browser version or a stored reason.  Why: a raise hides the slowdown that the gate must stop.
 * 2026-11-12, agent (team leader, plan review round 1): no new `CLAUDE.md` line; the comment of the `check --tier push` line names the gate.  Why: `CLAUDE.md` is at 96 of 100 lines, and the `e2e <scenario>` line covers the command.
+
+* 2026-11-12, agent (implementer): `perf_result` reads the weight format from the `kernels:` line (`(calibrated; f16 weights)`), not from the `memory:` line.  Why: the line that gives the kernels also gives the format, so one line holds both.
+* 2026-11-12, agent (implementer): `profile_groups` gives `None` for a log with no `total GPU time` line, and `PerfResult.groups` is then `None`.  The gate reads `groups` to find a profile run.  Why: one field tells both what the run measured and whether it is gated.
+* 2026-11-12, agent (implementer): a pure `new_entry` builds the entry of an update from its runs.  It refuses a profile run, and runs of more than one browser, adapter or browser version.  Why: the plan's rule "no reason from `never_a_pass`" does not cover a profile run, whose times are one pass for each dispatch.
+* 2026-11-12, agent (implementer): with `--update-baselines`, a run over the old bound prints the gate's text and does not fail.  `update_refusal` decides the update.  Why: a new browser version or a `--raise` reason can make a slower baseline correct.
+* 2026-11-12, agent (implementer): `memory_budget` and `perf` share two small functions, `open_song` and `load_and_separate`.  Each returns the log's mark that `memory_budget` used before, so its checks read the same lines.
 
 ## Outcomes and retrospective
 

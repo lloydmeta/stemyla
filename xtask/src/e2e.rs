@@ -72,6 +72,24 @@
 //!   (`--weights`; M9 of `docs/plans/completed/stream-from-storage.md`).  The
 //!   stems of the two formats must be equal bit for bit, with M3's kernels
 //!   and with this GPU's own; the speed is reported as a measure.
+//! * `perf`: separates the 1-minute song of `memory-budget` at the default
+//!   chunk, `--runs N` times (default 1), each in a new browser profile
+//!   (`--weights`; M2 of `docs/plans/active/gpu-speed.md`, `e2e/perf.rs`).
+//!   Each run writes `<out>/perf-<browser>-<n>.json`: the browser and its
+//!   version, the adapter and its `isFallbackAdapter`, the kernels, the
+//!   time of each chunk, the median of chunks 2 to N, the whole time and
+//!   the matmul rate.  With `--query profile=1`, it adds the GPU time in
+//!   four groups.  The key of a baseline in `xtask/perf-baselines.json` is
+//!   the browser, the adapter text and the host's chip (`sysctl`).  A run
+//!   fails when its chunk median is over the key's baseline by more than
+//!   the tolerance.  With no baseline it is not gated; `--gate` makes that
+//!   a failure.  A fallback or SwiftShader adapter, `--swiftshader`,
+//!   `--headed`, f32 weights, or a query that sets `chunk`, `overlap`,
+//!   `mm`, `attn` or `weights` is never a pass: `--gate` and
+//!   `--update-baselines` fail it.  `--update-baselines` with `--runs 5` or
+//!   more writes the key's baseline.  It refuses a raise over the old
+//!   tolerance with the same browser version, unless `--raise "<reason>"`
+//!   gives the reason.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -79,7 +97,8 @@
 //! WebGPU, for machines without a GPU), `--query Q` (page URL query for
 //! the GPU scenarios), `--weights FILE`, `--selftest-dir DIR`,
 //! `--reference DIR`, `--download`, `--flac`, `--hashes H1,...,H6` (the
-//! six SHA-256s of `stored-stems`, in the worker's stem order), and click
+//! six SHA-256s of `stored-stems`, in the worker's stem order), `--runs N`,
+//! `--gate`, `--update-baselines` and `--raise REASON` (`perf`), and click
 //! positions `--play-x`,
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
 //!
@@ -99,6 +118,7 @@ use std::time::{Duration, Instant};
 
 mod decode;
 mod old_session;
+mod perf;
 mod playback;
 mod save;
 mod weights;
@@ -143,6 +163,14 @@ pub struct Opts {
     pub flac: bool,
     /// `stored-stems` checks the stems' SHA-256s against these.
     pub hashes: Option<String>,
+    /// `perf`: the number of runs, each in a new browser profile.
+    pub runs: usize,
+    /// `perf`: a run with no baseline, or that can never pass, fails.
+    pub gate: bool,
+    /// `perf`: the runs write the baseline of their key.
+    pub update_baselines: bool,
+    /// `perf`: the reason of a raise over the old tolerance.
+    pub raise: Option<String>,
     pub play_x: f64,
     pub tempo_x: f64,
     pub download_x: f64,
@@ -163,7 +191,7 @@ impl Opts {
             .first()
             .filter(|s| !s.starts_with("--"))
             .context(
-                "usage: xtask e2e <smoke|decode|playback|old-session|audio-resume|storage|flac|save|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
+                "usage: xtask e2e <smoke|decode|playback|old-session|audio-resume|storage|flac|save|bench|selftest|separate|worker-check|memory-budget|stored-stems|weights|perf> [options]",
             )?
             .clone();
         // Defaults are in the workspace, wherever this runs from.
@@ -182,6 +210,10 @@ impl Opts {
             download: false,
             flac: false,
             hashes: None,
+            runs: 1,
+            gate: false,
+            update_baselines: false,
+            raise: None,
             // Positions in the 1100-pixel top bar with no model loaded.
             play_x: 600.0,
             // 75% on the 50..150% tempo slider while playing ("Pause" is
@@ -220,6 +252,10 @@ impl Opts {
                 "--download" => o.download = true,
                 "--flac" => o.flac = true,
                 "--hashes" => o.hashes = Some(value()?),
+                "--runs" => o.runs = value()?.parse()?,
+                "--gate" => o.gate = true,
+                "--update-baselines" => o.update_baselines = true,
+                "--raise" => o.raise = Some(value()?),
                 "--play-x" => o.play_x = value()?.parse()?,
                 "--tempo-x" => o.tempo_x = value()?.parse()?,
                 "--download-x" => o.download_x = value()?.parse()?,
@@ -276,6 +312,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "memory-budget" => memory_budget(&o),
         "stored-stems" => stored_stems(&o),
         "weights" => weights::run(&o),
+        "perf" => perf(&o),
         other => bail!("unknown scenario {other}"),
     }
 }
@@ -1869,14 +1906,11 @@ fn memory_budget(o: &Opts) -> Result<()> {
         )?;
         p.scenario = format!("memory-budget-{minutes}");
         p.wait_for(0, 60, |l| l.contains("separator: "))?;
-        let from = p.mark();
-        p.drop_files(&[(
+        let from = open_song(
+            &mut p,
             &format!("/test/{minutes}/song.wav"),
-            "song.wav",
-            "audio/wav",
-        )])?;
-        let kept = p.wait_for(from, 300, |l| l.contains("song kept in browser storage"))?;
-        p.check(kept.is_some(), &format!("the {minutes}-minute song opens"));
+            &format!("the {minutes}-minute song opens"),
+        )?;
         let (ok, what) = open_on_the_worker_check(&p.log[from..]);
         p.check(ok, &what);
         // D12 of M5: neither the page nor the decode worker grows with the
@@ -1893,24 +1927,12 @@ fn memory_budget(o: &Opts) -> Result<()> {
                 ));
             }
         }
-        let from = p.mark();
-        drop_model(&mut p, &model)?;
-        let loaded = p.wait_for(from, 1200, |l| holds_or_error(l, "separator: model loaded"))?;
-        p.check(
-            loaded
-                .as_deref()
-                .is_some_and(|l| l.contains("model loaded")),
-            "the model loads",
-        );
-        let from = p.mark();
-        p.click(o.separate_x, "Separate 6 stems")?;
-        let shown = p.wait_for(from, MODEL_RUN_SECS, separation_shown)?;
-        p.check(
-            shown
-                .as_deref()
-                .is_some_and(|l| l.contains("with the stems shown")),
+        let from = load_and_separate(
+            &mut p,
+            o,
+            &model,
             &format!("the {minutes}-minute song separates"),
-        );
+        )?;
         let (ok, what) = no_fallback_check(&p.log[from..]);
         p.check(ok, &what);
         let (ok, what) = no_mix_write_check(&p.log[from..]);
@@ -1989,6 +2011,199 @@ fn memory_budget(o: &Opts) -> Result<()> {
         );
     }
     verdict(&checks)
+}
+
+/// Drops the WAV at `url` on the page, waits until the song is kept in
+/// browser storage, and checks `what` on it.  Returns the log's mark
+/// before the drop.
+fn open_song(p: &mut Page, url: &str, what: &str) -> Result<usize> {
+    let from = p.mark();
+    p.drop_files(&[(url, "song.wav", "audio/wav")])?;
+    let kept = p.wait_for(from, 300, |l| l.contains("song kept in browser storage"))?;
+    p.check(kept.is_some(), what);
+    Ok(from)
+}
+
+/// Drops the model at `model`, waits until it loads, clicks Separate and
+/// waits until the stems are shown; checks the load, and `what` on the
+/// stems.  Returns the log's mark before the click.
+fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<usize> {
+    let from = p.mark();
+    drop_model(p, model)?;
+    let loaded = p.wait_for(from, 1200, |l| holds_or_error(l, "separator: model loaded"))?;
+    p.check(
+        loaded
+            .as_deref()
+            .is_some_and(|l| l.contains("model loaded")),
+        "the model loads",
+    );
+    let from = p.mark();
+    p.click(o.separate_x, "Separate 6 stems")?;
+    let shown = p.wait_for(from, MODEL_RUN_SECS, separation_shown)?;
+    p.check(
+        shown
+            .as_deref()
+            .is_some_and(|l| l.contains("with the stems shown")),
+        what,
+    );
+    Ok(from)
+}
+
+/// The tokens of the time axis and of the frequency axis at the default
+/// chunk: the frames of a chunk and the bands.
+fn perf_axes() -> (usize, usize) {
+    let frames = roformer::CHUNK / roformer::HOP + 1;
+    let bands = roformer::band_groups().iter().map(|g| g.count).sum();
+    (frames, bands)
+}
+
+/// The name of `browser` in a key and a file name.
+fn browser_name(browser: Browser) -> &'static str {
+    match browser {
+        Browser::Chrome => "chrome",
+        Browser::Safari => "safari",
+    }
+}
+
+/// The first line of a command's output, trimmed, or `unknown`.
+fn command_text(program: &str, args: &[&str]) -> String {
+    std::process::Command::new(program)
+        .args(args)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| {
+            String::from_utf8(out.stdout)
+                .ok()
+                .and_then(|s| s.lines().next().map(|l| l.trim().to_string()))
+        })
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".into())
+}
+
+/// `e2e perf`: separates the 1-minute song of `memory-budget` at the
+/// default chunk, `--runs` times, each in a new browser profile.  Each
+/// run writes `<out>/perf-<browser>-<n>.json` and is gated against the
+/// baseline of its key (`perf.rs`).
+fn perf(o: &Opts) -> Result<()> {
+    if o.update_baselines && o.runs < perf::MIN_RUNS {
+        bail!("--update-baselines needs --runs {} or more", perf::MIN_RUNS);
+    }
+    let path = perf::baselines_path();
+    let baselines =
+        perf::read_baselines(&std::fs::read_to_string(&path)?).map_err(anyhow::Error::msg)?;
+    let mut mounts = vec![("/test/1/".to_string(), long_song(&o.out, 1)?)];
+    let model = weights_mount(o, &mut mounts)?;
+    let base = start_server(&o.dist, mounts, &["console.js"])?;
+    let q = query(o, "");
+    let browser = browser_name(o.browser);
+    let chip = command_text("sysctl", &["-n", "machdep.cpu.brand_string"]);
+    let (frames, bands) = perf_axes();
+    let mut results = Vec::new();
+    for n in 1..=o.runs {
+        let mut p = Page::open(
+            o,
+            base.clone(),
+            &[
+                "--enable-unsafe-webgpu",
+                "--autoplay-policy=no-user-gesture-required",
+            ],
+            &format!("index.html?{q}"),
+        )?;
+        p.scenario = format!("perf-{browser}-{n}");
+        p.wait_for(0, 60, |l| l.contains("separator: "))?;
+        open_song(&mut p, "/test/1/song.wav", "the 1-minute song opens")?;
+        load_and_separate(&mut p, o, &model, "the 1-minute song separates")?;
+        let version = p.session.version.clone();
+        match perf::perf_result(&p.log, browser, &version, frames, bands) {
+            Err(e) => p.check(false, &format!("the result of run {n}: {e}")),
+            Ok(result) => {
+                let file = o.out.join(format!("perf-{browser}-{n}.json"));
+                std::fs::write(&file, serde_json::to_string_pretty(&result)?)?;
+                p.note(&format!(
+                    "perf: {browser} {version}, run {n}: chunk median {:.2} s, whole {:.1} s, {:.2} TFLOP/s, kernels {}, {} weights, adapter {} (fallback adapter {}); {}",
+                    result.chunk_median,
+                    result.whole_secs,
+                    result.tflops,
+                    result.kernels,
+                    result.weights,
+                    result.adapter,
+                    result.fallback,
+                    file.display()
+                ));
+                if let Some(g) = &result.groups {
+                    p.note(&format!(
+                        "perf: GPU time by group: time-axis attention {:.3} s, frequency-axis attention {:.3} s, linear products {:.3} s, other {:.3} s, total {:.3} s",
+                        g.time_attention, g.freq_attention, g.linear, g.other, g.total
+                    ));
+                }
+                let key = perf::Key {
+                    browser: browser.to_string(),
+                    adapter: result.adapter.clone(),
+                    chip: chip.clone(),
+                };
+                let claimed = o.gate || o.update_baselines;
+                match perf::never_a_pass(&result, o) {
+                    Some(reason) if claimed => {
+                        p.check(false, &format!("run {n} is never a pass: {reason}"));
+                    }
+                    Some(reason) => p.note(&format!("perf: not gated: {reason}")),
+                    None => match baselines.iter().find(|e| e.key == key) {
+                        None if o.gate => {
+                            p.check(false, &format!("no baseline for {key}: not gated"));
+                        }
+                        None => p.note(&format!("perf: no baseline for {key}: not gated")),
+                        Some(entry) => match perf::gate(&result, entry) {
+                            perf::Verdict::Pass(text) => {
+                                p.note(&format!("perf: the gate passed: {text}"));
+                            }
+                            perf::Verdict::Fail(text) if o.update_baselines => {
+                                p.note(&format!(
+                                    "perf: over the old bound, for the update: {text}"
+                                ));
+                            }
+                            perf::Verdict::Fail(text) => {
+                                p.check(false, &format!("the gate: {text}"));
+                            }
+                            perf::Verdict::NotGated(text) => {
+                                p.note(&format!("perf: not gated: {text}"));
+                            }
+                        },
+                    },
+                }
+                results.push(result);
+            }
+        }
+        p.finish()?;
+    }
+    if o.update_baselines {
+        let date = command_text("date", &["+%Y-%m-%d"]);
+        let commit = command_text("git", &["rev-parse", "--short", "HEAD"]);
+        let raise = o.raise.as_deref().unwrap_or_default();
+        let entry =
+            perf::new_entry(&results, &chip, &date, &commit, raise).map_err(anyhow::Error::msg)?;
+        let old = baselines.iter().find(|e| e.key == entry.key);
+        if let Some(refusal) = perf::update_refusal(old, &entry, raise) {
+            bail!("perf: the update is refused: {refusal}");
+        }
+        println!(
+            "perf: the baseline of {}: {:.2} s, tolerance {:.0} %, from {} runs (was {})",
+            entry.key,
+            entry.baseline,
+            entry.tolerance_pct,
+            entry.runs.len(),
+            old.map_or("none".to_string(), |e| format!(
+                "{:.2} s, tolerance {:.0} %",
+                e.baseline, e.tolerance_pct
+            ))
+        );
+        std::fs::write(
+            &path,
+            perf::write_baselines(&perf::with_entry(baselines, entry)),
+        )?;
+        println!("perf: wrote {}", path.display());
+    }
+    Ok(())
 }
 
 /// The verdict of `memory-budget` on its checks across the songs: an
