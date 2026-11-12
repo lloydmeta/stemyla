@@ -2,7 +2,7 @@
 
 Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/completed/harness-phase-3b.md`; proposed by the agent on 2026-10-30; amends GIT-2)
 
-Amended by 0031 (proposed).
+Amended by 0031 (accepted 2026-11-12).
 
 ## Context
 

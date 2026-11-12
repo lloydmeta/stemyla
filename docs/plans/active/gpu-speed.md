@@ -201,7 +201,9 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-12, agent (orchestrator): from M1 review round 6, each test doc in this plan's diffs says only what its test asserts, as a list.  Why: rounds 4 and 5 each found a new overclaim in one test's doc.
 * 2026-11-12, agent (team leader of M2, accepted by the orchestrator): the perf gate reads the chunk lower quartile, not the chunk median.  Why: on the median, 5 runs in each browser gave tolerances of 22 % (Chrome) and 28 % (Safari), over M2's limit of 20 %.  The chunk times have a floor and groups of slow chunks from interference, which only adds time, and a slower kernel moves every chunk.  On the same runs the lower quartile gives 10 % and 11 % (Chen and Revels, [Robust benchmarking in noisy environments](https://arxiv.org/abs/1608.04295)).
 * 2026-11-12, agent (team leader of M2): Safari's tolerance stays at 10 %, though a forced `attn=freq` run costs 9.5 %.  Why: calibration splits the time axis only when split is more than `FUSED_MARGIN` (1.1) times faster, and 26 Safari calibrations gave fused / split 0.975 to 0.992 (`plans/completed/gpu-speed-m2.md`, Decision log).
-* 2026-11-12, agent (team leader of M2): decision 0031 (proposed) amends decision 0026 and GIT-2: tier `push`, when asked, runs `e2e perf --gate` in Chrome, then Safari, when `STEMYLA_PERF_WEIGHTS` names the model and the paths change `roformer/`, `roformer-gpu/`, `worker/` or a workspace file.  For "Needs your attention" in the PR.
+* 2026-11-12, agent (team leader of M2): decision 0031 amends decision 0026 and GIT-2: tier `push`, when asked, runs `e2e perf --gate` in Chrome, then Safari, when `STEMYLA_PERF_WEIGHTS` names the model and the paths change `roformer/`, `roformer-gpu/`, `worker/` or a workspace file.  For "Needs your attention" in the PR.
+
+* 2026-11-12, maintainer: decision 0031 is accepted.
 
 ## Outcomes and retrospective
 

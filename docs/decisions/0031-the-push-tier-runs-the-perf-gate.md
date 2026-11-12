@@ -1,6 +1,6 @@
 # 0031: tier push runs the perf gate when asked
 
-Status: proposed (2026-11-12, by the agent, in Step 4 of `plans/completed/gpu-speed-m2.md`; amends decision 0026 and GIT-2)
+Status: accepted (proposed 2026-11-12 by the agent, in Step 4 of `plans/completed/gpu-speed-m2.md`; accepted by the maintainer on 2026-11-12; amends decision 0026 and GIT-2)
 
 ## Context
 

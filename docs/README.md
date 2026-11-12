@@ -87,7 +87,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0028-m4a-with-alac-as-the-save-format.md`: the app saves 16-bit stereo ALAC M4A, written by the Pure crate `m4a` with a safe port of `alac-encoder` 0.3.0 (accepted, amended 2026-11-08 and 2026-11-10).
 * `decisions/0029-m4a-is-apache-2-only.md`: the crate `m4a` is Apache-2.0 only, since its ALAC encoder is a port of Apple's Apache-2.0 reference (accepted).
 * `decisions/0030-the-save-check-counts-the-heap.md`: a count of the page's Rust heap for the memory check of `e2e save` (rejected; the check keeps the memory's growth, with a bound of 3 MiB).
-* `decisions/0031-the-push-tier-runs-the-perf-gate.md`: tier `push`, when asked, runs `e2e perf --gate` in Chrome and Safari when `STEMYLA_PERF_WEIGHTS` names the model and the paths change GPU or worker code (proposed).
+* `decisions/0031-the-push-tier-runs-the-perf-gate.md`: tier `push`, when asked, runs `e2e perf --gate` in Chrome and Safari when `STEMYLA_PERF_WEIGHTS` names the model and the paths change GPU or worker code (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References
