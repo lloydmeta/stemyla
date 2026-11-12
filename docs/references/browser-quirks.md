@@ -74,3 +74,12 @@ Seen in Safari 27.2 on macOS, on an Apple M2 Pro, on 2026-11-11.  A `File` from 
 * The code: the worker reads the size of the stored model just after `getFile()`, before any other message can remove the file (`init` in `worker/src/web.rs`).  `a_stored_file_removed_after_it_was_opened_is_a_read_error` reads it there too.
 * Rule: VERIFY-1.
 
+
+## Safari sets workgroup memory to zero with one thread
+
+Seen in Safari 27.2 on macOS 27.2.1, on an Apple M2 Pro, on 2026-11-13 (`plans/active/gpu-speed-m3.md`, Steps 1, 4 and 5).  WebKit's WGSL compiler sets each `var<workgroup>` to zero at the start of a kernel.  Thread 0 alone does it, byte by byte, then all threads wait at a barrier.  Chrome 157 spreads the stores over the threads of the workgroup.
+
+* The code in WebKit (`main` at `5447ffbd5817eb8a1de9c0540bb8a6fe37db555d`, read on 2026-11-13): `RewriteGlobalVariables::initializeVariables` puts `if (local_invocation_index == 0) { ... }` and a `workgroupBarrier()` at the kernel's start ([GlobalVariableRewriter.cpp in WebKit's Source/WebGPU/WGSL, lines 2552 to 2594](https://github.com/WebKit/WebKit/blob/5447ffbd5817eb8a1de9c0540bb8a6fe37db555d/Source/WebGPU/WGSL/GlobalVariableRewriter.cpp#L2552-L2594)).  Inside it, a loop calls `__wgslZeroWorkgroupVar` on each element ([lines 2666 to 2786](https://github.com/WebKit/WebKit/blob/5447ffbd5817eb8a1de9c0540bb8a6fe37db555d/Source/WebGPU/WGSL/GlobalVariableRewriter.cpp#L2666-L2786)).  That function writes the element one byte at a time ([MetalFunctionWriter.cpp in WebKit's Source/WebGPU/WGSL/Metal, lines 1081 to 1095](https://github.com/WebKit/WebKit/blob/5447ffbd5817eb8a1de9c0540bb8a6fe37db555d/Source/WebGPU/WGSL/Metal/MetalFunctionWriter.cpp#L1081-L1095)).  No option turns it off.  Safari 27.2 ships from a release branch, which can differ from `main`.
+* The cost: a kernel with 10 KiB of workgroup memory and almost no work took 408 us for 2,064 workgroups in Safari, and 17.9 us in Chrome.  Chrome's MSL for `v64`, timed through Metal with WebKit's zero-init put in, was 1.29 times slower at K 256.  With WebKit's clamps too, it was 1.49 times slower.  This is 64 % of `v64`'s loss in Safari at K 256, and 29 % at K 1,024.
+* The code here: none yet.  The cost grows with the bytes of workgroup memory and the number of workgroups, so a kernel that does more work for each byte of workgroup memory loses less in Safari.  M4 of `plans/active/gpu-speed.md` uses this.
+* Rule: GPU-1 (the default limits stay).  A WebKit bug text is in the M3 findings.
