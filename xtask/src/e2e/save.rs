@@ -1208,12 +1208,16 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         ],
         "index.html",
     )?;
-    let ready = p.wait_for(0, START_WAIT_S, |l| l.contains("separator: "))?;
+    let ready = p.wait_for(0, START_WAIT_S, "the app to start", |l| {
+        l.contains("separator: ")
+    })?;
     p.check(ready.is_some(), "the app started");
     // Safari gives no `performance.memory`, so it cannot measure the JS
     // heap (TD-11).  Each such check prints as not measured.
     let measured = heap_measured(o.browser);
-    let probe = p.wait_for(0, PROBE_WAIT_S, |l| probe_line(l).is_some())?;
+    let probe = p.wait_for(0, PROBE_WAIT_S, "the probe line", |l| {
+        probe_line(l).is_some()
+    })?;
     let (aac, why_not) = aac_rule(std::env::consts::OS, probe.as_deref().and_then(probe_line));
     p.note(&format!("save: the run saves AAC: {aac} ({probe:?})"));
     if let Some(why) = why_not {
@@ -1256,7 +1260,9 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     for seconds in SECONDS {
         let from = p.mark();
         restore(&mut p, seconds)?;
-        let overviews = p.wait_for(from, RESTORE_WAIT_S, |l| l.contains(OVERVIEWS_END))?;
+        let overviews = p.wait_for(from, RESTORE_WAIT_S, "the stem overviews", |l| {
+            l.contains(OVERVIEWS_END)
+        })?;
         if overviews.is_none() {
             bail!(
                 "{seconds} s: the first restore made no stem overviews within {RESTORE_WAIT_S} s"
@@ -1408,7 +1414,9 @@ fn restore(p: &mut Page, seconds: u32) -> Result<usize> {
     in_page(p, MAKE_CURRENT, json!([id]), SCRIPT_WAIT_S)?;
     p.reload()?;
     let from = p.mark();
-    let current = p.wait_for(from, RESTORE_WAIT_S, |l| current_session(l).is_some())?;
+    let current = p.wait_for(from, RESTORE_WAIT_S, "the session switch", |l| {
+        current_session(l).is_some()
+    })?;
     let shown = current.as_deref().and_then(current_session);
     let restored = p.log[from..]
         .iter()
@@ -1519,7 +1527,9 @@ fn click_save(
 /// offers AAC.
 fn save_once(p: &mut Page, o: &Opts, (kind, row): (&str, usize), seconds: u32) -> Result<Save> {
     let page = restore(p, seconds)?;
-    let probe = p.wait_for(page, PROBE_WAIT_S, |l| probe_line(l).is_some())?;
+    let probe = p.wait_for(page, PROBE_WAIT_S, "the probe line of the page", |l| {
+        probe_line(l).is_some()
+    })?;
     let offered = probe.as_deref().and_then(probe_line);
     if aac_not_offered(kind, offered) {
         bail!("aac, {seconds} s: the page of the save does not offer AAC ({probe:?})");
@@ -1587,15 +1597,19 @@ fn save_playing(p: &mut Page, o: &Opts) -> Result<Playing> {
     )?;
     let played = p.mark();
     p.click(o.play_x, "Play")?;
-    if p.wait_for(played, PLAY_WAIT_S, |l| playback_line(l).is_some())?
-        .is_none()
+    if p.wait_for(played, PLAY_WAIT_S, "a playback line", |l| {
+        playback_line(l).is_some()
+    })?
+    .is_none()
     {
         bail!("wav, {seconds} s, during playback: no playback line within {PLAY_WAIT_S} s");
     }
     let mark = p.mark();
     let offered = click_save(p, o, ("wav", 0, seconds), (false, false))?;
     let after = p.mark();
-    let last = p.wait_for(after, PLAY_WAIT_S, |l| playback_line(l).is_some())?;
+    let last = p.wait_for(after, PLAY_WAIT_S, "the last playback line", |l| {
+        playback_line(l).is_some()
+    })?;
     p.click(o.play_x, "Pause")?;
     let frames = in_page(
         p,

@@ -204,7 +204,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         &["--autoplay-policy=no-user-gesture-required"],
         "index.html",
     )?;
-    let ready = p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    let ready = p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     p.check(ready.is_some(), "the app started");
     let mut restores = Vec::new();
     for seconds in SECONDS {
@@ -215,7 +215,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         ));
         p.reload()?;
         let from = p.mark();
-        let restored = p.wait_for(from, 900, |l| {
+        let restored = p.wait_for(from, 900, "the session to restore with its stems", |l| {
             l.contains("and its separated stems from this browser")
         })?;
         p.check(
@@ -225,7 +225,9 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         p.idle(2.0)?;
         let played = p.mark();
         p.click(o.play_x, "Play")?;
-        let first = p.wait_for(played, 60, |l| playback_line(l).is_some())?;
+        let first = p.wait_for(played, 60, "a playback line", |l| {
+            playback_line(l).is_some()
+        })?;
         let first_line = first.as_deref().and_then(playback_line);
         let at_first = memory_mb(&p.session.execute_async(MEMORY, json!([]), MEMORY_WAIT)?);
         p.idle(2.0)?;
@@ -247,7 +249,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     // D7: the 5-minute session got its stem overviews once.
     p.reload()?;
     let from = p.mark();
-    let again = p.wait_for(from, 900, |l| {
+    let again = p.wait_for(from, 900, "the 5-minute session to restore again", |l| {
         l.contains("and its separated stems from this browser")
     })?;
     p.check(again.is_some(), "the 5-minute song restores again");

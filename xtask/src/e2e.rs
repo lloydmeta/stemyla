@@ -108,6 +108,10 @@
 //! positions `--play-x`,
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
 //!
+//! Each scenario has a time limit from its start ([`scenario_limit_secs`]).
+//! At the limit, a wait fails with one line ([`limit_line`]).  Its error
+//! drops the page, which ends the WebDriver session and stops the driver.
+//!
 //! Classic WebDriver has no console events and no init scripts, so the
 //! server adds `xtask/e2e/*.js` to the page (`xtask serve --inject`): one
 //! keeps the console in `window.__e2e_log`, which this runner reads.
@@ -140,8 +144,106 @@ const ITEM_X: f64 = 100.0;
 const ITEM_Y: f64 = 168.0;
 const ITEM_DY: f64 = 21.0;
 /// The longest wait, in seconds, for a run of the model on the GPU: 4
-/// hours, for a slow GPU or SwiftShader.
+/// hours, for a slow GPU or SwiftShader.  The scenario's time limit
+/// ([`scenario_limit_secs`]) can end a wait sooner.
 const MODEL_RUN_SECS: u64 = 4 * 3600;
+
+/// The scenarios of `xtask e2e`, in the order of its usage text.
+const SCENARIOS: [&str; 16] = [
+    "smoke",
+    "decode",
+    "playback",
+    "old-session",
+    "audio-resume",
+    "storage",
+    "flac",
+    "save",
+    "bench",
+    "selftest",
+    "separate",
+    "worker-check",
+    "memory-budget",
+    "stored-stems",
+    "weights",
+    "perf",
+];
+
+/// The time limit of `smoke`, `decode`, `playback`, `old-session`,
+/// `audio-resume` and `flac`, in seconds.  CI run 40894815433 ran these and
+/// `storage` in 4.0 minutes together.  `old-session` took 46 s on CI, and
+/// `flac` 26 s on the maintainer's Mac.
+const NO_MODEL_LIMIT_S: u64 = 15 * 60;
+/// The time limit of `storage`, in seconds.  With `--weights`, it also loads
+/// a real model, and no run of that was measured.
+const STORAGE_LIMIT_S: u64 = 30 * 60;
+/// The time limit of one run of `perf`, in seconds.  On 2026-11-12, a run
+/// took 99 s in Safari and 70 s in Chrome on the M2 Pro.
+const PERF_RUN_LIMIT_S: u64 = 10 * 60;
+/// The time limit of `bench`, `selftest`, `separate`, `worker-check`,
+/// `stored-stems` and `memory-budget`, in seconds.  No whole run of these was
+/// measured, so the limit is generous.
+const GPU_LIMIT_S: u64 = 60 * 60;
+/// The time limit of `weights`, in seconds.  No whole run was measured, so
+/// the limit is generous.  Its part 3 alone separates about 60 s of audio 10
+/// times.  Each took 70 to 95 s on the Radeon (`stream-from-storage-m9.md`).
+const WEIGHTS_LIMIT_S: u64 = 2 * 60 * 60;
+
+/// The time limit of a scenario, in seconds, from the start of `xtask e2e`;
+/// `None` for a name that is not a scenario.  `save` has the limit of its CI
+/// step.  `perf` has a limit for each of its `runs`.  A scenario that runs the
+/// model has [`MODEL_RUN_SECS`] with `swiftshader`, since no such run was
+/// measured.
+fn scenario_limit_secs(scenario: &str, runs: usize, swiftshader: bool) -> Option<u64> {
+    let model_run = |secs| if swiftshader { MODEL_RUN_SECS } else { secs };
+    Some(match scenario {
+        "smoke" | "decode" | "playback" | "old-session" | "audio-resume" | "flac" => {
+            NO_MODEL_LIMIT_S
+        }
+        "storage" => STORAGE_LIMIT_S,
+        "save" => save::STEP_LIMIT_S,
+        "bench" | "selftest" | "separate" | "worker-check" | "stored-stems" | "memory-budget" => {
+            model_run(GPU_LIMIT_S)
+        }
+        "weights" => model_run(WEIGHTS_LIMIT_S),
+        "perf" => model_run(PERF_RUN_LIMIT_S).saturating_mul(runs.max(1) as u64),
+        _ => return None,
+    })
+}
+
+/// The line of a scenario that its time limit stops.
+fn limit_line(scenario: &str, limit_secs: u64, what: &str) -> String {
+    format!(
+        "e2e {scenario} FAILED: its time limit of {limit_secs} s ended while it waited for {what}"
+    )
+}
+
+/// What a wait does next.
+#[derive(Debug, PartialEq, Eq)]
+enum WaitState {
+    /// It waits on.
+    Going,
+    /// It ends with no match, at its own end.
+    Ended,
+    /// It fails, since the scenario's time limit ended first.
+    OverLimit,
+}
+
+/// The state at `now` of a wait that ends by itself at `own_end`, in a
+/// scenario whose time limit ends at `deadline`.  A wait whose own end comes
+/// first is never over the limit; the next wait is.
+fn wait_state(now: Instant, own_end: Instant, deadline: Instant) -> WaitState {
+    if own_end <= deadline {
+        if now > own_end {
+            WaitState::Ended
+        } else {
+            WaitState::Going
+        }
+    } else if now >= deadline {
+        WaitState::OverLimit
+    } else {
+        WaitState::Going
+    }
+}
 
 const SWIFTSHADER: [&str; 7] = [
     "--enable-unsafe-webgpu",
@@ -190,6 +292,10 @@ pub struct Opts {
     pub item_y: f64,
     /// The rows of the Save menu's items, in CSS pixels.
     pub item_dy: f64,
+    /// When the options were read, the start of the scenario's time limit.
+    pub started: Instant,
+    /// The scenario's time limit, in seconds ([`scenario_limit_secs`]).
+    pub limit_secs: u64,
 }
 
 impl Opts {
@@ -197,10 +303,9 @@ impl Opts {
         let scenario = args
             .first()
             .filter(|s| !s.starts_with("--"))
-            .context(
-                "usage: xtask e2e <smoke|decode|playback|old-session|audio-resume|storage|flac|save|bench|selftest|separate|worker-check|memory-budget|stored-stems|weights|perf> [options]",
-            )?
+            .with_context(|| format!("usage: xtask e2e <{}> [options]", SCENARIOS.join("|")))?
             .clone();
+        let started = Instant::now();
         // Defaults are in the workspace, wherever this runs from.
         let root = crate::workspace_root();
         let mut o = Self {
@@ -236,6 +341,9 @@ impl Opts {
             item_x: ITEM_X,
             item_y: ITEM_Y,
             item_dy: ITEM_DY,
+            started,
+            // Set from the scenario and its options after the loop.
+            limit_secs: 0,
         };
         let mut i = 1;
         while i < args.len() {
@@ -276,6 +384,8 @@ impl Opts {
             }
             i += 1;
         }
+        o.limit_secs = scenario_limit_secs(&o.scenario, o.runs, o.swiftshader)
+            .with_context(|| format!("unknown scenario {}", o.scenario))?;
         Ok(o)
     }
 
@@ -339,7 +449,9 @@ fn start_server(dist: &Path, mut mounts: serve::Mounts, inject: &[&str]) -> Resu
 
 /// One browser on one page, with the page's console as it arrives.
 /// Its log is written to `<out>/<scenario>.log` when it is dropped, so a
-/// scenario that stops early still leaves one.
+/// scenario that stops early still leaves one.  A drop also ends the
+/// WebDriver session, then stops the driver process.  A wait past the
+/// scenario's time limit gives an error, so its `?` drops the page.
 struct Page {
     session: Session,
     _driver: Driver,
@@ -349,6 +461,9 @@ struct Page {
     out: PathBuf,
     scenario: String,
     failures: Vec<String>,
+    /// The end of the scenario's time limit.
+    deadline: Instant,
+    limit_secs: u64,
 }
 
 impl Page {
@@ -365,6 +480,10 @@ impl Page {
         // draws with, unless it may fall back to SwiftShader.
         args.push("--enable-unsafe-swiftshader".into());
         args.push(format!("--window-size={},{}", VIEWPORT.0, VIEWPORT.1));
+        let deadline = o
+            .started
+            .checked_add(Duration::from_secs(o.limit_secs))
+            .context("the time limit is too long")?;
         let (driver, session) = start_session(o.browser, &args)?;
         let tries = session.set_viewport(VIEWPORT.0, VIEWPORT.1)?;
         let mut page = Self {
@@ -376,6 +495,8 @@ impl Page {
             out: o.out.clone(),
             scenario: o.scenario.clone(),
             failures: Vec::new(),
+            deadline,
+            limit_secs: o.limit_secs,
         };
         page.note(&format!("viewport: {}", tries.join("; ")));
         page.session.goto(&page.url(path))?;
@@ -415,13 +536,15 @@ impl Page {
     }
 
     /// The first log line after `from` that `matches`, waiting up to `secs`.
+    /// Past the scenario's time limit, an error that names `what`.
     fn wait_for(
         &mut self,
         from: usize,
         secs: u64,
+        what: &str,
         matches: impl Fn(&str) -> bool,
     ) -> Result<Option<String>> {
-        let until = Instant::now() + Duration::from_secs(secs);
+        let own_end = Instant::now() + Duration::from_secs(secs);
         loop {
             self.poll()?;
             if let Some(l) = self.log[from.min(self.log.len())..]
@@ -430,21 +553,57 @@ impl Page {
             {
                 return Ok(Some(l.clone()));
             }
-            if Instant::now() > until {
-                return Ok(None);
+            match wait_state(Instant::now(), own_end, self.deadline) {
+                WaitState::Going => std::thread::sleep(Duration::from_millis(250)),
+                WaitState::Ended => return Ok(None),
+                WaitState::OverLimit => return Err(self.over_limit(what)),
             }
-            std::thread::sleep(Duration::from_millis(250));
         }
     }
 
-    /// Lets the page run for `secs`, collecting its console.
+    /// Lets the page run for `secs`, collecting its console.  Past the
+    /// scenario's time limit, an error.
     fn idle(&mut self, secs: f64) -> Result<()> {
-        let until = Instant::now() + Duration::from_secs_f64(secs);
-        while Instant::now() < until {
-            self.poll()?;
-            std::thread::sleep(Duration::from_millis(250));
+        let own_end = Instant::now() + Duration::from_secs_f64(secs);
+        loop {
+            match wait_state(Instant::now(), own_end, self.deadline) {
+                WaitState::Going => {
+                    self.poll()?;
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                WaitState::Ended => return Ok(()),
+                WaitState::OverLimit => {
+                    return Err(self.over_limit(&format!("the page to run for {secs} s")));
+                }
+            }
         }
-        Ok(())
+    }
+
+    /// Runs `script` in the page through `execute_async`, for up to `secs`
+    /// but not past the scenario's time limit.  Past the limit, an error
+    /// that names `what`.
+    fn run_script(&mut self, script: &str, args: Value, secs: u64, what: &str) -> Result<Value> {
+        let own_end = Instant::now() + Duration::from_secs(secs);
+        let over =
+            |p: &Self| wait_state(Instant::now(), own_end, p.deadline) == WaitState::OverLimit;
+        if over(self) {
+            return Err(self.over_limit(what));
+        }
+        let timeout = own_end
+            .min(self.deadline)
+            .saturating_duration_since(Instant::now());
+        match self.session.execute_async(script, args, timeout) {
+            Err(_) if over(self) => Err(self.over_limit(what)),
+            result => result,
+        }
+    }
+
+    /// The error of a wait for `what` past the scenario's time limit.  The
+    /// log gets its line too.
+    fn over_limit(&mut self, what: &str) -> anyhow::Error {
+        let line = limit_line(&self.scenario, self.limit_secs, what);
+        self.note(&line);
+        anyhow::anyhow!(line)
     }
 
     fn check(&mut self, ok: bool, what: &str) {
@@ -487,7 +646,7 @@ impl Page {
             .iter()
             .map(|(url, name, kind)| json!({ "url": url, "name": name, "type": kind }))
             .collect();
-        let dropped = self.session.execute_async(
+        let dropped = self.run_script(
             r#"const [files, done] = arguments;
             (async () => {
               const dt = new DataTransfer();
@@ -502,7 +661,8 @@ impl Page {
               return dt.files.length;
             })().then(done, (e) => done(`error: ${e}`));"#,
             json!([files]),
-            Duration::from_secs(300),
+            300,
+            "the drop of the files",
         )?;
         self.note(&format!("dropped {dropped} files"));
         if dropped.as_u64() != Some(files.len() as u64) {
@@ -643,7 +803,7 @@ fn smoke(o: &Opts) -> Result<()> {
         &["--autoplay-policy=no-user-gesture-required"],
         "index.html",
     )?;
-    let ready = p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    let ready = p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     p.check(ready.is_some(), "the app started");
     p.screenshot("smoke_empty")?;
     let webgl2 = p.session.execute(
@@ -662,7 +822,7 @@ fn smoke(o: &Opts) -> Result<()> {
         .collect();
     let from = p.mark();
     p.drop_files(&drop)?;
-    let kept = p.wait_for(from, 60, |l| {
+    let kept = p.wait_for(from, 60, "the dropped stems to be kept", |l| {
         l.contains("song kept in browser storage as session")
     })?;
     p.check(kept.is_some(), "the dropped stems open and are kept");
@@ -671,10 +831,12 @@ fn smoke(o: &Opts) -> Result<()> {
 
     let from = p.mark();
     p.click(o.play_x, "Play")?;
-    let played = p.wait_for(from, 60, played_a_second)?;
+    let played = p.wait_for(from, 60, "the playhead to move", played_a_second)?;
     p.check(played.is_some(), "the playhead moves after Play");
     // M6: every lane of the dropped stems plays from browser storage.
-    let stored = p.wait_for(from, 60, |l| playback::playback_line(l).is_some())?;
+    let stored = p.wait_for(from, 60, "a playback line", |l| {
+        playback::playback_line(l).is_some()
+    })?;
     let line = stored.as_deref().and_then(playback::playback_line);
     p.check(
         playback::all_from_storage(line.as_ref(), 5),
@@ -699,7 +861,7 @@ fn smoke(o: &Opts) -> Result<()> {
             .first()
             .is_some_and(|(t, _)| (0.70..=0.80).contains(t))
     };
-    let tempo = p.wait_for(from, 60, near_75)?;
+    let tempo = p.wait_for(from, 60, "the tempo of about 75%", near_75)?;
     p.check(tempo.is_some(), "the tempo slider sets about 75%");
     p.idle(3.0)?;
     p.screenshot("smoke_playing")?;
@@ -734,15 +896,17 @@ fn audio_resume(o: &Opts) -> Result<()> {
         &["--autoplay-policy=user-gesture-required"],
         "index.html",
     )?;
-    p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     let from = p.mark();
     p.drop_files(&[("/input/song.wav", "song.wav", "audio/wav")])?;
-    let kept = p.wait_for(from, 60, |l| l.contains("song kept in browser storage"))?;
+    let kept = p.wait_for(from, 60, "the song to be kept in browser storage", |l| {
+        l.contains("song kept in browser storage")
+    })?;
     p.check(kept.is_some(), "the song is kept in browser storage");
 
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, 60, |l| {
+    let restored = p.wait_for(from, 60, "the song to restore at page load", |l| {
         l.contains("Restored \"song\" from this browser")
     })?;
     p.check(restored.is_some(), "the song is restored at page load");
@@ -761,7 +925,7 @@ fn audio_resume(o: &Opts) -> Result<()> {
     p.click(o.play_x, "Play")?;
     // A busy machine plays slower than real time, so this waits for the
     // playhead rather than for a fixed time.
-    let played = p.wait_for(from, 60, played_a_second)?;
+    let played = p.wait_for(from, 60, "the playhead to move", played_a_second)?;
     p.check(played.is_some(), "one click on Play starts playback");
     check_web_buffers(&mut p, from);
     p.screenshot("audio_resume")?;
@@ -799,7 +963,7 @@ fn audio_resume(o: &Opts) -> Result<()> {
     )?;
     p.reload()?;
     let from = p.mark();
-    let with_stems = p.wait_for(from, 60, |l| {
+    let with_stems = p.wait_for(from, 60, "the song to restore with its stems", |l| {
         l.contains("Restored \"song\" and its separated stems from this browser")
     })?;
     p.check(
@@ -856,17 +1020,19 @@ fn drip(mut stream: TcpStream) -> Result<()> {
 }
 
 /// Runs `script` (an async function body using the page's `e2e` helpers;
-/// its result is returned) in the worker page.
+/// its result is returned) in the worker page.  Past the scenario's time
+/// limit, an error that names the place of the call.
+#[track_caller]
 fn in_page(p: &mut Page, script: &str, args: Value, secs: u64) -> Result<Value> {
+    let caller = std::panic::Location::caller();
     let wrapped = format!(
         "const done = arguments[arguments.length - 1];
         (async (...args) => {{ {script} }})(...arguments).then(
           (r) => done({{ ok: r }}),
           (e) => done({{ error: String(e && e.stack || e) }}));"
     );
-    let r = p
-        .session
-        .execute_async(&wrapped, args, Duration::from_secs(secs))?;
+    let what = format!("the page script of {}:{}", caller.file(), caller.line());
+    let r = p.run_script(&wrapped, args, secs, &what)?;
     p.poll()?;
     if let Some(e) = r.get("error") {
         bail!("in the page: {}", e.as_str().unwrap_or_default());
@@ -1018,9 +1184,11 @@ fn storage(o: &Opts) -> Result<()> {
     p.session
         .goto(&p.url("index.html?model_url=/__e2e/blank.html"))?;
     let from = p.mark();
-    p.wait_for(from, 60, |l| l.contains("separator: "))?;
+    p.wait_for(from, 60, "the app to start", |l| l.contains("separator: "))?;
     p.click(o.download_x, "Download model")?;
-    let got = p.wait_for(from, 60, |l| l.contains(not_a_model))?;
+    let got = p.wait_for(from, 60, "the refusal of a file that is not a model", |l| {
+        l.contains(not_a_model)
+    })?;
     p.check(
         got.is_some(),
         "the app downloads from ?model_url= and refuses a non-model",
@@ -1202,7 +1370,7 @@ fn bench(o: &Opts) -> Result<()> {
         &format!("index.html?{q}"),
     )?;
     // Any error ends the wait (no WebGPU adapter, say), not only the verdict.
-    let verdict = p.wait_for(0, MODEL_RUN_SECS, |l| {
+    let verdict = p.wait_for(0, MODEL_RUN_SECS, "the end of the bench", |l| {
         l.contains("bench finished") || l.contains("WebGPU error") || is_page_error(l)
     })?;
     p.note(&format!("verdict: {verdict:?}"));
@@ -1263,11 +1431,11 @@ fn selftest(o: &Opts) -> Result<()> {
         &["--enable-unsafe-webgpu"],
         &format!("index.html?{q}"),
     )?;
-    p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     drop_model(&mut p, &model)?;
     // A model that does not load never starts the self-test, so its
     // message ends the wait too.
-    let verdict = p.wait_for(0, MODEL_RUN_SECS, |l| {
+    let verdict = p.wait_for(0, MODEL_RUN_SECS, "the verdict of the self-test", |l| {
         l.contains("selftest passed")
             || l.contains("selftest FAILED")
             || l.contains("could not be loaded")
@@ -1380,12 +1548,12 @@ fn separate(o: &Opts) -> Result<()> {
         ],
         &format!("index.html?{q}"),
     )?;
-    p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     p.screenshot("separate_empty")?;
     let from = p.mark();
     p.drop_files(&[(&format!("/test/{}", c.file), c.file, c.media_type)])?;
     // Two seconds at 44.1 kHz are 88,200 frames.
-    let opened = p.wait_for(from, 60, |l| l.contains("song: opened"))?;
+    let opened = p.wait_for(from, 60, "the clip to open", |l| l.contains("song: opened"))?;
     p.note(&format!("opened: {opened:?}"));
     p.check(
         opened
@@ -1393,12 +1561,14 @@ fn separate(o: &Opts) -> Result<()> {
             .is_some_and(|l| l.contains("at 44100 Hz") && l.contains("(88200 frames)")),
         &format!("the {} Hz clip opens at 44.1 kHz", c.rate),
     );
-    let kept = p.wait_for(from, 60, |l| l.contains("song kept in browser storage"))?;
+    let kept = p.wait_for(from, 60, "the clip to be kept in browser storage", |l| {
+        l.contains("song kept in browser storage")
+    })?;
     p.check(kept.is_some(), "the clip opens");
     p.screenshot("separate_song")?;
     let from = p.mark();
     drop_model(&mut p, &model)?;
-    let loaded = p.wait_for(from, 1200, |l| {
+    let loaded = p.wait_for(from, 1200, "the model to load", |l| {
         l.contains("separator: model loaded")
             || l.contains("could not be loaded")
             || l.contains("not a BS-RoFormer")
@@ -1415,7 +1585,7 @@ fn separate(o: &Opts) -> Result<()> {
     p.screenshot("separate_model")?;
     let from = p.mark();
     p.click(o.separate_x, "Separate 6 stems")?;
-    let done = p.wait_for(from, MODEL_RUN_SECS, |l| {
+    let done = p.wait_for(from, MODEL_RUN_SECS, "the stems", |l| {
         (l.contains("separator: ") && l.contains(" stems in ")) || is_page_error(l)
     })?;
     p.note(&format!("separated: {done:?}"));
@@ -1912,7 +2082,7 @@ fn memory_budget(o: &Opts) -> Result<()> {
             &format!("index.html?{q}"),
         )?;
         p.scenario = format!("memory-budget-{minutes}");
-        p.wait_for(0, 60, |l| l.contains("separator: "))?;
+        p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
         let from = open_song(
             &mut p,
             &format!("/test/{minutes}/song.wav"),
@@ -2026,7 +2196,9 @@ fn memory_budget(o: &Opts) -> Result<()> {
 fn open_song(p: &mut Page, url: &str, what: &str) -> Result<usize> {
     let from = p.mark();
     p.drop_files(&[(url, "song.wav", "audio/wav")])?;
-    let kept = p.wait_for(from, 300, |l| l.contains("song kept in browser storage"))?;
+    let kept = p.wait_for(from, 300, "the song to be kept in browser storage", |l| {
+        l.contains("song kept in browser storage")
+    })?;
     p.check(kept.is_some(), what);
     Ok(from)
 }
@@ -2037,7 +2209,9 @@ fn open_song(p: &mut Page, url: &str, what: &str) -> Result<usize> {
 fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<usize> {
     let from = p.mark();
     drop_model(p, model)?;
-    let loaded = p.wait_for(from, 1200, |l| holds_or_error(l, "separator: model loaded"))?;
+    let loaded = p.wait_for(from, 1200, "the model to load", |l| {
+        holds_or_error(l, "separator: model loaded")
+    })?;
     p.check(
         loaded
             .as_deref()
@@ -2046,7 +2220,7 @@ fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<
     );
     let from = p.mark();
     p.click(o.separate_x, "Separate 6 stems")?;
-    let shown = p.wait_for(from, MODEL_RUN_SECS, separation_shown)?;
+    let shown = p.wait_for(from, MODEL_RUN_SECS, "the stems to show", separation_shown)?;
     p.check(
         shown
             .as_deref()
@@ -2093,7 +2267,7 @@ fn perf(o: &Opts) -> Result<()> {
             &format!("index.html?{q}"),
         )?;
         p.scenario = format!("perf-{browser}-{n}");
-        p.wait_for(0, 60, |l| l.contains("separator: "))?;
+        p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
         open_song(&mut p, "/test/1/song.wav", "the 1-minute song opens")?;
         load_and_separate(&mut p, o, &model, "the 1-minute song separates")?;
         let version = p.session.version.clone();
@@ -3504,6 +3678,133 @@ mod tests {
 
     /// Findings 1-47, 1-103, 2-30 and 2-58 of review rounds 1 and 2 of
     /// M3: a wait for the model was 4 hours in `memory_budget` with no test.
+    /// * `perf` has 10 minutes for each run, not the old 4 hours.
+    /// * `perf` with `--swiftshader` has 4 hours for each run.
+    #[test]
+    fn perf_has_ten_minutes_for_each_run() {
+        assert_eq!(scenario_limit_secs("perf", 1, false), Some(600));
+        assert_eq!(scenario_limit_secs("perf", 5, false), Some(3_000));
+        assert_eq!(
+            scenario_limit_secs("perf", 2, true),
+            Some(2 * MODEL_RUN_SECS)
+        );
+    }
+
+    /// * Each scenario of the usage text has a limit, and another name has
+    ///   none.
+    /// * The scenarios with no model have 15 minutes, and `storage` 30.
+    /// * `save` has the limit of its CI step, also with `--swiftshader`.
+    /// * The scenarios that run the model have 1 hour, and `weights` 2
+    ///   hours.  With `--swiftshader`, each has 4 hours.
+    /// * `--runs` changes only the limit of `perf`.
+    #[test]
+    fn each_scenario_has_a_time_limit() {
+        for scenario in SCENARIOS {
+            assert!(
+                scenario_limit_secs(scenario, 1, false).is_some(),
+                "{scenario}"
+            );
+        }
+        assert_eq!(scenario_limit_secs("perfs", 1, false), None);
+        for scenario in [
+            "smoke",
+            "decode",
+            "playback",
+            "old-session",
+            "audio-resume",
+            "flac",
+        ] {
+            assert_eq!(
+                scenario_limit_secs(scenario, 1, false),
+                Some(900),
+                "{scenario}"
+            );
+            assert_eq!(
+                scenario_limit_secs(scenario, 1, true),
+                Some(900),
+                "{scenario}"
+            );
+        }
+        assert_eq!(scenario_limit_secs("storage", 1, false), Some(1_800));
+        assert_eq!(
+            scenario_limit_secs("save", 1, false),
+            Some(save::STEP_LIMIT_S)
+        );
+        assert_eq!(
+            scenario_limit_secs("save", 1, true),
+            Some(save::STEP_LIMIT_S)
+        );
+        for scenario in [
+            "bench",
+            "selftest",
+            "separate",
+            "worker-check",
+            "stored-stems",
+            "memory-budget",
+        ] {
+            assert_eq!(
+                scenario_limit_secs(scenario, 1, false),
+                Some(3_600),
+                "{scenario}"
+            );
+            assert_eq!(
+                scenario_limit_secs(scenario, 3, false),
+                Some(3_600),
+                "{scenario}"
+            );
+            assert_eq!(
+                scenario_limit_secs(scenario, 1, true),
+                Some(MODEL_RUN_SECS),
+                "{scenario}"
+            );
+        }
+        assert_eq!(scenario_limit_secs("weights", 1, false), Some(7_200));
+        assert_eq!(
+            scenario_limit_secs("weights", 1, true),
+            Some(MODEL_RUN_SECS)
+        );
+        assert_eq!(scenario_limit_secs("smoke", 5, false), Some(900));
+    }
+
+    /// * The line names the scenario, its limit and what it waited for.
+    /// * `Opts::parse` gives the limit of the scenario and its options.
+    /// * `Opts::parse` refuses a name that is not a scenario.
+    #[test]
+    fn the_limit_line_names_the_scenario_the_limit_and_the_wait() {
+        assert_eq!(
+            limit_line("perf-safari-1", 600, "the stems to show"),
+            "e2e perf-safari-1 FAILED: its time limit of 600 s ended while it waited for the stems to show"
+        );
+        assert_eq!(
+            Opts::parse(&args("perf --runs 3")).unwrap().limit_secs,
+            1_800
+        );
+        assert_eq!(
+            Opts::parse(&args("perf --swiftshader")).unwrap().limit_secs,
+            MODEL_RUN_SECS
+        );
+        assert_eq!(Opts::parse(&args("smoke")).unwrap().limit_secs, 900);
+        let unknown = Opts::parse(&args("perfs")).err().map(|e| e.to_string());
+        assert_eq!(unknown.as_deref(), Some("unknown scenario perfs"));
+    }
+
+    /// * A wait that ends before the limit goes on to its own end, and then
+    ///   ends with no match, also past the limit.
+    /// * A wait that ends after the limit goes on to the limit, and then is
+    ///   over the limit.
+    #[test]
+    fn a_wait_stops_at_the_limit() {
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        assert_eq!(wait_state(at(5), at(10), at(20)), WaitState::Going);
+        assert_eq!(wait_state(at(10), at(10), at(20)), WaitState::Going);
+        assert_eq!(wait_state(at(11), at(10), at(20)), WaitState::Ended);
+        assert_eq!(wait_state(at(25), at(10), at(20)), WaitState::Ended);
+        assert_eq!(wait_state(at(15), at(30), at(20)), WaitState::Going);
+        assert_eq!(wait_state(at(20), at(30), at(20)), WaitState::OverLimit);
+        assert_eq!(wait_state(at(35), at(30), at(20)), WaitState::OverLimit);
+    }
+
     #[test]
     fn a_run_of_the_model_may_take_four_hours() {
         assert_eq!(MODEL_RUN_SECS, 14_400);
