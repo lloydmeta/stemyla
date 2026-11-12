@@ -167,7 +167,6 @@ pub fn working_set(chunk: usize, overlap: usize) -> WorkingSet {
             moment(
                 "a band's normalisation in `Job::set_input`",
                 &[
-                    chunk_input,
                     spectra,
                     features,
                     part("band buffer", frames * widest_band() * F32),
@@ -181,7 +180,6 @@ pub fn working_set(chunk: usize, overlap: usize) -> WorkingSet {
             moment(
                 "a stem's inverse STFT of channel 1",
                 &[
-                    chunk_input,
                     spectra,
                     part("mask", frames * FEATURES * F32),
                     part("inverse STFT sums", 2 * (N_FFT + HOP * (frames - 1)) * F32),
@@ -191,11 +189,7 @@ pub fn working_set(chunk: usize, overlap: usize) -> WorkingSet {
             ),
             moment(
                 "the demixer's `accept_stem`",
-                &[
-                    chunk_input,
-                    spectra,
-                    part("one stem", CHANNELS * stem_channel),
-                ],
+                &[spectra, part("one stem", CHANNELS * stem_channel)],
             ),
         ],
     };
@@ -205,7 +199,6 @@ pub fn working_set(chunk: usize, overlap: usize) -> WorkingSet {
             moment(
                 "the emit of the segment (`StemWriter::put`)",
                 &[
-                    chunk_input,
                     part("segment", stems * CHANNELS * step * F32),
                     part("PCM bytes", CHANNELS * 2 * step),
                 ],
@@ -341,12 +334,15 @@ mod tests {
         assert_eq!(part(upload, "chunk input"), 4_710_400);
         assert_eq!(part(upload, "spectra"), 18_876_400);
         assert_eq!(part(upload, "features"), 18_876_400);
-        assert_eq!(part(upload, "normalised input"), 0, "cut 3");
-        assert_eq!(part(upload, "band buffer"), 2_375_664);
-        assert_eq!(w.upload.bytes(), 77_811_664);
+        assert_eq!(w.upload.bytes(), 75_436_000);
+        let band = &w.upload.moments[1];
+        assert_eq!(part(band, "chunk input"), 0, "cut 4");
+        assert_eq!(part(band, "normalised input"), 0, "cut 3");
+        assert_eq!(part(band, "band buffer"), 2_375_664);
+        assert_eq!(band.bytes(), 73_101_264);
 
         let masks = w.masks.largest();
-        assert_eq!(part(masks, "chunk input"), 4_710_400);
+        assert_eq!(part(masks, "chunk input"), 0, "cut 4");
         assert_eq!(part(masks, "spectra"), 18_876_400);
         assert_eq!(part(masks, "five stems"), 0, "cut 1");
         assert_eq!(part(masks, "mask"), 18_876_400);
@@ -354,16 +350,16 @@ mod tests {
         assert_eq!(part(masks, "inverse STFT sums"), 4_726_784);
         assert_eq!(part(masks, "stem output, channel 0"), 2_355_200);
         assert_eq!(part(masks, "stem output, channel 1"), 2_355_200);
-        assert_eq!(w.masks.bytes(), 84_873_184);
+        assert_eq!(w.masks.bytes(), 80_162_784);
         assert_eq!(part(&w.masks.moments[1], "one stem"), 4_710_400);
 
         let between = w.between.largest();
-        assert_eq!(part(between, "chunk input"), 4_710_400);
+        assert_eq!(part(between, "chunk input"), 0, "cut 4");
         assert_eq!(part(between, "six stems"), 0, "cut 1");
         assert_eq!(part(between, "window clone"), 0, "cut 1");
         assert_eq!(part(between, "segment"), 14_131_200);
         assert_eq!(part(between, "PCM bytes"), 1_177_600);
-        assert_eq!(w.between.bytes(), 52_992_000);
+        assert_eq!(w.between.bytes(), 48_281_600);
         let read = &w.between.moments[1];
         assert_eq!(part(read, "bytes of the span"), 4_710_400);
         assert_eq!(part(read, "span"), 4_710_400);

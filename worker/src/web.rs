@@ -1201,13 +1201,13 @@ async fn separate_mix<N: Network>(
 /// The network that separates one chunk at a time: the GPU's in a real
 /// separation, a fake one in the tests.
 trait Network {
-    /// Separates chunk `index`, and gives each stem to `each` as it is
-    /// made: its index in `STEMS` and its stereo pair.  Each stem comes
-    /// once.
+    /// Separates chunk `index`, whose input `x` it takes, and gives each
+    /// stem to `each` as it is made: its index in `STEMS` and its stereo
+    /// pair.  Each stem comes once.
     async fn stems(
         &mut self,
         index: usize,
-        x: &Stereo,
+        x: Stereo,
         each: impl FnMut(usize, Stereo),
     ) -> Result<(), String>;
     /// "so far ..." for the log line after each chunk.
@@ -1228,14 +1228,17 @@ trait GpuHalf {
 }
 
 /// The CPU half of one chunk: the STFT, the upload through `gpu`, then
-/// each stem's mask applied to the spectra and inverted.  Each stem goes
-/// to `each` as it is made, so the worker holds one stem at a time.
+/// each stem's mask applied to the spectra and inverted.  The chunk's
+/// input drops after the STFT.  Each stem goes to `each` as it is made,
+/// so the worker holds one stem at a time.
 async fn chunk_stems(
     gpu: &mut impl GpuHalf,
-    x: &Stereo,
+    x: Stereo,
     mut each: impl FnMut(usize, Stereo),
 ) -> Result<(), String> {
-    let (spec, features) = analyse(x);
+    let (spec, features) = analyse(&x);
+    // The spectra hold the chunk now.
+    drop(x);
     gpu.upload(&features);
     // The GPU holds the input now; the spectra alone make the stems.
     drop(features);
@@ -1315,7 +1318,7 @@ impl Network for GpuNetwork<'_> {
     async fn stems(
         &mut self,
         index: usize,
-        x: &Stereo,
+        x: Stereo,
         each: impl FnMut(usize, Stereo),
     ) -> Result<(), String> {
         self.index = index;
@@ -1451,7 +1454,7 @@ async fn separate_chunks<S: MixSource<Error: Display>>(
     while let Some(x) = d.next_input().map_err(|e| Stop::Storage(e.to_string()))? {
         let tc = now_s();
         let index = d.chunk_index();
-        net.stems(index, &x, |stem, stereo| d.accept_stem(stem, &stereo))
+        net.stems(index, x, |stem, stereo| d.accept_stem(stem, &stereo))
             .await
             .map_err(Stop::Failed)?;
         d.end_chunk();

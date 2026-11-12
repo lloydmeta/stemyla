@@ -2736,13 +2736,13 @@ impl Network for FakeNetwork {
     async fn stems(
         &mut self,
         index: usize,
-        x: &Stereo,
+        x: Stereo,
         mut each: impl FnMut(usize, Stereo),
     ) -> Result<(), String> {
         if self.fail_at == Some(index) {
             return Err(format!("the fake network failed at chunk {index}"));
         }
-        for (stem, stereo) in fake_stems_of(x).into_iter().enumerate() {
+        for (stem, stereo) in fake_stems_of(&x).into_iter().enumerate() {
             each(stem, stereo);
         }
         Ok(())
@@ -3268,7 +3268,7 @@ impl Network for FakeGpu {
     async fn stems(
         &mut self,
         index: usize,
-        x: &Stereo,
+        x: Stereo,
         each: impl FnMut(usize, Stereo),
     ) -> Result<(), String> {
         let peak = close_phase();
@@ -3578,7 +3578,7 @@ impl Network for RewritingNetwork {
     async fn stems(
         &mut self,
         _index: usize,
-        x: &Stereo,
+        x: Stereo,
         mut each: impl FnMut(usize, Stereo),
     ) -> Result<(), String> {
         self.calls += 1;
@@ -3589,7 +3589,7 @@ impl Network for RewritingNetwork {
             let other: Stereo = fake_mix().map(|c| c.iter().map(|v| 0.5 * v).collect());
             plant_at(MIX_PATH, &mix_file(&other)).await;
         }
-        for (stem, stereo) in fake_stems_of(x).into_iter().enumerate() {
+        for (stem, stereo) in fake_stems_of(&x).into_iter().enumerate() {
             each(stem, stereo);
         }
         Ok(())
