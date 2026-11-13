@@ -72,7 +72,8 @@
 //!   memory path, then on the storage path into a session folder, from a mix
 //!   file there (`--weights`).  Each stem file equals the memory path's stem as
 //!   a 16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
-//!   checks them against `--hashes`.
+//!   checks them against `--hashes`.  It runs `mm=s64` at a chunk of 16,384
+//!   samples, with `attn=split` unless `--query` sets `attn`.
 //! * `weights`: f16 weights against f32 weights, from a blank page
 //!   (`--weights`; M9 of `docs/plans/completed/stream-from-storage.md`).  The
 //!   stems of the two formats must be equal bit for bit, with M3's kernels
@@ -2625,6 +2626,18 @@ fn stem_protocol_file(name: &str) -> String {
     format!("{name}.wav")
 }
 
+/// The attention policy of `stored-stems`: the value of `attn` in
+/// `--query`, else `split`.  Its other settings are fixed.
+fn stored_stems_attn(query: Option<&str>) -> String {
+    query
+        .unwrap_or_default()
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("attn="))
+        .unwrap_or("split")
+        .to_string()
+}
+
 /// The session folder that `stored-stems` plants for the storage path.
 const STORED_STEMS_SESSION: &str = "sessions/1792640000000";
 
@@ -2742,6 +2755,7 @@ fn stored_stems_checks(
 /// cover the song.  It prints the SHA-256 of each memory-path stem as a 16-bit
 /// WAV, and checks them against `--hashes`.
 fn stored_stems(o: &Opts) -> Result<()> {
+    let attn = stored_stems_attn(o.query.as_deref());
     let (clip_dir, frames) = stored_stems_clip(&o.out)?;
     let mut mounts = vec![("/clip/".to_string(), clip_dir)];
     let model = weights_mount(o, &mut mounts)?;
@@ -2749,12 +2763,12 @@ fn stored_stems(o: &Opts) -> Result<()> {
     let mut p = Page::open(o, base, &["--enable-unsafe-webgpu"], "__e2e/blank.html")?;
     let r = in_page(
         &mut p,
-        "const [model, session, names] = args;
+        "const [model, session, names, attn] = args;
         await e2e.wipe();
         const clip = new Float32Array(await (await fetch('/clip/clip.f32')).arrayBuffer());
         const n = clip.length / 2;
         const bytes = new Uint8Array(await (await fetch(model)).arrayBuffer());
-        const opts = { mm: 's64', attn: 'split', chunk: 16384, overlap: 2, step_limit: 600 };
+        const opts = { mm: 's64', attn, chunk: 16384, overlap: 2, step_limit: 600 };
         const stems = {};
         // Each separation starts with a progress reply of 0 chunks done.
         const out = { segments: 0, storage_segments: 0, len: 0, stored: [], separations: 0 };
@@ -2797,11 +2811,13 @@ fn stored_stems(o: &Opts) -> Result<()> {
             roformer::STEMS
                 .iter()
                 .map(|n| [n.to_string(), stem_protocol_file(n)])
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            attn
         ]),
         3600,
     )?;
     p.note(&format!("replies: {:?}", texts(&r["replies"])));
+    p.note(&format!("stored-stems: attention {attn}"));
     let (checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref())?;
     for (name, hash) in roformer::STEMS.iter().zip(&hashes) {
         p.note(&format!("stored-stems: memory path: {name} sha256 {hash}"));
@@ -3682,6 +3698,18 @@ mod tests {
         let sites = CompareSites::start(&o, |dist| Ok(dist.to_path_buf())).expect("sites");
         assert_eq!(sites.query(perf::Side::Base), "mm=v64k8,v64k8&attn=fused");
         assert_eq!(sites.query(perf::Side::Head), "mm=v64k8,v64k8&attn=freq");
+    }
+
+    /// Asserts that `stored_stems_attn` gives `split` with no `--query` and
+    /// with a query with no `attn`, and the value of `attn` otherwise
+    /// (`attn=fused`, `mm=s64&attn=freq`, `?attn=fused`).
+    #[test]
+    fn stored_stems_takes_attn_from_the_query() {
+        assert_eq!(stored_stems_attn(None), "split");
+        assert_eq!(stored_stems_attn(Some("mm=v64")), "split");
+        assert_eq!(stored_stems_attn(Some("attn=fused")), "fused");
+        assert_eq!(stored_stems_attn(Some("mm=s64&attn=freq")), "freq");
+        assert_eq!(stored_stems_attn(Some("?attn=fused")), "fused");
     }
 
     /// Asserts that `selftest_query`:
