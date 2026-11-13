@@ -349,6 +349,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Item 8, with the head page of the working tree on `1e1c2cc`: `e2e selftest --query selftest=stages` passes in Safari (`v64k8,v64`, `fused`, worst stage 69.4 dB) and in Chrome (`v64,v64`, `freq`, 69.4 dB).  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-selftest-<browser>/`.
   * Item 8: `e2e stored-stems` in Chrome gives the same six hashes at `1e1c2cc` and at the head, with `attn=fused` and with `attn=freq`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-stored2-<base or head>-<policy>/`.  `stored-stems` took `attn` from `--query` only after a fix (Surprises).  Its test `stored_stems_takes_attn_from_the_query` failed first: `left: "split"`, `right: "fused"`.
 * [x] Step 6 (2026-11-14): the comparison of the fix gives no change in Chrome and in Safari (`--runs 8`).  The head's 12 calibrations in each browser give one choosable policy: `freq` in Chrome and `fused` in Safari.  The check of Step 3 passes in each browser.  No gain, so no new Safari baseline.  TD-101 is closed.
+* [x] Step 7 (2026-11-14): the predictor of C1.  `i64` over `v64` on `time scores` is an effect in both browsers: 1.31 to 1.35 in Chrome, and 0.84 in Safari, where vec4 reads are slower.  So C1 is built (Chrome), and Safari is predicted to lose.
 
 ## Surprises and discoveries
 
@@ -449,6 +450,19 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   | - | - | - | - | - |
   | Chrome 157, `v64,v64` | `fused`, `freq` | -1.39 %, -1.39 % | gain of `freq` | passes: `freq` is not slower |
   | Safari 27.2, `v64k8,v64k8` | `freq`, `fused` | -3.98 %, -4.05 % | gain of `fused`, 3 % or more | passes: `fused` is not slower |
+
+* 2026-11-14, Step 7: the predictor of C1.  One set of `e2e bench --query "bench=i64,v64&bench_rounds=5&mm=<pins>&attn=fused"` at `040dbea`, in the order Safari, Chrome, Safari, Chrome; pins `v64k8,v64k8` in Safari and `v64,v64` in Chrome.  The figure is `i64`'s time over `v64`'s (the rate of `v64` over the rate of `i64`), with the larger spread of the two.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step7-<browser>-<n>/`; table: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step7-table.txt`.
+
+  | Page | `time scores` (K 64) | `time qkv` (K 256), f32 weights | `time qkv`, f16 weights |
+  | - | - | - | - |
+  | Safari 1 | 0.840 (1.2 %): effect, `v64` slower | 1.252 (1.5 %): effect | 1.265 (2.8 %): effect |
+  | Chrome 2 | 1.350 (4.2 %): effect | 1.450 (1.0 %): effect | 1.479 (1.6 %): effect |
+  | Safari 3 | 0.835 (1.4 %): effect, `v64` slower | 1.257 (1.3 %): effect | 1.260 (1.6 %): effect |
+  | Chrome 4 | 1.312 (4.5 %): effect | 1.452 (1.1 %): effect | 1.492 (2.1 %): effect |
+
+  * The verdict: C1 is built, by the rule of Step 7: `i64` over `v64` on `time scores` is an effect in Chrome.
+  * In Safari, the effect on `time scores` goes the other way: `v64` takes 1.19 times `i64`'s time at K 64, though it takes 0.80 times at K 256.  So vec4 reads are predicted to help C1 in Chrome and to slow it in Safari.  C1's loops have K 16 for each slice, nearer K 64 than K 256.
+  * The attention-only figures of `measure_attention` (time axis, seconds for each chunk): Safari split 3.06 to 3.09, fused 3.24 to 3.30; Chrome split 1.82 to 1.84, fused 2.17 to 2.19.
 
 * 2026-11-14, Step 5, item 8: `e2e stored-stems` did not read `--query`.  Its page script set `mm: 's64', attn: 'split'`, so a run with `--query attn=fused` ran split attention, and gave the same hashes as `attn=freq`.  Now it takes `attn` from `--query` (`stored_stems_attn`), and logs the policy.  With it, `fused` and `freq` give different hashes, and each is the same at the base and the head.
 
