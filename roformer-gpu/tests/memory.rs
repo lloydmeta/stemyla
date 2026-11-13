@@ -620,6 +620,35 @@ fn readbacks_checks_and_benchmarks_free_their_buffers() {
     assert!(errors.is_empty(), "{errors:?}");
 }
 
+/// Asserts that calibration frees each GPU buffer that it makes, with f32
+/// weights, and with f16 weights on a GPU whose f16 check passed:
+/// `live_bytes` is back to its value before, and the GPU gives no error
+/// (MEM-3).
+#[test]
+fn calibration_frees_its_buffers() {
+    let Some(g) = gpu() else { return };
+    pollster::block_on(g.check_kernels()).unwrap();
+    pollster::block_on(g.check_attention());
+    let start = g.live_bytes();
+    let t0 = std::time::Instant::now();
+    let now = || t0.elapsed().as_secs_f64();
+    let formats = WeightFormat::ALL
+        .into_iter()
+        .filter(|&f| f == WeightFormat::F32 || g.f16_ok.get());
+    for format in formats {
+        pollster::block_on(roformer_gpu::bench::calibrate(
+            &g,
+            format,
+            roformer_gpu::net::BUDGET,
+            now,
+            |_| {},
+        ));
+        assert_eq!(g.live_bytes(), start, "{format:?}");
+    }
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 /// On a profiling device each submission's timestamp readback buffer is
 /// destroyed once its timestamps are collected.
 #[test]

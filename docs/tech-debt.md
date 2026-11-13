@@ -548,12 +548,12 @@ This entry concerns no rule.  It concerns the time limit of each browser e2e sce
 
 This entry concerns no rule.  It concerns the speed of a separation (M4 of `plans/active/gpu-speed.md`).
 
-* On the M2 Pro, with `v64k8`, Safari's calibration times split attention at 3.11 to 3.16 s and fused at 3.42 to 3.51 s for each chunk.  That is at `FUSED_MARGIN` (1.1).
+* On the M2 Pro, with `v64k8`, Safari's calibration times split attention at 3.11 to 3.16 s and fused at 3.42 to 3.51 s for each chunk.  That was at `FUSED_MARGIN` (1.1 then).
 * So Safari chose split in about 10 of 22 calibrations of Steps 9 to 11 of `plans/completed/gpu-speed-m4.md`, the forced-`mm` runs included.  Forced split runs are about 3.4 % slower than forced fused runs.
 * Calibration times split about 0.5 s for each chunk too low in Safari, before `v64k8` too.
 * Chrome has the same bias: calibration puts split about 0.26 s for each chunk too low against fused (M2 Step 5.3).  Chrome chooses split there, and split is the faster policy in Chrome.
-* The cause is not known.
-* Fix: M5 of `plans/active/gpu-speed.md` finds the cause, and calibration times the time axis as the separation runs it.
+* The cause (M5 Step 4): calibration timed the attention dispatches alone.  In Safari, it left out the linear products and the other dispatches of the time transformer, at M 1,151 in 744 steps against M 4,604 in 192.  In Chrome, it left out the waits between steps.
+* Fix: M5 Step 5 of `plans/active/gpu-speed.md`.  Calibration times whole time-transformer steps, with a wait after each, for 12 rounds, and `FUSED_MARGIN` is 1.0.  The bias is now -0.010 s for each chunk in Safari and +0.006 s in Chrome.  M5 Step 6 checks that each calibration choice is not slower, then closes this entry.
 
 ## Known breaches
 

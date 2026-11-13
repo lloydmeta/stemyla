@@ -335,6 +335,19 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Then `cargo test -p xtask` passes (802 unit tests).
 * [x] Step 3 (2026-11-13): the check of the goal, in `docs/references/local-browser-testing.md`.  It fails first at `ab40862` in Safari: a loss of `freq` of 3 % or more.  Chrome gives a gain of `freq`, so no failure there.
 * [x] Step 4 (2026-11-13): the cause of the bias, from forced and unforced runs at the head page (`e25402d`).  Safari: the linear products and the other dispatches of the time transformer.  Chrome: the waits between steps.  So Step 5 takes form (c).
+* [x] Step 5 (2026-11-13 to 2026-11-14): form (c), `FUSED_MARGIN` 1.0 and 12 time-axis rounds, in one commit.  Each new test failed first on an assert, against the old behaviour:
+  * `time_steps_of_a_full_chunk`, with `time_steps` giving no steps: `left: []`, `right: [1, 1, ...]` (62 ones).
+  * `calibration_waits_after_each_step`, with `STEP_WAITS` set to `Covering`: `left: Covering`, `right: EachStep`.
+  * `choice_keys_name_the_format` (it pins `CALIBRATION`, now 5), with `CALIBRATION` 4: `left: 4`, `right: 5`.
+  * `the_run_and_calibration_share_one_budget` (a source test), on the worker's source at `253d775`: `s.max_elems.unwrap_or(roformer_gpu::net::BUDGET) in worker/src/web.rs`.
+  * `calibration_frees_its_buffers` (`roformer-gpu/tests/memory.rs`) is a guard, not a test that fails first.  It passed with the old `calibrate` at `253d775` (with f32 and f16 weights), and passes with the new one.
+  * `cargo test -p roformer-gpu --lib` (55) and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` pass on the M2 Pro (Metal).
+  * Item 6 at `FUSED_MARGIN` 1.1: the limits hold in both browsers (Surprises).  Item 7: Chrome had a wrong choice.  The maintainer chose option A (Decision log).
+  * `fused_attention_margin` now asserts the margin 1.0.  With `FUSED_MARGIN` 1.1 it failed: `assertion failed: !time(1.0, 1.01)`.
+  * `ATTENTION_ROUNDS` (12) sets the timed rounds of the time axis, 4 times the 3 of before.  Calibration takes about 24.5 s in Chrome and 23.9 s in Safari, against 15.0 s and 13.6 s at `253d775`: about 9.5 to 10.3 s more.
+  * Item 6 again at 1.0, with 12 rounds: both limits hold in each browser, and item 7 has no wrong choice (Surprises).
+  * Item 8, with the head page of the working tree on `1e1c2cc`: `e2e selftest --query selftest=stages` passes in Safari (`v64k8,v64`, `fused`, worst stage 69.4 dB) and in Chrome (`v64,v64`, `freq`, 69.4 dB).  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-selftest-<browser>/`.
+  * Item 8: `e2e stored-stems` in Chrome gives the same six hashes at `1e1c2cc` and at the head, with `attn=fused` and with `attn=freq`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-stored2-<base or head>-<policy>/`.  `stored-stems` took `attn` from `--query` only after a fix (Surprises).  Its test `stored_stems_takes_attn_from_the_query` failed first: `left: "split"`, `right: "fused"`.
 
 ## Surprises and discoveries
 
@@ -377,6 +390,43 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * The gaps by difference take each group's part without the profile to be as with it.  A profile adds time to each step, so the profile's gaps are an upper bound.
   * Calibration's attention-only times match the profile's well: split 3.074 against 3.062 in Safari, 1.825 against 1.817 in Chrome.  So the attention timing is not the cause; the parts that it leaves out are.
   * Safari's calibration chose `fused` in each of 8 unforced runs today (ratio 1.061 to 1.081), and `v64k8,v64k8` in 5 of 8.  M4 had split in about 10 of 22.  Chrome chose `v64,v64` and `freq` in 4 of 4 (ratio 1.186 to 1.203).
+* 2026-11-14, Step 5, item 6: the accuracy of form (c), from unforced runs of the head page (the working tree on `253d775`).  `D` and its noise are from Step 4.  The ratio is calibration's fused time over its split time.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-<browser>-<n>/`; tables: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-safari-calib.txt` and `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-chrome-calib.txt`.
+
+  | Figure | Safari 27.2 | Chrome 157 |
+  | - | - | - |
+  | Runs with the pins, of all runs | 13 of 16 (`v64k8,v64k8`) | 13 of 14 (`v64,v64`) |
+  | Policy chosen | `fused` in 13 of 13 | `fused` in 13 of 13 |
+  | Calibration's split, fused (ranges, seconds for each chunk) | 4.96 to 5.06; 4.68 to 4.78 | 3.05 to 3.57; 3.11 to 3.45 |
+  | Mean (split - fused) | +0.292 | -0.062 |
+  | `D` | +0.305 | -0.070 |
+  | The new bias, and its limit | -0.013, under 0.152: holds | +0.008, under 0.035: holds |
+  | The old bias (Step 4) | -0.517 | -0.287 |
+  | Ratio: mean, standard deviation | 0.9419, 0.0079 | 1.0203, 0.0200 |
+  | Mean plus or minus 2 standard deviations | 0.926 to 0.958 | 0.980 to 1.060 |
+  | The spread limit at `FUSED_MARGIN` 1.1 | holds | holds |
+  | The spread limit at 1.0 | holds | fails: 0.020 from 1.0, under 2 SD (0.040) |
+
+  * Form (c) removes the bias in both browsers: to 2.5 % of the old bias in Safari, and 3 % in Chrome.
+  * Calibration with form (c) takes about 15.9 s in Chrome, against 15.0 s before (run 1).
+  * Chrome's run 8 timed both policies about 0.4 s higher (split 3.57, fused 3.45), so its ratio was 0.966.  Without it, the standard deviation is about 0.013.
+  * Item 7: Safari's one choosable policy is `fused`, the faster one: no wrong choice.  Chrome's one choosable policy is `fused`, which is 1.49 % slower than `freq` by Step 4's forced runs, over `T`: a wrong choice.  `freq` is not choosable in Chrome: 1.1 is outside 0.980 to 1.060.
+* 2026-11-14, Step 5, item 6 again, at `FUSED_MARGIN` 1.0 with `ATTENTION_ROUNDS` 12 (the maintainer's option A).  The head page of the working tree on `1e1c2cc`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5b-<browser>-<n>/`; tables: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5b-safari-calib.txt` and `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5b-chrome-calib.txt`.
+
+  | Figure | Safari 27.2 | Chrome 157 |
+  | - | - | - |
+  | Runs with the pins, of all runs | 13 of 21 (`v64k8,v64k8`) | 13 of 14 (`v64,v64`) |
+  | Policy chosen | `fused` in 13 of 13 | `freq` in 13 of 13 |
+  | Mean (split - fused) | +0.295 | -0.064 |
+  | The new bias, and its limit | -0.010, under 0.152: holds | +0.006, under 0.035: holds |
+  | Ratio: mean, standard deviation | 0.9412, 0.0052 | 1.0208, 0.0032 |
+  | Mean plus or minus 2 standard deviations | 0.931 to 0.952 | 1.015 to 1.027 |
+  | The spread limit at 1.0 | holds | holds |
+  | Chunk lower quartiles of the runs | 6.96 to 7.00 | 4.62 to 4.64 |
+
+  * The 12 rounds cut Chrome's standard deviation from 0.020 to 0.0032, and Safari's from 0.0079 to 0.0052.
+  * Item 7: Safari's one choosable policy is `fused`, the faster one.  Chrome's one choosable policy is `freq`, the faster one.  No browser has a wrong choice.
+  * Safari chose `v64k8,v64` for the small products in 8 of 21 runs.  The two kernels time within 1 % there (1.16 to 1.18 s), so it is noise, not a defect.
+* 2026-11-14, Step 5, item 8: `e2e stored-stems` did not read `--query`.  Its page script set `mm: 's64', attn: 'split'`, so a run with `--query attn=fused` ran split attention, and gave the same hashes as `attn=freq`.  Now it takes `attn` from `--query` (`stored_stems_attn`), and logs the policy.  With it, `fused` and `freq` give different hashes, and each is the same at the base and the head.
 
 ## Decision log
 
@@ -390,6 +440,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 * 2026-11-13, agent (implementer), Step 4: the cause of the bias is the parts of a time-transformer step that calibration does not time.  In Safari, the linear products (0.287 s) and the other dispatches (0.141 s) at M 1,151 in 744 steps against M 4,604 in 192.  In Chrome, the waits between steps (about 0.315 s).  Why: Step 4's table; each part is over the noise of `D`.
 * 2026-11-13, agent (implementer), Step 5: form (c), a whole time-transformer step of each policy through the function that `Job::run` uses.  Why, by Step 4's table and item 6's limit (half of `|D|`: 0.153 s in Safari, 0.035 s in Chrome): form (a) covers the gaps only, and leaves about -0.47 s in Safari.  Form (b) adds the linear products, and leaves about -0.517 + 0.045 + 0.287 = -0.185 s in Safari, over 0.153 s.  The other dispatches (0.141 s) are the rest, and only form (c) times them.
+* 2026-11-14, the maintainer, Step 5 item 7: option A.  `FUSED_MARGIN` goes to 1.0, with time-axis timings about 4 times longer, so that the choice is stable.  It is a product change that the maintainer accepted: a GPU where split is faster now splits the time axis, and holds about 42 MB more GPU memory (the parent's Decision log, `1e1c2cc`).
+* 2026-11-14, agent (implementer), Step 5: the longer timing is 12 rounds of `ATTENTION_ROUND` (0.3 s), not longer rounds.  Why: more rounds give a median that one slow round (Chrome's run 8 of the first item 6) does not move, and they interleave the two policies more often.
 * 2026-11-13, agent (implementer), Step 5: calibration times the time axis at the budget of the run, as the plan says.  A run with `?max_elems=` thus keeps a choice that it timed at its own budget.  Why: `?max_elems=` is a tool for tests, and the stored key does not name a budget today.
 
 ## Outcomes and retrospective

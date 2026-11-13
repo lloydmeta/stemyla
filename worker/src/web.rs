@@ -39,11 +39,6 @@ const MODEL_URL: &str =
 const MODEL_SHA256: &str = "6c8303a829575d03f21562ea185be7b6b23e922052883dec1b9518ca00a920fc";
 const DOWNLOAD_NAME: &str = "download.part";
 
-/// Default upper bound on any per-step intermediate, in f32 elements
-/// (32 MiB): one band per time-attention step at full chunk length (about
-/// 4 GFLOP), so each GPU step stays short.  `?max_elems=` overrides it.
-const BUDGET: usize = 8 << 20;
-
 #[wasm_bindgen(inline_js = r#"
 export async function cache_get(name) {
   const root = await navigator.storage.getDirectory();
@@ -488,7 +483,7 @@ async fn ensure_kernels(g: &Gpu, s: &Settings, format: WeightFormat) {
     let source = if set(&s.mm) && set(&s.attn) {
         "from the URL"
     } else {
-        let chosen = choose_kernels(g, format).await;
+        let chosen = choose_kernels(g, format, budget(s)).await;
         match (chosen, set(&s.mm) || set(&s.attn)) {
             (Chosen::Stored, false) => "stored",
             (Chosen::Calibrated, false) => "calibrated",
@@ -509,7 +504,7 @@ async fn ensure_kernels(g: &Gpu, s: &Settings, format: WeightFormat) {
 }
 
 fn budget(s: &Settings) -> usize {
-    s.max_elems.unwrap_or(BUDGET)
+    s.max_elems.unwrap_or(roformer_gpu::net::BUDGET)
 }
 
 async fn handle(msg: JsValue) {
@@ -2020,9 +2015,10 @@ enum Chosen {
 /// Sets this GPU's matmul kernels and attention path for weights in
 /// `format`: the choice kept in browser storage for this adapter, these
 /// kernels and this format, or else several seconds of
-/// `roformer_gpu::bench::calibrate`, whose result is then kept (see
-/// `roformer_gpu::bench::store_choice` for which lines stay).
-async fn choose_kernels(gpu: &Gpu, format: WeightFormat) -> Chosen {
+/// `roformer_gpu::bench::calibrate` at the run's `budget`, whose result is
+/// then kept (see `roformer_gpu::bench::store_choice` for which lines
+/// stay).
+async fn choose_kernels(gpu: &Gpu, format: WeightFormat, budget: usize) -> Chosen {
     let pref = STATE.with_borrow(|s| s.power);
     // The key's separators (tab, newline, `|`) must not occur in the name,
     // or its stored line would never match and would pile up.
@@ -2061,7 +2057,7 @@ async fn choose_kernels(gpu: &Gpu, format: WeightFormat) -> Chosen {
         "choosing kernels for this GPU and {} weights (several seconds, once)…",
         format.name()
     ));
-    let c = roformer_gpu::bench::calibrate(gpu, format, now_s, |l| log(&l)).await;
+    let c = roformer_gpu::bench::calibrate(gpu, format, budget, now_s, |l| log(&l)).await;
     gpu.policy.set(c.matmul);
     gpu.attention.set(c.attention);
     // A WebGPU error while timing (out of memory with the weights

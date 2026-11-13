@@ -4,10 +4,12 @@
 //! before its first separation, to choose its kernels; nothing is tuned
 //! while a song is being separated.
 
+use crate::net::{TimeStep, time_steps};
 use crate::{
     Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, MatMulPolicy, Rec, TILES, View, Weight,
     WeightFormat,
 };
+use roformer::DEPTH;
 
 /// One matmul shape of the network and how often a chunk runs it.
 #[derive(Clone, Copy, Debug)]
@@ -288,7 +290,7 @@ async fn time_one(
             break;
         }
     }
-    let queued = ((WAIT_SECS / one.max(1e-6)).ceil() as usize).clamp(1, 64);
+    let queued = queued(Waits::Covering, one);
     let (t0, mut count) = (now(), 0);
     while count == 0 || now() - t0 < round {
         submit(queued);
@@ -478,14 +480,37 @@ pub async fn measure(
     }
 }
 
+/// How many submissions a timed round queues before each wait for the GPU.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Waits {
+    /// Enough to cover [`WAIT_SECS`], as [`time_one`] times a kernel.
+    Covering,
+    /// One: a wait after each submission, as the separation waits after
+    /// each step (`Pace::run` in the worker).
+    EachStep,
+}
+
+/// The submissions for each wait of a timed round with `waits`, when one
+/// submission and its wait took `one` seconds.
+pub fn queued(waits: Waits, one: f64) -> usize {
+    match waits {
+        Waits::Covering => ((WAIT_SECS / one.max(1e-6)).ceil() as usize).clamp(1, 64),
+        Waits::EachStep => 1,
+    }
+}
+
+/// How [`time_axis_per_chunk`], and so calibration, waits for the GPU: after
+/// each step, as the separation does.
+pub const STEP_WAITS: Waits = Waits::EachStep;
+
 /// Seconds per call of `record` (which adds dispatches to one submission),
 /// timed like [`time_one`]: `warm` seconds first, then one round of at
-/// least `round` seconds with enough submissions per wait to cover
-/// [`WAIT_SECS`].
+/// least `round` seconds with [`queued`] submissions for each wait.
 async fn time_rec<'g>(
     gpu: &'g Gpu,
     warm: f64,
     round: f64,
+    waits: Waits,
     now: &impl Fn() -> f64,
     record: &impl Fn(&mut Rec<'g>),
 ) -> f64 {
@@ -507,7 +532,7 @@ async fn time_rec<'g>(
             break;
         }
     }
-    let queued = ((WAIT_SECS / one.max(1e-6)).ceil() as usize).clamp(1, 64);
+    let queued = queued(waits, one);
     let (t0, mut count) = (now(), 0);
     while count == 0 || now() - t0 < round {
         submit(queued);
@@ -648,20 +673,37 @@ pub async fn attention_per_chunk(
     let (mut ts, mut tf, mut fs, mut ff) = (empty(), empty(), empty(), empty());
     for rd in 0..rounds.max(1) {
         let w = if rd == 0 { warm } else { 0.0 };
-        ts.rounds
-            .push(time_rec(gpu, w, round, now, &|r| split_attention(r, &b, T, 1)).await * 744.0);
+        ts.rounds.push(
+            time_rec(gpu, w, round, Waits::Covering, now, &|r| {
+                split_attention(r, &b, T, 1)
+            })
+            .await
+                * 744.0,
+        );
         if freq {
             fs.rounds.push(
-                time_rec(gpu, w, round, now, &|r| split_attention(r, &b, 62, 88)).await * 168.0,
+                time_rec(gpu, w, round, Waits::Covering, now, &|r| {
+                    split_attention(r, &b, 62, 88)
+                })
+                .await
+                    * 168.0,
             );
         }
         if gpu.fused_ok.get() {
             tf.rounds.push(
-                time_rec(gpu, w, round, now, &|r| fused_attention(r, &b, T, 4)).await * 186.0,
+                time_rec(gpu, w, round, Waits::Covering, now, &|r| {
+                    fused_attention(r, &b, T, 4)
+                })
+                .await
+                    * 186.0,
             );
             if freq {
                 ff.rounds.push(
-                    time_rec(gpu, w, round, now, &|r| fused_attention(r, &b, 62, 88)).await * 168.0,
+                    time_rec(gpu, w, round, Waits::Covering, now, &|r| {
+                        fused_attention(r, &b, 62, 88)
+                    })
+                    .await
+                        * 168.0,
                 );
             }
         }
@@ -695,6 +737,62 @@ pub async fn measure_attention(
         tf.median() + ff.median()
     ));
     ((ts.median(), tf.median()), (fs.median(), ff.median()))
+}
+
+/// Seconds per chunk of the time transformer with split attention and with
+/// fused attention, as the separation runs it: each step of [`time_steps`]
+/// at `budget`, for each of the [`DEPTH`] layers, with a wait for the GPU
+/// after each step ([`STEP_WAITS`]).  It records each step with the
+/// function that `Job::run` uses ([`TimeStep`]), with zero weights in
+/// `format`.  So it covers the attention, the linear products, the other
+/// dispatches of a step and the waits between steps.  Each step size is
+/// timed once and counted for each step of that size: at the default
+/// budget, 62 steps of 1 band split, and 15 steps of 4 bands and 1 of 2
+/// fused.  The two take turns over `rounds` rounds; medians.  Returns
+/// (split, fused); fused is empty when it failed its check.
+#[allow(clippy::too_many_arguments)]
+pub async fn time_axis_per_chunk(
+    gpu: &Gpu,
+    format: WeightFormat,
+    budget: usize,
+    warm: f64,
+    round: f64,
+    rounds: usize,
+    now: &impl Fn() -> f64,
+) -> (Timing, Timing) {
+    let recording = gpu.set_recording(false);
+    let step = TimeStep::new(gpu, T, budget, format, true);
+    let sizes = |fused: bool| {
+        let mut sizes: Vec<(usize, usize)> = Vec::new();
+        for bands in time_steps(T, budget, fused) {
+            match sizes.iter_mut().find(|(b, _)| *b == bands) {
+                Some((_, count)) => *count += 1,
+                None => sizes.push((bands, 1)),
+            }
+        }
+        sizes
+    };
+    let mut timings = [Timing { rounds: Vec::new() }, Timing { rounds: Vec::new() }];
+    for rd in 0..rounds.max(1) {
+        let w = if rd == 0 { warm } else { 0.0 };
+        for (timing, fused) in timings.iter_mut().zip([false, true]) {
+            if fused && !gpu.fused_ok.get() {
+                continue;
+            }
+            let mut total = 0.0;
+            for (bands, count) in sizes(fused) {
+                let secs = time_rec(gpu, w, round, STEP_WAITS, now, &|r| {
+                    step.record(r, bands, fused)
+                })
+                .await;
+                total += secs * (count * DEPTH) as f64;
+            }
+            timing.rounds.push(total);
+        }
+    }
+    gpu.set_recording(recording);
+    let [split, fused] = timings;
+    (split, fused)
 }
 
 /// Kernel indices named in a comma-separated list (`"s64,i64"`); `None`
@@ -767,7 +865,10 @@ impl Choice {
 /// Version 3 calibrates once for each weight format, with the f16
 /// variants for f16 weights (M9 of `plans/completed/stream-from-storage.md`).
 /// Version 4 adds `v64k8`, from M4 of `plans/active/gpu-speed.md`.
-pub const CALIBRATION: u32 = 4;
+/// Version 5 times whole time-transformer steps, with a wait after each,
+/// as the separation runs them ([`time_axis_per_chunk`]; M5, TD-101), for
+/// [`ATTENTION_ROUNDS`] rounds, with [`FUSED_MARGIN`] 1.0.
+pub const CALIBRATION: u32 = 5;
 
 /// The key of this GPU's stored kernel choice for weights in `format`:
 /// `"<adapter>|<kernels_id>|<CALIBRATION>|<f32 or f16>"`.  The formats
@@ -798,17 +899,31 @@ pub fn choose_again(last: Option<WeightFormat>, format: WeightFormat) -> bool {
     last != Some(format)
 }
 
-/// Warm-up before the first timed round of each attention candidate in
+/// Warm-up before the first timed round of each time-axis step in
 /// [`calibrate`], and the length of every timed round: a time-axis step
-/// takes tens of milliseconds, so 0.1 s held only a few of them.
+/// takes milliseconds to tens of milliseconds, so 0.1 s held only a few of
+/// them.
 pub const ATTENTION_WARM: f64 = 0.5;
 pub const ATTENTION_ROUND: f64 = 0.3;
 
+/// The timed rounds of the time axis in [`calibrate`], medians compared.
+/// With 3 rounds, Chrome on the M2 Pro gave a ratio (fused over split) of
+/// 1.020 with a standard deviation of 0.020, so at [`FUSED_MARGIN`] 1.0 it
+/// chose the slower policy now and then.  12 rounds, about 4 times the
+/// timing, add about 8 s to each calibration (M5).
+pub const ATTENTION_ROUNDS: usize = 12;
+
 /// Fused attention stays on the time axis unless split attention measured
-/// more than this factor faster.  Fused needs no scores buffer (about
-/// 42 MB per band) and so runs four bands per step, which matters more
-/// on memory-limited devices than a close timing does.
-pub const FUSED_MARGIN: f64 = 1.1;
+/// faster by more than this factor.  It is 1.0: the faster policy wins.
+/// Calibration times whole time-transformer steps as the separation runs
+/// them ([`time_axis_per_chunk`]), so a margin for fused only makes a GPU
+/// choose the slower policy.  Before M5 it was 1.1, to keep fused for its
+/// memory: fused needs no scores buffer and runs four bands for each step.
+/// The cost of the margin 1.0 is about 42 MB of GPU memory (the scores of
+/// 1 band at the default chunk) on a GPU where split wins.  Chrome on the
+/// M2 Pro splits, and its tab total is 799 MB, under `TAB_BUDGET_MB`
+/// (943 MB, MEM-4).
+pub const FUSED_MARGIN: f64 = 1.0;
 
 /// The stored kernel choices (`"<key>\t<choice>"` lines, keys
 /// `"<adapter>|..."`) with `key`'s choice set to `value`.  Lines for other
@@ -849,7 +964,7 @@ pub fn store_choice(
 /// for kernels that failed their check); fused attention on the frequency
 /// axis whenever it works (it was 2.2 to 3.6 times faster on every GPU
 /// measured), and on the time axis unless split measured faster by more
-/// than [`FUSED_MARGIN`].
+/// than [`FUSED_MARGIN`] (1.0: the faster one).
 pub fn decide(
     large: &[f64],
     small: &[f64],
@@ -888,13 +1003,29 @@ pub fn decide(
 /// (`v64`) issue faster than scalar ones, and whether fused attention wins
 /// on long sequences.  A product `v64` cannot read as vec4s (the p.v
 /// product) runs and is timed as `i64` under `v64`'s name, as it would
-/// run in a separation.  Attention gets longer windows
-/// ([`ATTENTION_WARM`], [`ATTENTION_ROUND`]) than the matmul products.
-/// The linear shapes are timed with weights in `format`, so f16 weights get
-/// the kernels whose f16 variants run fastest.  Takes several seconds.
+/// run in a separation.  The linear shapes are timed with weights in
+/// `format`, so f16 weights get the kernels whose f16 variants run
+/// fastest.
+///
+/// The time axis is timed as the separation runs it, at `budget`
+/// ([`time_axis_per_chunk`]): whole time-transformer steps, with a wait
+/// after each.  Before version 5, calibration timed the attention
+/// dispatches alone, with many submissions for each wait.  That put split
+/// about 0.5 s for each chunk too low in Safari and 0.26 s in Chrome
+/// (TD-101).  The time axis gets longer windows ([`ATTENTION_WARM`],
+/// [`ATTENTION_ROUND`]) and more rounds ([`ATTENTION_ROUNDS`]) than the
+/// matmul products.
+///
+/// It frees the matmul buffers (about 109 MB with f16 weights) before it
+/// times the time axis.  Then it holds about 113 MB ([`TimeStep`] at the
+/// default chunk and budget).  Before version 5 the peak was about 196 MB.
+/// Both are less than a job's buffers at the default chunk (about 310 MB),
+/// which calibration frees before the separation makes them.  Takes several
+/// seconds.
 pub async fn calibrate(
     gpu: &Gpu,
     format: WeightFormat,
+    budget: usize,
     now: impl Fn() -> f64,
     mut log: impl FnMut(String),
 ) -> Choice {
@@ -906,54 +1037,67 @@ pub async fn calibrate(
         by_name("freq ff up"),
     ];
     let small = [by_name("time gates"), by_name("time p·v")];
-    let b = buffers(gpu, format == WeightFormat::F16);
     let (warm, round, rounds) = (0.1, 0.1, 3);
-    let secs = |kind: Vec<Shape>| {
-        let b = &b;
-        let now = &now;
-        async move {
-            let mut t = vec![Timing { rounds: Vec::new() }; TILES.len()];
-            #[expect(
-                clippy::disallowed_methods,
-                reason = "MEM-1: which tiles are usable, one flag for each"
-            )]
-            let mut alive = gpu.usable.get().to_vec();
-            for rd in 0..rounds {
-                if rd == 1 {
-                    let first: Vec<f64> = t.iter().map(Timing::median).collect();
-                    alive = still_in(&first);
-                }
-                for (k, timing) in t.iter_mut().enumerate() {
-                    if !alive[k] {
-                        continue;
-                    }
-                    let mut total = 0.0;
-                    for s in &kind {
-                        let w = if rd == 0 { warm } else { 0.0 };
-                        total += time_one(gpu, b, s, k, format, w, round, now).await
-                            * s.per_chunk as f64;
-                    }
-                    timing.rounds.push(total);
-                }
-            }
-            (masked_medians(&t, &alive), t)
-        }
-    };
     let recording = gpu.set_recording(false);
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "MEM-1: three matmul shapes to time"
-    )]
-    let (l, lt) = secs(large.to_vec()).await;
-    #[expect(
-        clippy::disallowed_methods,
-        reason = "MEM-1: two matmul shapes to time"
-    )]
-    let (s, st) = secs(small.to_vec()).await;
+    // The matmul buffers live only in this block, so the time axis's
+    // buffers do not add to them.
+    let ((l, lt), (s, st)) = {
+        let b = buffers(gpu, format == WeightFormat::F16);
+        let secs = |kind: Vec<Shape>| {
+            let b = &b;
+            let now = &now;
+            async move {
+                let mut t = vec![Timing { rounds: Vec::new() }; TILES.len()];
+                #[expect(
+                    clippy::disallowed_methods,
+                    reason = "MEM-1: which tiles are usable, one flag for each"
+                )]
+                let mut alive = gpu.usable.get().to_vec();
+                for rd in 0..rounds {
+                    if rd == 1 {
+                        let first: Vec<f64> = t.iter().map(Timing::median).collect();
+                        alive = still_in(&first);
+                    }
+                    for (k, timing) in t.iter_mut().enumerate() {
+                        if !alive[k] {
+                            continue;
+                        }
+                        let mut total = 0.0;
+                        for s in &kind {
+                            let w = if rd == 0 { warm } else { 0.0 };
+                            total += time_one(gpu, b, s, k, format, w, round, now).await
+                                * s.per_chunk as f64;
+                        }
+                        timing.rounds.push(total);
+                    }
+                }
+                (masked_medians(&t, &alive), t)
+            }
+        };
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: three matmul shapes to time"
+        )]
+        let large = secs(large.to_vec()).await;
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "MEM-1: two matmul shapes to time"
+        )]
+        let small = secs(small.to_vec()).await;
+        (large, small)
+    };
     let matmul = decide(&l, &s, 0.0, 0.0, false).matmul;
     gpu.policy.set(matmul);
-    let ((ts, tf), _) =
-        attention_per_chunk(gpu, ATTENTION_WARM, ATTENTION_ROUND, rounds, false, &now).await;
+    let (ts, tf) = time_axis_per_chunk(
+        gpu,
+        format,
+        budget,
+        ATTENTION_WARM,
+        ATTENTION_ROUND,
+        ATTENTION_ROUNDS,
+        &now,
+    )
+    .await;
     let choice = decide(&l, &s, ts.median(), tf.median(), gpu.fused_ok.get());
     gpu.set_recording(recording);
     let fmt = |v: &[f64], t: &[Timing]| {
@@ -976,7 +1120,7 @@ pub async fn calibrate(
             .join(", ")
     };
     log(format!(
-        "kernels for this GPU, {} weights: matmul {} (large products: {}; small: {}), attention {} (time axis: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%) per chunk)",
+        "kernels for this GPU, {} weights: matmul {} (large products: {}; small: {}), attention {} (time axis, whole steps with a wait after each: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%) per chunk)",
         format.name(),
         choice.matmul.name(),
         fmt(&l, &lt),
@@ -1134,19 +1278,61 @@ mod tests {
         assert_eq!(Choice::parse("x64;split"), None);
     }
 
-    /// Fused attention keeps the time axis when split is faster by
-    /// [`FUSED_MARGIN`] or less, and loses it beyond that.
+    /// Asserts that calibration times the time axis with a wait after each
+    /// step, as the separation does: `STEP_WAITS` is `EachStep`, which
+    /// queues 1 submission for each wait however short a step is.
+    /// `Covering` still queues enough to cover `WAIT_SECS` (50 steps of
+    /// 1 ms, at most 64).
+    #[test]
+    fn calibration_waits_after_each_step() {
+        assert_eq!(STEP_WAITS, Waits::EachStep);
+        for one in [1e-6, 1e-3, 0.02, 1.0] {
+            assert_eq!(queued(STEP_WAITS, one), 1, "{one}");
+        }
+        assert_eq!(queued(Waits::Covering, 1e-3), 50);
+        assert_eq!(queued(Waits::Covering, 1e-6), 64);
+        assert_eq!(queued(Waits::Covering, 1.0), 1);
+    }
+
+    /// Asserts that the worker and calibration use one budget: the
+    /// worker's `budget` falls back to `net::BUDGET`, the worker has no
+    /// budget of its own, and it gives calibration the budget of the run.
+    #[test]
+    fn the_run_and_calibration_share_one_budget() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/src/web.rs");
+        let worker = std::fs::read_to_string(&path).expect("worker/src/web.rs");
+        for want in [
+            "s.max_elems.unwrap_or(roformer_gpu::net::BUDGET)",
+            "choose_kernels(g, format, budget(s))",
+            "roformer_gpu::bench::calibrate(gpu, format, budget, ",
+        ] {
+            assert!(worker.contains(want), "{want} in worker/src/web.rs");
+        }
+        assert!(
+            !worker.contains("const BUDGET"),
+            "no budget of the worker's own"
+        );
+    }
+
+    /// Asserts that the time axis takes the faster policy, with no margin
+    /// for fused attention (`FUSED_MARGIN` 1.0, M5): a tie keeps fused, and
+    /// split 1 % faster or more takes the time axis.  Chrome on the M2 Pro
+    /// (calibration 5: split 3.05 s, fused 3.11 s) splits, and Safari (split
+    /// 5.03 s, fused 4.72 s) keeps fused.
     #[test]
     fn fused_attention_margin() {
         let time =
             |split: f64, fused: f64| decide(&[1.0], &[1.0], split, fused, true).attention.time;
         assert!(time(1.0, 1.0));
-        assert!(time(1.0, 1.09));
         assert!(time(1.0, FUSED_MARGIN));
-        assert!(!time(1.0, 1.11));
+        assert!(time(1.0, 0.99));
+        assert!(!time(1.0, 1.01));
+        assert!(!time(1.0, 1.09));
+        assert!(!time(3.05, 3.11));
+        assert!(time(5.03, 4.72));
         assert!(!time(4.0, 5.0));
-        // The margin alone does not rescue the Radeon Pro 5500M's
-        // version-1 measurement; the longer windows have to.
+        // The margin alone did not rescue the Radeon Pro 5500M's
+        // version-1 measurement; the longer windows had to.
         assert!(!time(8.26, 9.51));
         // Its bench a minute later: fused.
         assert!(time(11.46, 4.52));
@@ -1199,17 +1385,18 @@ mod tests {
     }
 
     /// The two formats' keys differ only in the format, and name the
-    /// calibration version.
+    /// calibration version: 5, which times the time axis as the separation
+    /// runs it, so a choice of version 4 is measured again.
     #[test]
     fn choice_keys_name_the_format() {
-        assert_eq!(CALIBRATION, 4);
+        assert_eq!(CALIBRATION, 5);
         assert_eq!(
             choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F32),
-            "AMD Radeon Pro 5500M|00000000000000ab|4|f32"
+            "AMD Radeon Pro 5500M|00000000000000ab|5|f32"
         );
         assert_eq!(
             choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F16),
-            "AMD Radeon Pro 5500M|00000000000000ab|4|f16"
+            "AMD Radeon Pro 5500M|00000000000000ab|5|f16"
         );
     }
 
