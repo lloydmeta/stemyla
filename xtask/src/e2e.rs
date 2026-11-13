@@ -97,6 +97,21 @@
 //!   any browser version, unless `--raise "<reason>"` gives the reason.
 //!   After a browser update, the reason names it, for example
 //!   `--raise "Safari 27.2 to 27.3"`.
+//!   With `--base-dist DIR`, `perf` runs the same-session comparison of
+//!   the base page in `DIR` and the head page in `--dist`, with HEAD's
+//!   `xtask` for both.  It runs blocks of 4 runs in the order base, head,
+//!   head, base.  `--runs` is the count of each side: even, and 4 or more.
+//!   It starts with `--runs` / 2 blocks, then runs one more block at a
+//!   time, up to 4 blocks, until a verdict.  Each run writes
+//!   `<out>/perf-<browser>-<base or head>-<n>.json`.  The figure of a run
+//!   is its chunk lower quartile.  The change of a block is
+//!   `(H1 + H2) / (B1 + B2) - 1`.  A block whose two runs of a side
+//!   differ by more than `SPOIL_N` is spoiled and does not count.  A
+//!   block is a loss over `CHANGE_T`, a gain under `-CHANGE_T`, else no
+//!   change.  The verdict is the class of 2 blocks or more, with at most
+//!   one block of another class and not a loss and a gain together.  Else
+//!   it is undecided (`perf::compared`).  `--query` applies to both sides.
+//!   It refuses `--gate` and `--update-baselines`.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -105,7 +120,8 @@
 //! the GPU scenarios), `--weights FILE`, `--selftest-dir DIR`,
 //! `--reference DIR`, `--download`, `--flac`, `--hashes H1,...,H6` (the
 //! six SHA-256s of `stored-stems`, in the worker's stem order), `--runs N`,
-//! `--gate`, `--update-baselines` and `--raise REASON` (`perf`), and click
+//! `--gate`, `--update-baselines`, `--raise REASON` and `--base-dist DIR`
+//! (`perf`), and click
 //! positions `--play-x`,
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
 //!
@@ -290,6 +306,8 @@ pub struct Opts {
     pub update_baselines: bool,
     /// `perf`: the reason of a raise of the bound.
     pub raise: Option<String>,
+    /// `perf`: the page of the base of a same-session comparison.
+    pub base_dist: Option<PathBuf>,
     pub play_x: f64,
     pub tempo_x: f64,
     pub download_x: f64,
@@ -337,6 +355,7 @@ impl Opts {
             gate: false,
             update_baselines: false,
             raise: None,
+            base_dist: None,
             // Positions in the 1100-pixel top bar with no model loaded.
             play_x: 600.0,
             // 75% on the 50..150% tempo slider while playing ("Pause" is
@@ -382,6 +401,7 @@ impl Opts {
                 "--gate" => o.gate = true,
                 "--update-baselines" => o.update_baselines = true,
                 "--raise" => o.raise = Some(value()?),
+                "--base-dist" => o.base_dist = Some(value()?.into()),
                 "--play-x" => o.play_x = value()?.parse()?,
                 "--tempo-x" => o.tempo_x = value()?.parse()?,
                 "--download-x" => o.download_x = value()?.parse()?,
@@ -2261,8 +2281,12 @@ fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<
 /// `e2e perf`: separates the 1-minute song of `memory-budget` at the
 /// default chunk, `--runs` times, each in a new browser profile.  Each
 /// run writes `<out>/perf-<browser>-<n>.json` and is gated against the
-/// baseline of its key (`perf.rs`).
+/// baseline of its key (`perf.rs`).  With `--base-dist`, it runs the
+/// same-session comparison instead ([`perf_compare`]).
 fn perf(o: &Opts) -> Result<()> {
+    if let Some(base_dist) = &o.base_dist {
+        return perf_compare(o, base_dist);
+    }
     if let Some(refusal) = perf::runs_refusal(
         o.runs,
         o.update_baselines,
@@ -2276,68 +2300,29 @@ fn perf(o: &Opts) -> Result<()> {
     if let Some(refusal) = perf::file_refusal(&baselines, &path) {
         bail!("perf: {refusal}");
     }
-    let mut mounts = vec![("/test/1/".to_string(), long_song(&o.out, 1)?)];
-    let model = weights_mount(o, &mut mounts)?;
-    let base = start_server(&o.dist, mounts, &["console.js"])?;
-    let q = query(o, "");
+    let site = PerfSite::start(o, &o.dist)?;
     let browser = perf::browser_name(o.browser);
     let chip = perf::command_text("sysctl", &["-n", "machdep.cpu.brand_string"]);
-    let (frames, bands) = perf::perf_axes();
     let mut results = Vec::new();
     for n in 1..=o.runs {
-        let mut p = Page::open(
-            o,
-            base.clone(),
-            &[
-                "--enable-unsafe-webgpu",
-                "--autoplay-policy=no-user-gesture-required",
-            ],
-            &format!("index.html?{q}"),
-        )?;
-        p.scenario = format!("perf-{browser}-{n}");
-        p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
-        open_song(&mut p, "/test/1/song.wav", "the 1-minute song opens")?;
-        load_and_separate(&mut p, o, &model, "the 1-minute song separates")?;
-        let version = p.session.version.clone();
-        match perf::perf_result(&p.log, browser, &version, frames, bands) {
-            Err(e) => p.check(false, &format!("the result of run {n}: {e}")),
-            Ok(result) => {
-                let file = o.out.join(format!("perf-{browser}-{n}.json"));
-                std::fs::write(&file, serde_json::to_string_pretty(&result)?)?;
-                p.note(&format!(
-                    "perf: {browser} {version}, run {n}: chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, {:.2} TFLOP/s, kernels {}, {} weights, adapter {} (fallback adapter {}); {}",
-                    result.chunk_lower_quartile,
-                    result.chunk_median,
-                    result.whole_secs,
-                    result.tflops,
-                    result.kernels,
-                    result.weights,
-                    result.adapter,
-                    result.fallback,
-                    file.display()
-                ));
-                if let Some(g) = &result.groups {
-                    p.note(&format!(
-                        "perf: GPU time by group: time-axis attention {:.3} s, frequency-axis attention {:.3} s, linear products {:.3} s, other {:.3} s, total {:.3} s",
-                        g.time_attention, g.freq_attention, g.linear, g.other, g.total
-                    ));
-                }
-                let key = perf::key_of(&result, &chip);
-                let never = perf::never_a_pass(&result, o);
-                let baseline = perf::entry_of(&baselines, &key);
-                match perf::outcome(
-                    &result,
-                    &key,
-                    never.as_deref(),
-                    baseline,
-                    o.gate,
-                    o.update_baselines,
-                ) {
-                    perf::Outcome::Note(text) => p.note(&format!("perf: {text}")),
-                    perf::Outcome::Fail(text) => p.check(false, &format!("run {n}: {text}")),
-                }
-                results.push(result);
+        let name = format!("{browser}-{n}");
+        let (mut p, result) = perf_run(o, &site, &name)?;
+        if let Some(result) = result {
+            let key = perf::key_of(&result, &chip);
+            let never = perf::never_a_pass(&result, o);
+            let baseline = perf::entry_of(&baselines, &key);
+            match perf::outcome(
+                &result,
+                &key,
+                never.as_deref(),
+                baseline,
+                o.gate,
+                o.update_baselines,
+            ) {
+                perf::Outcome::Note(text) => p.note(&format!("perf: {text}")),
+                perf::Outcome::Fail(text) => p.check(false, &format!("run {n}: {text}")),
             }
+            results.push(result);
         }
         p.finish()?;
     }
@@ -2357,6 +2342,170 @@ fn perf(o: &Opts) -> Result<()> {
             perf::write_baselines(&perf::with_entry(baselines, entry)),
         )?;
         println!("perf: wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// The server of one page of `e2e perf`, with the song and the model.
+struct PerfSite {
+    base: String,
+    model: String,
+}
+
+impl PerfSite {
+    /// Serves the page in `dist`, the 1-minute song and the model.
+    fn start(o: &Opts, dist: &Path) -> Result<Self> {
+        let mut mounts = vec![("/test/1/".to_string(), long_song(&o.out, 1)?)];
+        let model = weights_mount(o, &mut mounts)?;
+        let base = start_server(dist, mounts, &["console.js"])?;
+        Ok(Self { base, model })
+    }
+}
+
+/// One run of `e2e perf` on the page of `site`, as `perf-<name>`: it
+/// writes `<out>/perf-<name>.json` and prints its line.  It gives the
+/// page, which the caller finishes, and the result, or `None` when the
+/// log gives none (a failed check of the page).
+fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf::PerfResult>)> {
+    let browser = perf::browser_name(o.browser);
+    let (frames, bands) = perf::perf_axes();
+    let q = query(o, "");
+    let mut p = Page::open(
+        o,
+        site.base.clone(),
+        &[
+            "--enable-unsafe-webgpu",
+            "--autoplay-policy=no-user-gesture-required",
+        ],
+        &format!("index.html?{q}"),
+    )?;
+    p.scenario = format!("perf-{name}");
+    p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
+    open_song(&mut p, "/test/1/song.wav", "the 1-minute song opens")?;
+    load_and_separate(&mut p, o, &site.model, "the 1-minute song separates")?;
+    let version = p.session.version.clone();
+    let result = match perf::perf_result(&p.log, browser, &version, frames, bands) {
+        Err(e) => {
+            p.check(false, &format!("the result of run {name}: {e}"));
+            None
+        }
+        Ok(result) => {
+            let file = o.out.join(format!("perf-{name}.json"));
+            std::fs::write(&file, serde_json::to_string_pretty(&result)?)?;
+            p.note(&format!(
+                "perf: {browser} {version}, run {name}: chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, {:.2} TFLOP/s, kernels {}, {} weights, adapter {} (fallback adapter {}); {}",
+                result.chunk_lower_quartile,
+                result.chunk_median,
+                result.whole_secs,
+                result.tflops,
+                result.kernels,
+                result.weights,
+                result.adapter,
+                result.fallback,
+                file.display()
+            ));
+            if let Some(g) = &result.groups {
+                p.note(&format!(
+                    "perf: GPU time by group: time-axis attention {:.3} s, frequency-axis attention {:.3} s, linear products {:.3} s, other {:.3} s, total {:.3} s",
+                    g.time_attention, g.freq_attention, g.linear, g.other, g.total
+                ));
+            }
+            Some(result)
+        }
+    };
+    Ok((p, result))
+}
+
+/// `e2e perf --base-dist <dir>`: the same-session comparison of the base
+/// page in `<dir>` and the head page in `--dist` (`perf.rs`, [`perf::compared`]).
+/// It runs blocks of B H H B, `--runs` / 2 blocks first, then one more
+/// block at a time until a verdict, up to [`perf::MAX_BLOCKS`].  Each run
+/// writes `<out>/perf-<browser>-<base or head>-<n>.json`.  It prints each
+/// run in its order with its kernels, each block with its change, and the
+/// verdict.  A failed run fails the comparison.
+fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
+    if let Some(refusal) = perf::compare_refusal(o.runs, o.gate, o.update_baselines) {
+        bail!("perf: {refusal}");
+    }
+    if !base_dist.join("index.html").is_file() {
+        bail!("perf: {} has no index.html", base_dist.display());
+    }
+    let sites = [PerfSite::start(o, base_dist)?, PerfSite::start(o, &o.dist)?];
+    let browser = perf::browser_name(o.browser);
+    let first = o.runs / 2;
+    let max_blocks = first.max(perf::MAX_BLOCKS);
+    let mut counts = [0usize; 2];
+    let mut versions: Vec<String> = Vec::new();
+    let mut blocks = Vec::new();
+    let mut order = 0;
+    let verdict = loop {
+        let mut figures = [0.0; 4];
+        for (at, side) in perf::BLOCK_ORDER.into_iter().enumerate() {
+            let s = usize::from(side == perf::Side::Head);
+            counts[s] += 1;
+            order += 1;
+            let name = format!("{browser}-{}-{}", side.name(), counts[s]);
+            let (p, result) = perf_run(o, &sites[s], &name)?;
+            p.finish()?;
+            let result = result.with_context(|| format!("perf: run {name} gave no result"))?;
+            println!(
+                "perf: compare run {order} (block {}, {}): chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, kernels {}",
+                blocks.len() + 1,
+                name,
+                result.chunk_lower_quartile,
+                result.chunk_median,
+                result.whole_secs,
+                result.kernels
+            );
+            versions.push(result.version.clone());
+            figures[at] = result.chunk_lower_quartile;
+        }
+        let block = perf::Block::of(figures);
+        blocks.push(block);
+        println!(
+            "perf: compare block {}: r {:+.2} %, runs of a side apart by up to {:.2} %, {}",
+            blocks.len(),
+            100.0 * block.change(),
+            100.0 * block.apart(),
+            if block.spoiled() {
+                "spoiled".to_string()
+            } else {
+                block.class().name().to_string()
+            }
+        );
+        if blocks.len() < first {
+            continue;
+        }
+        if let Some(verdict) = perf::compared(&blocks, max_blocks) {
+            break verdict;
+        }
+    };
+    versions.dedup();
+    if versions.len() > 1 {
+        println!(
+            "perf: compare: the browser version changed during the comparison ({}): run it again",
+            versions.join(", ")
+        );
+    }
+    match verdict {
+        perf::Compared::Decided(class, clear) => println!(
+            "perf: compare verdict: {}{} (T {:.1} %, N {:.1} %, {} blocks)",
+            class.name(),
+            if clear && class != perf::Class::NoChange {
+                ", 3 % or more"
+            } else {
+                ""
+            },
+            100.0 * perf::CHANGE_T,
+            100.0 * perf::SPOIL_N,
+            blocks.len()
+        ),
+        perf::Compared::Undecided => println!(
+            "perf: compare verdict: undecided (T {:.1} %, N {:.1} %, {} blocks): run it again in a later session",
+            100.0 * perf::CHANGE_T,
+            100.0 * perf::SPOIL_N,
+            blocks.len()
+        ),
     }
     Ok(())
 }

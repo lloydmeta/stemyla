@@ -620,6 +620,171 @@ pub(super) fn outcome(
     }
 }
 
+/// The threshold of a block's change `r` for a loss or a gain in the
+/// same-session comparison, as a fraction.  To be set from the A/A
+/// session of M4's Step 5.
+pub(super) const CHANGE_T: f64 = 0.02;
+
+/// The largest difference of the two runs of one side in a block, as a
+/// fraction of the faster run, before the block is spoiled.  To be set
+/// from the A/A session of M4's Step 5.
+pub(super) const SPOIL_N: f64 = 0.02;
+
+/// The mean `|r|` of the verdict's blocks at which a comparison prints
+/// "3 % or more".  A true change of exactly 3 % gets it in about half of
+/// the comparisons, since the noise moves each `r` up or down.
+pub(super) const CLEAR_CHANGE: f64 = 0.03;
+
+/// The most blocks that a comparison runs before it is undecided, unless
+/// `--runs` asks for more at the start.
+pub(super) const MAX_BLOCKS: usize = 4;
+
+/// The side of a run in a same-session comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Side {
+    Base,
+    Head,
+}
+
+impl Side {
+    /// `base` or `head`, as in the names of the files of the runs.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Base => "base",
+            Self::Head => "head",
+        }
+    }
+}
+
+/// The order of the runs of one block: B H H B.
+pub(super) const BLOCK_ORDER: [Side; 4] = [Side::Base, Side::Head, Side::Head, Side::Base];
+
+/// The figures of one block of B H H B, in seconds: the chunk lower
+/// quartiles of B1 and B2, and of H1 and H2.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct Block {
+    pub base: [f64; 2],
+    pub head: [f64; 2],
+}
+
+/// The class of a block, and of a verdict that is decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Class {
+    Loss,
+    Gain,
+    NoChange,
+}
+
+impl Class {
+    /// `loss`, `gain` or `no change`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Loss => "loss",
+            Self::Gain => "gain",
+            Self::NoChange => "no change",
+        }
+    }
+}
+
+impl Block {
+    /// The block of the figures of its runs in the order B H H B.
+    pub fn of(runs: [f64; 4]) -> Self {
+        Self {
+            base: [runs[0], runs[3]],
+            head: [runs[1], runs[2]],
+        }
+    }
+
+    /// The change `r = (H1 + H2) / (B1 + B2) - 1`.
+    pub fn change(&self) -> f64 {
+        (self.head[0] + self.head[1]) / (self.base[0] + self.base[1]) - 1.0
+    }
+
+    /// The larger difference of the two runs of a side, as a fraction of
+    /// the faster run of that side.
+    pub fn apart(&self) -> f64 {
+        let apart = |[a, b]: [f64; 2]| (a - b).abs() / a.min(b);
+        apart(self.base).max(apart(self.head))
+    }
+
+    /// Whether [`Block::apart`] is more than [`SPOIL_N`].
+    pub fn spoiled(&self) -> bool {
+        self.apart() > SPOIL_N + EPSILON
+    }
+
+    /// A loss when `r > T`, a gain when `r < -T`, else no change.
+    pub fn class(&self) -> Class {
+        let r = self.change();
+        if r > CHANGE_T + EPSILON {
+            Class::Loss
+        } else if r < -CHANGE_T - EPSILON {
+            Class::Gain
+        } else {
+            Class::NoChange
+        }
+    }
+}
+
+/// The verdict of a same-session comparison.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Compared {
+    /// The class, and whether the mean `|r|` of its blocks is
+    /// [`CLEAR_CHANGE`] or more.
+    Decided(Class, bool),
+    Undecided,
+}
+
+/// The verdict from `blocks`, or `None` when the comparison runs one more
+/// block.  Only the blocks that are not spoiled count:
+/// * a loss and a gain: undecided;
+/// * 2 blocks or more of one class, and at most one block of another
+///   class: that class;
+/// * else `None` with fewer than `max_blocks` blocks, and undecided with
+///   `max_blocks` or more.
+pub(super) fn compared(blocks: &[Block], max_blocks: usize) -> Option<Compared> {
+    let counted: Vec<&Block> = blocks.iter().filter(|b| !b.spoiled()).collect();
+    let of = |class: Class| counted.iter().filter(|b| b.class() == class).count();
+    if of(Class::Loss) > 0 && of(Class::Gain) > 0 {
+        return Some(Compared::Undecided);
+    }
+    let decided = [Class::Loss, Class::Gain, Class::NoChange]
+        .into_iter()
+        .find(|&class| of(class) >= 2 && counted.len() - of(class) <= 1);
+    match decided {
+        Some(class) => {
+            let changes: Vec<f64> = counted
+                .iter()
+                .filter(|b| b.class() == class)
+                .map(|b| b.change().abs())
+                .collect();
+            let mean = changes.iter().sum::<f64>() / changes.len() as f64;
+            Some(Compared::Decided(class, mean >= CLEAR_CHANGE - EPSILON))
+        }
+        None if blocks.len() < max_blocks => None,
+        None => Some(Compared::Undecided),
+    }
+}
+
+/// The reason to refuse a same-session comparison (`--base-dist`) before
+/// any run, or `None`: with `--gate` or `--update-baselines`, or with a
+/// `--runs` that is odd or under 4.  `--runs` is the count of each side.
+pub(super) fn compare_refusal(runs: usize, gate: bool, update: bool) -> Option<String> {
+    if gate {
+        return Some("--base-dist with --gate: a comparison is never gated".into());
+    }
+    if update {
+        return Some(
+            "--base-dist with --update-baselines: a comparison is never a baseline".into(),
+        );
+    }
+    if runs < 4 || !runs.is_multiple_of(2) {
+        return Some(format!(
+            "--base-dist needs an even --runs of 4 or more, the runs of each side, not --runs {runs}"
+        ));
+    }
+    None
+}
+
 /// The problems of one entry of the baselines file, or none: fewer than
 /// [`MIN_RUNS`] runs, a baseline that is not the median of the runs'
 /// chunk lower quartiles, or a tolerance that is not the rule's for them.
@@ -1302,6 +1467,183 @@ mod tests {
         for path in ["/Users/", "/home/", "~/"] {
             assert!(!text.contains(path), "{path}");
         }
+    }
+
+    /// The size of the synthetic noise of the comparison tests: an eighth
+    /// of the smaller of `CHANGE_T` and `SPOIL_N`.
+    fn noise_size() -> f64 {
+        CHANGE_T.min(SPOIL_N) / 8.0
+    }
+
+    /// `n` blocks of a comparison of a base of 5.0 s, in the order B H H
+    /// B.  Run `i` (from 0) takes 5.0 s times:
+    /// * the synthetic noise of run `i`: 1 plus [`noise_size`] times one of
+    ///   0, 0.5, -0.5, 1, -1, 0.25, a pattern of 6;
+    /// * `1 + drift i`;
+    /// * `1 + change` for a head run;
+    /// * `1 + slow` for each `(i, slow)` in `slow`.
+    fn blocks_of(n: usize, change: f64, drift: f64, slow: &[(usize, f64)]) -> Vec<Block> {
+        const PATTERN: [f64; 6] = [0.0, 0.5, -0.5, 1.0, -1.0, 0.25];
+        let order: Vec<Side> = (0..n).flat_map(|_| BLOCK_ORDER).collect();
+        let runs: Vec<f64> = order
+            .iter()
+            .enumerate()
+            .map(|(i, side)| {
+                let noise = 1.0 + noise_size() * PATTERN[i % PATTERN.len()];
+                let head = if *side == Side::Head { change } else { 0.0 };
+                let extra: f64 = slow.iter().filter(|(at, _)| *at == i).map(|(_, x)| x).sum();
+                5.0 * noise * (1.0 + drift * i as f64) * (1.0 + head) * (1.0 + extra)
+            })
+            .collect();
+        runs.chunks_exact(4)
+            .map(|r| Block::of([r[0], r[1], r[2], r[3]]))
+            .collect()
+    }
+
+    /// Asserts:
+    /// * a block runs in the order B H H B;
+    /// * `Block::of` takes B1 and B2 from runs 1 and 4, and H1 and H2 from
+    ///   runs 2 and 3;
+    /// * the change of a block of 5.0, 5.2, 5.3 and 5.0 s is 0.05;
+    /// * a side whose runs are 5.0 and 5.1 s is 0.02 apart.
+    #[test]
+    fn a_block_runs_b_h_h_b_and_gives_its_change() {
+        use Side::{Base, Head};
+        assert_eq!(BLOCK_ORDER, [Base, Head, Head, Base]);
+        let b = Block::of([5.0, 5.2, 5.3, 5.0]);
+        assert_eq!(b.base, [5.0, 5.0]);
+        assert_eq!(b.head, [5.2, 5.3]);
+        assert!((b.change() - 0.05).abs() < 1e-12, "{}", b.change());
+        let apart = Block::of([5.0, 5.0, 5.0, 5.1]).apart();
+        assert!((apart - 0.02).abs() < 1e-12, "{apart}");
+    }
+
+    /// Asserts, with the synthetic noise of `blocks_of`, from 2 blocks:
+    /// * a uniform loss of 3.5 % of the head gives a loss, "3 % or more";
+    /// * a uniform loss of 2.5 % gives a loss with no "3 % or more", when
+    ///   `CHANGE_T` is under 2.5 %;
+    /// * a uniform loss of 3 % with a drift of 1 % for each run gives a
+    ///   loss.  The drift is less when `SPOIL_N` is under 4 %: then it is a
+    ///   quarter of `SPOIL_N`, so that B1 and B2 (3 runs apart) do not
+    ///   spoil the block;
+    /// * a uniform gain of 3.5 % gives a gain, "3 % or more";
+    /// * a uniform change of 1.5 x `CHANGE_T` gives that class, and one of
+    ///   0.5 x `CHANGE_T` gives no change.
+    #[test]
+    fn a_uniform_change_gives_its_class() {
+        let two = |change, drift| compared(&blocks_of(2, change, drift, &[]), MAX_BLOCKS);
+        assert_eq!(two(0.035, 0.0), Some(Compared::Decided(Class::Loss, true)));
+        if CHANGE_T < 0.025 - noise_size() {
+            assert_eq!(two(0.025, 0.0), Some(Compared::Decided(Class::Loss, false)));
+        }
+        let drift = 0.01_f64.min(SPOIL_N / 4.0);
+        assert!(
+            matches!(two(0.03, drift), Some(Compared::Decided(Class::Loss, _))),
+            "{:?}",
+            two(0.03, drift)
+        );
+        assert_eq!(two(-0.035, 0.0), Some(Compared::Decided(Class::Gain, true)));
+        assert!(matches!(
+            two(1.5 * CHANGE_T, 0.0),
+            Some(Compared::Decided(Class::Loss, _))
+        ));
+        assert!(matches!(
+            two(-1.5 * CHANGE_T, 0.0),
+            Some(Compared::Decided(Class::Gain, _))
+        ));
+        assert_eq!(
+            two(0.5 * CHANGE_T, 0.0),
+            Some(Compared::Decided(Class::NoChange, false))
+        );
+        assert_eq!(
+            two(-0.5 * CHANGE_T, 0.0),
+            Some(Compared::Decided(Class::NoChange, false))
+        );
+    }
+
+    /// Asserts, with the synthetic noise of `blocks_of` and no change of
+    /// the head:
+    /// * one slow head run of +10 % (H1 of block 1) spoils its block: 2
+    ///   blocks give `None`, and a third block gives no change;
+    /// * a slow H1 in block 1 and a slow H2 in block 2, each +6 %, spoil
+    ///   both blocks: 2 and 3 blocks give `None`, and 4 blocks give no
+    ///   change, not a loss.
+    #[test]
+    fn a_slow_run_spoils_only_its_block() {
+        assert!(
+            SPOIL_N < 0.06 - 2.0 * noise_size(),
+            "the cases need N under 6 %"
+        );
+        let one = blocks_of(3, 0.0, 0.0, &[(1, 0.10)]);
+        assert!(one[0].spoiled() && !one[1].spoiled(), "{one:?}");
+        assert_eq!(compared(&one[..2], MAX_BLOCKS), None);
+        assert_eq!(
+            compared(&one, MAX_BLOCKS),
+            Some(Compared::Decided(Class::NoChange, false))
+        );
+        let two = blocks_of(4, 0.0, 0.0, &[(1, 0.06), (6, 0.06)]);
+        assert!(two[0].spoiled() && two[1].spoiled(), "{two:?}");
+        assert_eq!(compared(&two[..2], MAX_BLOCKS), None);
+        assert_eq!(compared(&two[..3], MAX_BLOCKS), None);
+        assert_eq!(
+            compared(&two, MAX_BLOCKS),
+            Some(Compared::Decided(Class::NoChange, false))
+        );
+    }
+
+    /// Asserts, with blocks of no spread of their own:
+    /// * a block that is a loss and one that is no change give `None`; a
+    ///   third block of no change gives no change;
+    /// * a loss, a no change and a gain give undecided;
+    /// * a loss and a gain give undecided;
+    /// * 3 spoiled blocks and one of no change, after 4 blocks, give
+    ///   undecided, and after 3 blocks give `None`;
+    /// * 2 blocks of a loss and 2 of no change give undecided after 4
+    ///   blocks;
+    /// * with `max_blocks` 6, 4 such blocks give `None`.
+    #[test]
+    fn mixed_blocks_need_more_or_are_undecided() {
+        let at = |r: f64| Block::of([5.0, 5.0 * (1.0 + r), 5.0 * (1.0 + r), 5.0]);
+        let spoiled = Block::of([5.0, 5.0, 5.0, 6.0]);
+        let (loss, gain, none) = (at(2.0 * CHANGE_T), at(-2.0 * CHANGE_T), at(0.0));
+        assert_eq!(compared(&[loss, none], MAX_BLOCKS), None);
+        assert_eq!(
+            compared(&[loss, none, none], MAX_BLOCKS),
+            Some(Compared::Decided(Class::NoChange, false))
+        );
+        assert_eq!(
+            compared(&[loss, none, gain], MAX_BLOCKS),
+            Some(Compared::Undecided)
+        );
+        assert_eq!(
+            compared(&[loss, gain], MAX_BLOCKS),
+            Some(Compared::Undecided)
+        );
+        assert_eq!(compared(&[spoiled, spoiled, spoiled], MAX_BLOCKS), None);
+        assert_eq!(
+            compared(&[spoiled, spoiled, spoiled, none], MAX_BLOCKS),
+            Some(Compared::Undecided)
+        );
+        let even = [loss, none, loss, none];
+        assert_eq!(compared(&even, MAX_BLOCKS), Some(Compared::Undecided));
+        assert_eq!(compared(&even, 6), None);
+    }
+
+    /// Asserts that `compare_refusal` refuses `--gate`,
+    /// `--update-baselines`, an odd `--runs` and a `--runs` under 4, each
+    /// with a reason that names it, and passes `--runs` 4 and 8.
+    #[test]
+    fn a_comparison_refuses_a_gate_an_update_and_odd_runs() {
+        let names = |r: Option<String>, want: &str| {
+            let r = r.unwrap_or_default();
+            assert!(r.contains(want), "{want:?} in {r:?}");
+        };
+        names(compare_refusal(4, true, false), "--gate");
+        names(compare_refusal(4, false, true), "--update-baselines");
+        names(compare_refusal(5, false, false), "--runs 5");
+        names(compare_refusal(2, false, false), "--runs 2");
+        assert_eq!(compare_refusal(4, false, false), None);
+        assert_eq!(compare_refusal(8, false, false), None);
     }
 
     /// Asserts, with an old baseline of 5.0 s and a tolerance of 10 % (a

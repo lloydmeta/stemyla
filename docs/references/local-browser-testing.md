@@ -24,6 +24,17 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 * A Chrome update can stop the Chrome line until `CHROMEDRIVER` names a driver of the new version.  An old driver may still drive the new Chrome, with a warning.
 * The gate compares across browser versions, and prints a line when the version is not the baseline's.  After a browser update, measure again with `e2e perf --runs 5 --update-baselines`, and record both figures.  A raise of the bound needs `--raise "<reason>"` with any browser version.  After a browser update, the reason names it, for example `--raise "Safari 27.2 to 27.3"`.
 
+## The same-session comparison
+
+`e2e perf --base-dist <dir>` compares the page of a base commit with the head page, in one session (M4 of `plans/active/gpu-speed.md`).  M4, M5 and M6 use it to show no loss and a gain of 3 % or more.
+
+* Build the base page in a worktree, with its own target folder: `git worktree add --detach <wt> <base commit>`, then `(cd <wt>/app && CARGO_TARGET_DIR=<wt>/target trunk build --release)`.  Build the head page in `app/dist`.
+* Run `STEMYLA_PERF_WEIGHTS=<model> cargo run -p xtask -- e2e perf --browser <b> --weights <model> --base-dist <wt>/app/dist --runs 4`, in Chrome, then in Safari.  Each browser takes about 15 to 30 minutes.
+* The runs go in blocks of base, head, head, base.  The figure of a run is its chunk lower quartile.  The output gives each run in its order with its kernels, each block with its change `r`, and the verdict.
+* The verdict is a loss, a gain, no change, or undecided.  "3 % or more" follows a loss or a gain when the mean `|r|` of its blocks is 0.03 or more.  Undecided is not "no loss" and not a gain: run it again in a later session.
+* If the browser version changes during a comparison, the output says so.  Run the comparison again in full.
+* Remove the worktree after the comparison with `git worktree remove`.
+
 ## Known local failures
 
 Check `main` before treating any of these as a regression:

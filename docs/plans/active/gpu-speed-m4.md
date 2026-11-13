@@ -290,6 +290,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Step 4 (2026-11-13): the `wg` controls, on the scratch branch `scratch/m4-controls` (removed), patch in `m4/controls.patch`.  One set, `runs/s4-{safari,chrome}-{1,2}.log`.  The quirk entry gives the figures.
 * [ ] Step 5: the chunk line in 2 decimals, the same-session comparison, and its A/A sessions.
   * [x] 5.1 (2026-11-13): the worker logs each chunk time with 2 decimals.  The test `chunk_times_have_two_decimals` failed first on its assert (`"chunk {done}/{total}: {:.2} s; {}", in worker/src/web.rs`), then passed with `cargo test -p xtask --lib` (779 tests).
+  * [x] 5.2 and 5.3 (2026-11-13): the pure functions of the comparison in `xtask/src/e2e/perf.rs` (`BLOCK_ORDER`, `Block`, `compared`, `compare_refusal`), and `e2e perf --base-dist` in `xtask/src/e2e.rs`.  The 5 new tests failed first on their asserts, with stubs: `a_block_runs_b_h_h_b_and_gives_its_change` (`left: [Base, Head, Base, Head]`), `a_uniform_change_gives_its_class` (`left: None`), `a_slow_run_spoils_only_its_block` (no block spoiled), `mixed_blocks_need_more_or_are_undecided` (`left: None`) and `a_comparison_refuses_a_gate_an_update_and_odd_runs` (`"--gate" in ""`).  Then `cargo test -p xtask --lib` passed (784 tests).  `CHANGE_T` and `SPOIL_N` are 2 % until the A/A session sets them.
 * [ ] Step 6: the candidates.
 * [ ] Step 7: the gain rule, and the candidates that land.
 * [ ] Step 8: the self-tests.
@@ -327,6 +328,9 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-13, agent (team leader), plan review round 2: a candidate is committed when it has an in-page gain (Step 7), and reverted when Step 9 finds a loss, twice undecided, or a browser that chose it with no gain.  Why: Step 9's base is the commit before the candidate.
 
 * 2026-11-13, agent (implementer), Step 5.1: the chunk line keeps PROTO-1 with no change of `stem-protocol`.  Why: the line is the text of a `Reply::Log` message, whose encoder and decoder do not change.  The one writer of the text is `worker/src/web.rs`.  The one reader is `chunk_done` and `chunk_times` in `xtask/src/e2e.rs` and `xtask/src/e2e/perf.rs`.  The test `chunk_times_have_two_decimals` reads the writer's format in `worker/src/web.rs`, and parses a line of 2 decimals in the same commit.  `xtask` does not take `stem-protocol`, so a shared format function there would add a dependency for one log line.
+* 2026-11-13, agent (implementer), Step 5.2: the verdict takes the class of 2 blocks or more that are not spoiled, with at most one block of another class, and never with a loss and a gain together.  Why: the plan's case "a loss, then two blocks of no change, gives no change" needs one block of another class to be allowed.  A loss and a gain together say that the noise is larger than `T`, so they give undecided.
+* 2026-11-13, agent (implementer), Step 5.2: the test of a uniform loss of 3 % with a drift uses a drift of 1 % for each run only when `SPOIL_N` is 4 % or more; else a quarter of `SPOIL_N`.  Why: B1 and B2 of a block are 3 runs apart, so a drift of 1 % for each run puts them 3 % apart, and a smaller `N` spoils each block.  The drift still cancels in `r`.
+* 2026-11-13, agent (implementer), Step 5.2: a spoiled block is one whose two runs of a side differ by more than `N` of the faster run.
 
 ## Outcomes and retrospective
 
