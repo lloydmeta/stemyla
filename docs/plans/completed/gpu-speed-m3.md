@@ -202,7 +202,14 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * [x] Step 6 (2026-11-13): attention variants.  `attention-u` is 3.6 times slower than fused in Safari and 1.33 times in Chrome.  Only one variant ran.  The table is in Surprises.
 * [x] Step 7 (2026-11-13): the result.  `m3/findings.md` held each table, each log, the explanation, each candidate and the design.  It was in the session scratchpad and is not kept.  This plan's Surprises hold the figures.  `git apply --check` of `m3/parent-m3.diff` passes on `7f5dba6`, and `docs-check` passes with it applied.  Also the `browser-quirks.md` entry (`7f5dba6`), `m3/webkit-bug.md`, and `m3/variants/` (5 patches from `scratch/m3-variants`).  The worktree and the scratch branch are removed.  No variant is kept as code.
 * [x] Step 8 (2026-11-13): the checks before the review round.  `check --tier push` passed with both perf gates run: `check: 15 passed in 445.6 s`.  Chrome took 4.60 s (bound 5.17 s), and Safari 7.10 s (bound 8.14 s).
-* [ ] Review rounds of the CI commit.
+* [x] Review round 1 (2026-11-13, `/review-rounds 7ec4d06`, on the CI commit 1be7a18 and the M3 docs): 8 should-fix and 8 nits, all fixed in `d616783`.  `web-test` exits with 75 only after the runner's hang, and CI runs a step again only on 75.  The CI job-limit check reads the retry steps.  The WebKit bug text moved to `references/webkit-bug-workgroup-zero-init.md`.
+* [x] Review round 2 (2026-11-13): 6 should-fix and 7 nits, all fixed in `f4c8a4f`.  The harness prints a failed test as "... FAIL", so the hang check now finds it.  TD-99 records a stem-worker test that failed once on CI, with no cause found (the orchestrator's decision).
+* [x] Review round 3 (2026-11-13): 3 should-fix and 8 nits, all fixed in `3454cb3`.  The end of `web-test`'s run is a pure function with a test.
+* [x] The maintainer's requests before round 4 (2026-11-13): each browser `e2e` scenario has a time limit (`ec3932f`).  The review agents' guard refuses a wide search, and the skills ask for absolute paths and a check that no agent still runs (`3898433`).
+* [x] Review round 4 (2026-11-13, late rule): 20 should-fix fixed in `45e8577`, 4 pre-existing mutants sent to TD-39, and 10 nits reported, not fixed.  A fake WebDriver drives a real `Page` in the tests.
+* [x] Review round 5 (2026-11-13): 4 should-fix fixed in `4d54c81`, and 8 nits reported, not fixed.
+* [x] Review round 6 (2026-11-13): 2 should-fix fixed in `a076656`; 1 should-fix and 1 nit reported, not fixed.
+* [x] Review round 7 (2026-11-13): no fix.  1 pre-existing should-fix (TD-34 lists it) and 3 nits reported, not fixed.  It is the last round by decision 0024.  The log is `docs/reviews/gpu-speed-2026-11-12-m3.md`.
 
 ## Surprises and discoveries
 
@@ -331,6 +338,29 @@ Each experiment writes only to the scratch worktree and `m3/`.  A session that s
 * 2026-11-13, agent (orchestrator): the stem-worker failure of run 43152005940 is a pre-existing finding; with no cause found in one hour, it gets TD-99.
 * 2026-11-13, maintainer: three changes before review round 4: the Bash guard refuses a search of the whole disk or home folder; each browser `e2e` scenario gets a time limit; the skills give absolute paths and check that no subagent still runs.  Why: a review agent ran `find /` for 3.6 hours and walked the Photos library, and a Safari `e2e perf` run hung for 3 hours.
 
+* 2026-11-13, agent (team leader), close-out: the second mark in `load_and_separate` (`xtask/src/e2e.rs`) is named `separated_from`.  Why: a `KNOWN_MISSED` entry needs its code line once in its function, and `let from = p.mark();` was there twice.  The behaviour does not change.
+
 ## Outcomes and retrospective
 
-Not yet.
+Done on 2026-11-13.
+
+What M3 found:
+
+* Safari's loss on the same WGSL is not the GPU's state: the FMA and copy controls are near 1 in both browsers.
+* WebKit sets each workgroup's memory to zero with one thread, byte by byte.  That is a fixed cost for each workgroup.  It explains 26 % to 64 % of `v64`'s loss at K 256, by the estimate.
+* The rest is a K loop about 1.35 times slower in Safari.  Its cause was not found.  A dump of Safari's own MSL could settle it.
+* Barriers, `unpack2x16float`, fast math, loop guards and the thread maximum are ruled out.  Clamps cost 2 % to 5 %.
+* M4 and M5 start from these results.  No variant is kept as code.
+
+What M3 did not do:
+
+* It did not find the cause of the slower K loop.
+* It did not land "docs only".  The review of the CI commit 1be7a18 found that its retry hid each failure, and its fixes added code to `xtask`.  The maintainer's requests before round 4 added the `e2e` time limits and the guard.
+
+What to do differently:
+
+* Never put a placeholder such as `<scratchpad>` in a plan or a brief.  A reviewer ran `find /` from one for 3.6 hours.
+* Before a report, check each subagent's background work, not only its report.
+* Build in a worktree with its own `--target-dir`.  A shared target folder left test binaries that pointed at a removed worktree.
+* Give each review agent a worktree name of its own.  Rounds 2, 6 and 7 each had two reviewers in one worktree (TD-34).
+* Review a CI commit with weak tests early, in its own range.  Most of the 7 rounds went to the CI commit and its fixes, not to M3.

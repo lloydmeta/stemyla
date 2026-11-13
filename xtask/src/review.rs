@@ -1166,8 +1166,8 @@ pub struct Known {
     pub offset: usize,
 }
 
-/// The known-missed list: the missed mutants of TD-39 and TD-66 that the
-/// review rounds of PR #39 sent to tech debt.  `cargo mutants --list` still
+/// The known-missed list: the missed mutants of TD-39 and TD-66 that review
+/// rounds sent to tech debt.  `cargo mutants --list` still
 /// shows each.  Each comment names the round's log and finding.
 /// `each_known_missed_entry_is_open_and_in_the_code` checks that each TD is
 /// open, and that each code line is once in a function of the mutation's
@@ -1289,6 +1289,38 @@ pub const KNOWN_MISSED: &[Known] = &[
         file: "xtask/src/e2e/decode.rs",
         mutation: "replace drop_and_open -> Result<()> with Ok(())",
         code: "let drop: Vec<(&str, &str, &str)> = files",
+        offset: 1,
+    },
+    // M3 of gpu-speed, round 4, findings 4-23 to 4-26: only the GPU
+    // scenarios `memory-budget` and `perf` reach `open_song` and
+    // `load_and_separate`, with a live WebDriver session and the model
+    // (TD-39).
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e.rs",
+        mutation: "replace open_song -> Result<usize> with Ok(0)",
+        code: "let from = p.mark();",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e.rs",
+        mutation: "replace open_song -> Result<usize> with Ok(1)",
+        code: "let from = p.mark();",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e.rs",
+        mutation: "replace load_and_separate -> Result<usize> with Ok(0)",
+        code: "let from = p.mark();",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-39",
+        file: "xtask/src/e2e.rs",
+        mutation: "replace load_and_separate -> Result<usize> with Ok(1)",
+        code: "let from = p.mark();",
         offset: 1,
     },
 ];

@@ -2240,16 +2240,21 @@ fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<
             .is_some_and(|l| l.contains("model loaded")),
         "the model loads",
     );
-    let from = p.mark();
+    let separated_from = p.mark();
     p.click(o.separate_x, "Separate 6 stems")?;
-    let shown = p.wait_for(from, MODEL_RUN_SECS, "the stems to show", separation_shown)?;
+    let shown = p.wait_for(
+        separated_from,
+        MODEL_RUN_SECS,
+        "the stems to show",
+        separation_shown,
+    )?;
     p.check(
         shown
             .as_deref()
             .is_some_and(|l| l.contains("with the stems shown")),
         what,
     );
-    Ok(from)
+    Ok(separated_from)
 }
 
 /// `e2e perf`: separates the 1-minute song of `memory-budget` at the

@@ -1,6 +1,6 @@
 # WebKit bug text: workgroup memory set to zero by one thread
 
-This is a bug text for the maintainer to file at [bugs.webkit.org](https://bugs.webkit.org), component WebGPU.  It is not filed yet (2026-11-13).  M3 of `plans/active/gpu-speed.md` measured it (`plans/active/gpu-speed-m3.md`, Steps 1, 4 and 5).  `browser-quirks.md` gives the quirk and what the code here does about it.
+This is a bug text for the maintainer to file at [bugs.webkit.org](https://bugs.webkit.org), component WebGPU.  It is not filed yet (2026-11-13).  M3 of `plans/active/gpu-speed.md` measured it (`plans/completed/gpu-speed-m3.md`, Steps 1, 4 and 5).  `browser-quirks.md` gives the quirk and what the code here does about it.
 
 Title: WebGPU: workgroup memory zero-initialisation runs on one thread, byte by byte, and makes a tiled matrix product 1.29 times slower
 
@@ -59,7 +59,7 @@ The reference is the same kernel without `w`.  It keeps the barrier, and sets `v
 
 ## Results
 
-Wall time for each dispatch, median of 5 rounds.  The figures come from the 2 pages of each browser in the first set of Step 4 (`plans/active/gpu-speed-m3.md`).  Each range is from the start and the end of each page:
+Wall time for each dispatch, median of 5 rounds.  The figures come from the 2 pages of each browser in the first set of Step 4 (`plans/completed/gpu-speed-m3.md`).  Each range is from the start and the end of each page:
 
 | | Safari 27.2 | Chrome 157 |
 | - | - | - |
