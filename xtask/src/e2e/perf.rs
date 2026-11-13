@@ -621,14 +621,25 @@ pub(super) fn outcome(
 }
 
 /// The threshold of a block's change `r` for a loss or a gain in the
-/// same-session comparison, as a fraction.  To be set from the A/A
-/// session of M4's Step 5.
-pub(super) const CHANGE_T: f64 = 0.02;
+/// same-session comparison, as a fraction.
+///
+/// The proof, from the A/A session of M4's Step 5 (2026-11-13, base and
+/// head pages of the same commit, `--runs 6`, 3 blocks in each browser,
+/// Chrome 157 and Safari 27.2 on the M2 Pro): the `r` of the blocks were
+/// +0.11 %, -0.11 % and 0.00 % in Chrome, and +0.14 %, -0.27 % and
+/// -0.20 % in Safari.  The rule: the larger of 1 % and twice the largest
+/// `|r|` (0.54 %), rounded up to 0.5 %.  That gives 1 %, under the limit
+/// of 2 %, so a uniform loss of 3 % is a loss with a margin.
+pub(super) const CHANGE_T: f64 = 0.01;
 
 /// The largest difference of the two runs of one side in a block, as a
-/// fraction of the faster run, before the block is spoiled.  To be set
-/// from the A/A session of M4's Step 5.
-pub(super) const SPOIL_N: f64 = 0.02;
+/// fraction of the faster run, before the block is spoiled.
+///
+/// The proof, from the same A/A session as [`CHANGE_T`]: the two runs of
+/// a side in a block were up to 0.21 % apart in Chrome and 0.54 % in
+/// Safari (7.36 and 7.40 s are 0.54 %).  The rule: the larger of 1 % and
+/// twice the largest difference, 1.09 %, rounded up to 0.1 %.
+pub(super) const SPOIL_N: f64 = 0.011;
 
 /// The mean `|r|` of the verdict's blocks at which a comparison prints
 /// "3 % or more".  A true change of exactly 3 % gets it in about half of

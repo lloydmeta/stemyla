@@ -288,9 +288,11 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Step 2 (2026-11-13): every raise of a bound needs `--raise`.  The changed test `a_raise_over_the_tolerance_needs_a_reason` failed first on its assert (`"157.0.7000.0" in ""`, perf.rs:1306), then passed.  `cargo test -p xtask` and `docs-check` passed.  The orchestrator applied the change of `.claude/rules/gpu.md`; this step's commit adds it.
 * [x] Step 3 (2026-11-13): the WGSL of each current kernel, pinned by `current_kernels_keep_their_wgsl` (12 sources; `NEW_KERNELS` empty).  `fnv1a` and `FNV_OFFSET` serve the test and `kernels_id`, whose value stays `0xd4f493a491195bc8` (printed before and after).  With one changed byte in the first comment of `matmul_vec4.wgsl`, the test failed on its assert: `v64: hash 0xb6bd57ba6e7f0898, pinned 0x2bf06de948042584` and `v64-f16: hash 0xe871347a10b57f98, pinned 0xbb9577526ab450c6`.  Without the byte, `cargo test -p roformer-gpu --lib` passed (51 tests).
 * [x] Step 4 (2026-11-13): the `wg` controls, on the scratch branch `scratch/m4-controls` (removed), patch in `m4/controls.patch`.  One set, `runs/s4-{safari,chrome}-{1,2}.log`.  The quirk entry gives the figures.
-* [ ] Step 5: the chunk line in 2 decimals, the same-session comparison, and its A/A sessions.
+* [x] Step 5: the chunk line in 2 decimals, the same-session comparison, and its A/A sessions.
   * [x] 5.1 (2026-11-13): the worker logs each chunk time with 2 decimals.  The test `chunk_times_have_two_decimals` failed first on its assert (`"chunk {done}/{total}: {:.2} s; {}", in worker/src/web.rs`), then passed with `cargo test -p xtask --lib` (779 tests).
   * [x] 5.2 and 5.3 (2026-11-13): the pure functions of the comparison in `xtask/src/e2e/perf.rs` (`BLOCK_ORDER`, `Block`, `compared`, `compare_refusal`), and `e2e perf --base-dist` in `xtask/src/e2e.rs`.  The 5 new tests failed first on their asserts, with stubs: `a_block_runs_b_h_h_b_and_gives_its_change` (`left: [Base, Head, Base, Head]`), `a_uniform_change_gives_its_class` (`left: None`), `a_slow_run_spoils_only_its_block` (no block spoiled), `mixed_blocks_need_more_or_are_undecided` (`left: None`) and `a_comparison_refuses_a_gate_an_update_and_odd_runs` (`"--gate" in ""`).  Then `cargo test -p xtask --lib` passed (784 tests).  `CHANGE_T` and `SPOIL_N` are 2 % until the A/A session sets them.
+  * [x] 5.4 and 5.5 (2026-11-13): the first A/A session set `T` = 1 % and `N` = 1.1 % (Surprises).  The second A/A comparison gave "no change" in Chrome and in Safari.  The tests of 5.2 pass with the new constants.
+  * [x] 5.6 (2026-11-13): how to run it, in `docs/references/local-browser-testing.md`, the `perf` paragraph of `README.md` and the module doc of `xtask/src/e2e.rs` (with the commit of 5.2).
 * [ ] Step 6: the candidates.
 * [ ] Step 7: the gain rule, and the candidates that land.
 * [ ] Step 8: the self-tests.
@@ -316,6 +318,30 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   | Chrome 2, end | 17.9 (3.0 %) | 14.3 (8.6 %) | 6.3 (0.6 %) | 0.690 |
 
   The cost is not linear in the bytes: a linear cost gives 0.6.  In Safari, 6 KiB costs about a quarter of what 10 KiB costs.  The prediction for `v64k8` on `freq qkv` in Safari: `wg10k - wg6k` is 296 to 299 us of `v64`'s 3.53 to 3.57 ms (f16, 1,216 and 1,202 GFLOP/s), a gain of about 8.3 % to 8.4 %.  In Chrome: 3.6 to 4.0 us of 1.99 ms, about 0.2 %.  The cause of the curve is not known.  One guess, not checked: a core holds fewer workgroups at once with 10 KiB than with 6 KiB, and each waits for its own zero-init.
+* 2026-11-13, Step 5.4: the first A/A session, base and head of `59da862` (the chunk line in 2 decimals), `e2e perf --base-dist --runs 6` (Chrome 157.0.8103.51, then Safari 27.2, the same before and after; logs `m4/runs/aa1-{chrome,safari}.stdout` and the folders `m4/runs/aa1-{chrome,safari}/`).  Each figure is the chunk lower quartile of a run, in seconds.  "Apart": the larger difference of the two runs of a side in the block, over the faster run.
+
+  | Browser, block | B1 | H1 | H2 | B2 | `r` | Apart | Class |
+  | - | - | - | - | - | - | - | - |
+  | Chrome 1 | 4.69 | 4.70 | 4.70 | 4.70 | +0.11 % | 0.21 % | no change |
+  | Chrome 2 | 4.70 | 4.70 | 4.69 | 4.70 | -0.11 % | 0.21 % | no change |
+  | Chrome 3 | 4.69 | 4.70 | 4.69 | 4.70 | 0.00 % | 0.21 % | no change |
+  | Safari 1 | 7.37 | 7.36 | 7.40 | 7.37 | +0.14 % | 0.54 % | no change |
+  | Safari 2 | 7.39 | 7.36 | 7.39 | 7.40 | -0.27 % | 0.41 % | no change |
+  | Safari 3 | 7.41 | 7.38 | 7.38 | 7.38 | -0.20 % | 0.41 % | no change |
+
+  So `N` = the larger of 1 % and 2 x 0.54 % = 1.09 %, rounded up to 1.1 %.  `T` = the larger of 1 % and 2 x 0.27 %, rounded up to 0.5 %: 1 %.  The whole times were 51.8 to 52.0 s in Chrome and 81.2 to 83.7 s in Safari.  Safari's calibration chose `v64,i64` in 2 of 12 runs (H2 of block 1, B1 of block 2), and `v64,v64` in the rest.  Those two runs were 7.39 and 7.40 s, inside the spread of the others.
+
+* 2026-11-13, Step 5.5: the second A/A comparison, as the tool runs it (`--runs 4`), with `T` 1 % and `N` 1.1 %, base and head of `59da862` (Chrome 157.0.8103.51, Safari 27.2; logs `m4/runs/aa2-{chrome,safari}.stdout`).  Verdict: no change in both browsers, from 2 blocks.
+
+  | Browser, block | B1 | H1 | H2 | B2 | `r` | Apart | Class |
+  | - | - | - | - | - | - | - | - |
+  | Chrome 1 | 4.70 | 4.70 | 4.70 | 4.70 | 0.00 % | 0.00 % | no change |
+  | Chrome 2 | 4.70 | 4.70 | 4.70 | 4.70 | 0.00 % | 0.00 % | no change |
+  | Safari 1 | 7.38 | 7.42 | 7.38 | 7.37 | +0.34 % | 0.54 % | no change |
+  | Safari 2 | 7.38 | 7.38 | 7.39 | 7.38 | +0.07 % | 0.14 % | no change |
+
+  Safari's H1 of block 1 chose `v64,i64` again, and was the slowest run (7.42 s).
+
 
 ## Decision log
 
