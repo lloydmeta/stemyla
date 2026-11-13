@@ -363,6 +363,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Step 12 (2026-11-14): at the head, `vfused` is the one choosable policy in each browser (12 of 12 calibrations), and the check passes: a gain of 20 % to 23 % against `fused` and against `freq`.  No two choices are near, so no flip cost is measured.
 * [x] Step 13 (2026-11-14): both browsers chose `vfused`, so both baselines are measured again with `e2e perf --runs 5 --update-baselines` at `9d6d447`.  Each bound is lower, so no `--raise`: Chrome 157 4.70 s to 3.59 s, Safari 27.2 7.38 s to 5.57 s.
 * [x] Step 14 (2026-11-14): `memory-budget` passed 3 times in each browser at `50d3ff6`.  Each growth is 57 MB, so check 3's margin is 6.16 MB, and `WORKER_HEADROOM_MB` stays.  `roformer/` does not change.
+* [x] Step 15 (2026-11-14): `check --tier push` passes at `0af5ef8`, with both perf gates run: Chrome 3.59 s (bound 3.95 s), Safari 5.58 s (bound 6.13 s).  `cargo build -p xtask` passes.  The parent's diff is `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/parent-m5.diff`, and the diff of `.claude/rules/gpu.md` is `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/claude-gpu-rules.diff`; `git apply --check` accepts each on HEAD.
 
 ## Surprises and discoveries
 
