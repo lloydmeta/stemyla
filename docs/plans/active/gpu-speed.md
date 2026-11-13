@@ -11,7 +11,7 @@ The state on 2026-11-12, at `aa10c49` on `main`.  The machine is the maintainer'
 How a chunk runs (`docs/ARCHITECTURE.md`, "From a song to six stems" and "Running it on the GPU"):
 
 * `GpuNetwork::stems` (`worker/src/web.rs`) does the STFT on the CPU (`roformer::separate::analyse`).  Then it runs each GPU step through `Pace::run`, which submits one step and waits for the GPU (`Gpu::done`).  After the last mask step of a stem, it reads the mask back and applies it with the inverse STFT on the CPU (`roformer::separate::apply_masks`).
-* The matmul kernels are the entries of `TILES` (`roformer-gpu/src/lib.rs`): `i64` and `s64` (64 x 64, 4 x 4 outputs for each thread), `i128x64` (8 x 4) and `v64` (64 x 64, vec4 reads).  Fused attention is `attention_tiled.wgsl`.  Each GPU times the candidates once, and keeps its choice in browser storage (`roformer-gpu/src/bench.rs`, `CALIBRATION`).
+* The matmul kernels are the entries of `TILES` (`roformer-gpu/src/lib.rs`): `i64` and `s64` (64 x 64, 4 x 4 outputs for each thread), `i128x64` (8 x 4), `v64` (64 x 64, vec4 reads) and, since M4, `v64k8` (`v64` with BK 8, 6 KiB of workgroup memory).  Fused attention is `attention_tiled.wgsl`.  Each GPU times the candidates once, and keeps its choice in browser storage (`roformer-gpu/src/bench.rs`, `CALIBRATION`).
 * The device is requested with `Limits::defaults()` (GPU-1, `docs/references/webgpu-limits.md`).
 * `e2e memory-budget` (`xtask/src/e2e.rs`) separates a 1-minute and a 4-minute song, made from the `synth` demo song.  It runs at `chunk=16384&overlap=1`.  Its `growth_check` fails when the worker's WebAssembly memory grows by more than `MAX_GROWTH_MB` (4 MB) during a separation.
 
@@ -118,7 +118,7 @@ M6's milestone plan designs the order of the work and the read-back.  It must me
 
 ## Validation and acceptance
 
-* `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.  The gate is a backstop: at 10 % and 0.1 s per chunk, it stops a large loss only.
+* `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.  The gate is a backstop: at 10 % and 0.01 s per chunk, it stops a large loss only.
 * A change lands only with a shown gain.  Goal: no change of M4, M5 or M6 lands on noise, or with a loss in either browser, or with a loss on a GPU that this Mac cannot measure.  M4's milestone plan designs the rule, and M5 and M6 use it.  The rule for a kernel is Step 7 of `plans/active/gpu-speed-m4.md`, also in `docs/references/local-browser-testing.md`.  The cases:
   1. A kernel gain (M4, M5) can be under 3 % of a separation: BK 8's is 1 % to 5 %.  It is shown by the in-page `?bench` ratio of the candidate over the current default, in each browser that chooses it.
   2. The ratio covers the shapes on which calibration chooses (`bench.rs`), not only the shape with the largest predicted gain.
@@ -269,6 +269,8 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
   Step 12: `memory-budget` passed 3 times in Chrome and 3 times in Safari at `29d8567`.  The worker grew by 57 MB in each of the 12 separations, as at M1, so check 3's margin is 6.16 MB in each (budget 63.16 MB).  The tab total was 799 MB in Chrome and 758 to 801 MB in Safari, at most 943 MB.  `roformer/` has no change since M1, so `working_set`'s peak is still 80.16 MB and the smallest lost-cut rise is still 9.44 MB.  `WORKER_HEADROOM_MB` stays -17 MB.
 
+* 2026-11-13, M4 review round 1: Safari's comparison of `v64k8` ran again with `--runs 8` and the rule for kernels that differ (base `a5e6a4c`).  Verdict: a gain, the mean `r` of 4 blocks -2.15 %, with split attention in 1 of 8 head runs (`plans/active/gpu-speed-m4.md`, Surprises).
+
 * 2026-11-13, CI run 43314717211 at eb81ed0: the macOS job failed in `trunk build`, because the `wasm-opt` that Trunk downloaded could not load `libbinaryen.dylib`.  The runs after it passed with no change, so it was the runner's download.  If it comes back, it gets a TD.
 
 ## Decision log
@@ -305,6 +307,8 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-13, agent (team leader of M4): a kernel lands only with a gain on a kind (large or small) with f16 weights, in at least one browser: its calibration total over the reference kernel's, `R`, is under 1 by more than the largest spread, in both pages.  Then each browser's comparison shows no loss, and each browser that chose it has the gain (`plans/active/gpu-speed-m4.md`, Step 7).
 * 2026-11-13, agent (implementer of M4): `v64k8` lands (`CALIBRATION` 4).  Safari chooses it; Chrome keeps `v64`.  `r64` does not land: no gain in either browser.
 * 2026-11-13, agent (implementer of M4): the tolerance of the gate stays 10 %, and `FUSED_MARGIN` stays 1.1.  Why: Safari's flip to split attention costs 3.4 %, 9.1 % with the drift.  A wider margin would change the time-axis choice on GPUs that this Mac cannot measure.  The cause of calibration's low split time in Safari goes to M5.
+* 2026-11-13, agent (orchestrator): v64k8 stays though Safari's calibration chooses split attention in about 6 of 16 calibrations, about 1 % slower than the base; M5 finds why calibration times split too low.  The comparison of review round 1 (`--runs 8`) gives a gain in Safari: the mean `r` of 4 blocks is -2.15 % (TD-101).
+
 ## Outcomes and retrospective
 
 Not yet.
