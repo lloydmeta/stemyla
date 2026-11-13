@@ -334,6 +334,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * `each_side_of_a_comparison_runs_its_own_query`, with the two queries swapped: `left: "mm=v64k8,v64k8&attn=freq"`, `right: "mm=v64k8,v64k8&attn=fused"`.
   * Then `cargo test -p xtask` passes (802 unit tests).
 * [x] Step 3 (2026-11-13): the check of the goal, in `docs/references/local-browser-testing.md`.  It fails first at `ab40862` in Safari: a loss of `freq` of 3 % or more.  Chrome gives a gain of `freq`, so no failure there.
+* [x] Step 4 (2026-11-13): the cause of the bias, from forced and unforced runs at the head page (`e25402d`).  Safari: the linear products and the other dispatches of the time transformer.  Chrome: the waits between steps.  So Step 5 takes form (c).
 
 ## Surprises and discoveries
 
@@ -350,6 +351,32 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Safari: the verdict is a loss, 3 % or more.  `freq` is choosable there (M4), so the check fails, as the goal's case 2 needs.  Whole times: `fused` 77.0 to 79.7 s, `freq` 80.3 to 86.7 s.  Chunk medians: `fused` 6.99 to 7.23 s, `freq` 7.29 to 7.46 s.  Log: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step3-safari-1/output.log`.
   * Chrome: the verdict is a gain of `freq` (2 blocks), so the check passes.  Whole times: `fused` 51.9 to 52.9 s, `freq` 51.3 to 52.4 s.  Chunk medians: `fused` 4.69 to 4.71 s, `freq` 4.62 to 4.63 s.  `freq` is about 0.06 s faster for each chunk, not 0.10 s as M2 gave.  Log: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step3-chrome-1/output.log`.
   * Safari's two `fused` runs of block 2 were 7.21 and 6.98 s.  From then on, both policies ran about 0.22 to 0.23 s faster for each chunk.  The cause is not known; the GPU clock is a guess.
+* 2026-11-13, Step 4: where the separation's cost of `freq` goes.  The page of `e25402d`, with the pins of Step 3.  In each browser, runs 1 to 4 have `profile=1` and runs 5 to 8 have none, each in the order `fused`, `freq`, `freq`, `fused`.  Runs 9 and later are unforced.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step4-<browser>-<n>/`, and the tables in `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step4-safari-table.txt` and `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step4-chrome-table.txt`.
+
+  | Figure, seconds for each chunk | Safari 27.2 | Chrome 157 |
+  | - | - | - |
+  | Forced `fused` and `freq`, chunk lower quartiles (runs 5 to 8) | 6.99, 6.96; 7.28, 7.28 | 4.69, 4.69; 4.62, 4.62 |
+  | `D`, the separation's cost of `freq` | +0.305 | -0.070 |
+  | The noise of `D` | 0.030 | 0.00 (under the 0.01 of the logs) |
+  | `D` over the forced `fused` | 4.37 % | 1.49 % |
+  | Calibration's split, fused (unforced runs with the pins) | 3.074, 3.286 (5 runs) | 1.825, 2.183 (4 runs) |
+  | Calibration's (split - fused) | -0.212 | -0.357 |
+  | The bias: calibration's (split - fused) minus `D` | -0.517 | -0.287 |
+  | Profile, time-axis attention, `freq`; `fused` | 3.062; 3.229 | 1.817; 2.278 |
+  | Part: time-axis attention, `freq` - `fused` | -0.166 | -0.461 |
+  | Part: linear products | +0.287 | +0.066 |
+  | Part: other (norms, rope, gates, transposes) | +0.141 | +0.013 |
+  | Part: frequency-axis attention | -0.002 | -0.003 |
+  | Part: gaps, with the profile (an upper bound) | +0.240 | +0.437 |
+  | Part: gaps, by difference (`D` minus the other parts) | +0.045 | +0.315 |
+  | Calibration's attention against the profile's: (split - fused) minus the attention part | -0.046 | +0.104 |
+
+  * The bias is the sum of the parts that calibration does not time, with a minus sign, and the error of its attention timing.  Safari: -0.046 - 0.287 - 0.141 + 0.002 - 0.045 = -0.517.  Chrome: +0.104 - 0.066 - 0.013 + 0.003 - 0.315 = -0.287.
+  * Safari: the linear products (0.287 s, 56 % of the bias) and the other dispatches (0.141 s, 27 %) of the time transformer are the cause.  They run at M 1,151 with `freq` and at M 4,604 with `fused`, in 744 steps against 192.  Each is over the noise of `D`.  The gaps (by difference) and the error of the attention timing are each about 0.045 s, a little over the noise.  The prediction said the linear products; the other dispatches are a surprise.
+  * Chrome: the gaps between steps are the cause: about 0.315 s by difference, 110 % of the bias, as predicted.  The linear products add 0.066 s.  Calibration's fused attention is 0.095 s lower than the profile's, which makes the bias smaller.
+  * The gaps by difference take each group's part without the profile to be as with it.  A profile adds time to each step, so the profile's gaps are an upper bound.
+  * Calibration's attention-only times match the profile's well: split 3.074 against 3.062 in Safari, 1.825 against 1.817 in Chrome.  So the attention timing is not the cause; the parts that it leaves out are.
+  * Safari's calibration chose `fused` in each of 8 unforced runs today (ratio 1.061 to 1.081), and `v64k8,v64k8` in 5 of 8.  M4 had split in about 10 of 22.  Chrome chose `v64,v64` and `freq` in 4 of 4 (ratio 1.186 to 1.203).
 
 ## Decision log
 
@@ -360,6 +387,10 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-13, agent (team leader), plan review round 1: "choosable" comes from at least 12 calibrations, not from the 10 % near band.  Why: Chrome's ratio of 1.19 today is in the near band, so `fused` would be choosable there, and the check would fail whatever M5 does.
 * 2026-11-13, agent (team leader), plan review round 1: the decision on `FUSED_MARGIN` comes before Step 5's commit, at a checkpoint for the orchestrator.  Why: a true timing is predicted to make Chrome choose `fused`, 2.1 % slower; the margin's reason is the 42 MB scores buffer of `freq`, so a change of it changes memory and choices on GPUs that this Mac cannot measure.
 * 2026-11-13, agent (team leader), plan review round 2: the decision on `FUSED_MARGIN` uses the rule of Step 6's check ("choosable", from 12 calibrations with the pins), and Step 5 limits the spread of calibration's ratio.  Why: a mean under the margin with a wide spread still lets the slower policy be chosen.  Option B does not land the fix, since a loss in Step 6's comparison is a defect by the parent.
+
+* 2026-11-13, agent (implementer), Step 4: the cause of the bias is the parts of a time-transformer step that calibration does not time.  In Safari, the linear products (0.287 s) and the other dispatches (0.141 s) at M 1,151 in 744 steps against M 4,604 in 192.  In Chrome, the waits between steps (about 0.315 s).  Why: Step 4's table; each part is over the noise of `D`.
+* 2026-11-13, agent (implementer), Step 5: form (c), a whole time-transformer step of each policy through the function that `Job::run` uses.  Why, by Step 4's table and item 6's limit (half of `|D|`: 0.153 s in Safari, 0.035 s in Chrome): form (a) covers the gaps only, and leaves about -0.47 s in Safari.  Form (b) adds the linear products, and leaves about -0.517 + 0.045 + 0.287 = -0.185 s in Safari, over 0.153 s.  The other dispatches (0.141 s) are the rest, and only form (c) times them.
+* 2026-11-13, agent (implementer), Step 5: calibration times the time axis at the budget of the run, as the plan says.  A run with `?max_elems=` thus keeps a choice that it timed at its own budget.  Why: `?max_elems=` is a tool for tests, and the stored key does not name a budget today.
 
 ## Outcomes and retrospective
 
