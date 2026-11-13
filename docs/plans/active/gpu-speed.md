@@ -95,7 +95,7 @@ The drift between sessions is up to about 5.7 % ((7.40 - 7.00) / 7.00; Safari 7.
 
 ### M5: a flash-style time-axis attention
 
-A new fused attention kernel for the time axis (1,151 tokens, 8 heads of 64), from M3's result.  It keeps the softmax state on chip, so no score buffer goes to memory.  It loads each query block once only if that fits the default limits (GPU-1): a 64 x 64 f32 query block alone is 16 KiB, and the current kernel stages Q again for each key tile.  M3 measured no cost for those reloads, and puts fused attention's Safari loss in the K loop.  Each byte or workgroup that it adds raises Safari's zero-init cost (`references/browser-quirks.md`).  So M5 measures the cost of the reloads before it removes them.  M3 found no change that makes fused attention faster in Safari.  So M5's milestone plan first names each change from `attention_tiled.wgsl`, with the figure that predicts its gain in each browser.  It times each in `?bench` before it lands.  If none is faster in either browser, M5 lands no kernel, and records why in Surprises.  It is a third `AttentionPolicy` candidate beside split and the current fused kernel.  M5's milestone plan defines "near" for three attention candidates, for the flip costs of M4.  It keeps the fused kernel's structure: 64 queries of one head for each workgroup, 4 x 4 for each thread, and online softmax.  It does not unroll its inner loops.  M3 measured an unrolled form 3.6 times slower in Safari and 1.33 times in Chrome.  It is checked against the CPU, as the current fused kernel is.  Its dispatches take their profile label from `attention_label`, so `e2e perf`'s profile groups count it as time-axis attention, not "other".  Acceptance: as M4, with `--query attn=<policy>`.
+A new fused attention kernel for the time axis (1,151 tokens, 8 heads of 64), from M3's result.  It keeps the softmax state on chip, so no score buffer goes to memory.  It loads each query block once only if that fits the default limits (GPU-1): a 64 x 64 f32 query block alone is 16 KiB, and the current kernel stages Q again for each key tile.  M3 measured no cost for those reloads, and puts fused attention's Safari loss in the K loop.  Each byte or workgroup that it adds raises Safari's zero-init cost (`references/browser-quirks.md`).  So M5 measures the cost of the reloads before it removes them.  M3 found no change that makes fused attention faster in Safari.  So M5's milestone plan first names each change from `attention_tiled.wgsl`, with the figure that predicts its gain in each browser.  It times each in `?bench` before it lands.  If none is faster in either browser, M5 lands no kernel, and records why in Surprises.  It is a third `AttentionPolicy` candidate beside split and the current fused kernel.  M5's milestone plan defines "near" for three attention candidates, for the flip costs of M4.  It keeps the fused kernel's structure: 64 queries of one head for each workgroup, 4 x 4 for each thread, and online softmax.  It does not unroll its inner loops.  M3 measured an unrolled form 3.6 times slower in Safari and 1.33 times in Chrome.  It is checked against the CPU, as the current fused kernel is.  Its dispatches take their profile label from `attention_label`, so `e2e perf`'s profile groups count it as time-axis attention, not "other".  Acceptance: as M4, with `--query attn=<policy>`.  The gain is shown by the rule of Step 7 of `plans/active/gpu-speed-m4.md`, with fused attention as the reference, and no loss by `e2e perf --base-dist` (`docs/references/local-browser-testing.md`).  M4 found that Safari's calibration times split attention about 0.5 s for each chunk too low, at the base and with `v64k8` (Surprises, M4).  M5 finds the cause first, since a third candidate is chosen by the same timing.
 
 ### M6: overlap on the worker
 
@@ -114,19 +114,19 @@ M6's milestone plan designs the order of the work and the read-back.  It must me
 6. `roformer::separate::working_set` and the phases of the worker's wasm test describe the overlap, with each part in the phases where it is live.  Added parts alone only raise check 3's budget and test nothing.
 7. Buffers keep fixed sizes from chunk to chunk.  A new size left holes in the heap and grew the worker by 19 MB in M1 (`plans/completed/gpu-speed-m1.md`, Step 8).
 8. `memory-budget` passes its four checks, with the tab total at most `TAB_BUDGET_MB` (MEM-4).  If it does not, M1's Step 6 names the next cuts, in order of cost.
-9. Each of the two changes meets "A change lands only with a shown gain" ("Validation and acceptance").  The perf gate passes in both browsers.
+9. Each of the two changes meets "A change lands only with a shown gain" ("Validation and acceptance").  The gain of 3 % or more and the absence of a loss come from `e2e perf --base-dist` (`docs/references/local-browser-testing.md`).  The perf gate passes in both browsers.
 
 ## Validation and acceptance
 
 * `e2e perf` passes its gate in Safari and Chrome on this Mac, with the new baselines in the committed file.  The gate is a backstop: at 10 % and 0.1 s per chunk, it stops a large loss only.
-* A change lands only with a shown gain.  Goal: no change of M4, M5 or M6 lands on noise, or with a loss in either browser, or with a loss on a GPU that this Mac cannot measure.  M4's milestone plan designs the rule, and M5 and M6 use it.  The cases:
+* A change lands only with a shown gain.  Goal: no change of M4, M5 or M6 lands on noise, or with a loss in either browser, or with a loss on a GPU that this Mac cannot measure.  M4's milestone plan designs the rule, and M5 and M6 use it.  The rule for a kernel is Step 7 of `plans/active/gpu-speed-m4.md`, also in `docs/references/local-browser-testing.md`.  The cases:
   1. A kernel gain (M4, M5) can be under 3 % of a separation: BK 8's is 1 % to 5 %.  It is shown by the in-page `?bench` ratio of the candidate over the current default, in each browser that chooses it.
   2. The ratio covers the shapes on which calibration chooses (`bench.rs`), not only the shape with the largest predicted gain.
   3. The ratio is an effect by the rule in Terms of `plans/completed/gpu-speed-m3.md` for a ratio in one page: its distance from 1 is larger than the larger spread of the two figures, in both pages of each browser, as M3's Step 4 table used it.  The 4 % margin and the FMA control are for comparisons across pages only.
   4. A worker change (M6) has no `?bench` ratio.  It lands only if the same-session comparison shows a gain of 3 % or more in Chrome or Safari.  Else its figures go in Surprises, and it does not land.
   5. No change lands with a loss in either browser by the same-session comparison.
   6. Calibration protects the Radeon and the iPhone from a new candidate, not from a changed old kernel.  So the WGSL of each current kernel stays the same byte for byte, and a test that fails first on a change checks it.
-* The same-session comparison shows "no loss" for M4, M5 and M6 in each browser, and each gain of 3 % or more.  Goal: a verdict that a real change of 3 % or more in either browser cannot escape, and that noise does not make.  M4's milestone plan designs the rule, and M5 and M6 use it.  The cases:
+* The same-session comparison shows "no loss" for M4, M5 and M6 in each browser, and each gain of 3 % or more.  Goal: a verdict that a real change of 3 % or more in either browser cannot escape, and that noise does not make.  M4's milestone plan designs the rule, and M5 and M6 use it.  The rule is `e2e perf --base-dist` (Step 5 of `plans/active/gpu-speed-m4.md`, and `docs/references/local-browser-testing.md`).  The cases:
   1. The base page is built in a worktree and given to `e2e perf` with `--dist`, and the head page is HEAD's.  Base and head runs take turns in one session, as M2 did for M1 (`plans/completed/gpu-speed-m2.md`, Surprises), and each run is recorded in its order.
   2. Inside a run, the noise only adds time: groups of slow chunks.  Between sessions, and maybe between runs, the GPU's state can also move by about 5 % (Safari 7.00 to 7.40 s with the same code).  So no verdict rests on one run.
   3. A uniform 3 % loss in either browser is found.  The figures can be the chunk lower quartile, the chunk median and the whole time ("6 stems in", 0.1 s on about 50 to 80 s).
@@ -230,6 +230,45 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
   Two variants are slower than `v64` in both browsers.  An unrolled inner loop: 1.49 to 1.93.  128 x 128 with 8 x 8 for each thread: 1.30 to 1.86.  At K 256, four tiles for each workgroup (`v64-g4`) is slower in Chrome (1.20), and not faster in Safari (1.014 to 1.033).  At K 1,024 it is slower in both: Safari 1.34 to 1.35, Chrome 1.25 to 1.27.  `s64`'s 10 times in Safari is its loop-indexed private array: with constant indices it runs at `i64`'s rate.  Time-axis attention in Safari: fused 3.47 s for each chunk, split 3.53 s; in Chrome 2.29 s and 1.85 s.
 
+* 2026-11-13, M4 (`plans/active/gpu-speed-m4.md`, Surprises, holds each table with its logs).  Safari 27.2 and Chrome 157.0.8103.51 on the M2 Pro, the same in each set and comparison.
+
+  Step 4, the `wg` controls (almost no work, at `v64`'s grid of 2,064 workgroups), us for each dispatch, the range over 2 pages of each browser, at the start and the end:
+
+  | Control | Safari | Chrome |
+  | - | - | - |
+  | `wg10k` (10 KiB) | 408.2 to 414.1 | 17.8 to 18.2 |
+  | `wg6k` (6 KiB) | 113.0 to 114.5 | 14.0 to 14.3 |
+  | `wg0` (none) | 10.7 to 11.3 | 6.3 |
+  | `(wg6k - wg0) / (wg10k - wg0)` | 0.257 in each | 0.664 to 0.690 |
+
+  So the zero-init cost is not linear in the bytes: in Safari, 6 KiB costs about a quarter of what 10 KiB costs (`references/browser-quirks.md`).
+
+  Step 5, the same-session comparison (`e2e perf --base-dist`): `T` = 1 % and `N` = 1.1 %, from an A/A session (table below), checked by a second A/A comparison.
+
+  Step 7, the in-page ratios (`?bench`, 2 pages of each browser), the candidate's calibration total over `v64`'s, with f16 weights:
+
+  | Candidate | Safari large | Safari small | Chrome large | Chrome small |
+  | - | - | - | - | - |
+  | `v64k8` (BK 8, 6 KiB) | 0.944 to 0.946, gain | 0.993, none | 1.311 to 1.318, loss | 1.006, none |
+  | `r64` (no workgroup memory) | 1.202 to 1.208, loss | 0.981 to 0.982, none | 2.537 to 2.545, loss | 1.058, none |
+
+  `v64k8` is 0.91 to 0.92 times `v64` on the K 256 products in Safari, and 1.01 to 1.02 on `time ff down` (K 1,024).  `r64` is 0.57 times `v64` on `time gates` in Safari, which the small total, mostly `time p·v`, does not show.
+
+  Steps 5, 9, 10 and 12 (`r`: the change of a block; base and head of one commit for an A/A):
+
+  | Step | Chrome | Safari |
+  | - | - | - |
+  | 5, first A/A, `r` of 3 blocks; runs of a side apart | +0.11, -0.11, 0.00 %; up to 0.21 % | +0.14, -0.27, -0.20 %; up to 0.54 % |
+  | 5, second A/A (`--runs 4`) | 0.00, 0.00 %: no change | +0.34, +0.07 %: no change |
+  | 9, `v64k8` (base `a5e6a4c`, head `a238db5`) | 0.00, -0.21 %: no change; head `v64,v64` | spoiled, -2.44, -2.37 %: gain; head `v64k8` |
+  | 10, cost of a forced flip | small products: +0.5 % (`v64k8`), +0.6 % (`i64`), +1.8 % (`s64`) | split attention against fused, with `v64k8`: +3.4 % (medians 7.47 and 7.225 s) |
+  | 11, baseline | no change (4.70 s) | 7.40 s to 7.38 s, from 5 runs |
+  | 12, `memory-budget`, 3 runs | worker growth 57 MB in each; check 3's margin 6.16 MB | the same |
+
+  In Safari, with `v64k8`, calibration times split attention at 3.11 to 3.16 s and fused at 3.42 to 3.51 s for each chunk: at `FUSED_MARGIN`.  It chose split in 3 of 11 runs of Steps 9 and 10, and in 3 of the 5 runs of Step 11.  Those runs took 7.38 to 7.52 s, against 7.21 to 7.36 s with fused.  At the base, calibration gave fused / split 0.97, and a forced split cost 9.5 % (M2).  So in both, calibration's split time is about 0.5 s for each chunk too low.
+
+  Step 12: `memory-budget` passed 3 times in Chrome and 3 times in Safari at `29d8567`.  The worker grew by 57 MB in each of the 12 separations, as at M1, so check 3's margin is 6.16 MB in each (budget 63.16 MB).  The tab total was 799 MB in Chrome and 758 to 801 MB in Safari, at most 943 MB.  `roformer/` has no change since M1, so `working_set`'s peak is still 80.16 MB and the smallest lost-cut rise is still 9.44 MB.  `WORKER_HEADROOM_MB` stays -17 MB.
+
 * 2026-11-13, CI run 43314717211 at eb81ed0: the macOS job failed in `trunk build`, because the `wasm-opt` that Trunk downloaded could not load `libbinaryen.dylib`.  The runs after it passed with no change, so it was the runner's download.  If it comes back, it gets a TD.
 
 ## Decision log
@@ -261,6 +300,11 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-13, agent (orchestrator), intent review of M3, round 2: a kernel gain under 3 % is shown by its in-page `?bench` ratio; the same-session comparison shows no loss (i2-1).  M5 names each change from `attention_tiled.wgsl` with its predicted gain, and lands no kernel if none is faster (i2-2).  BK 8's gain is 6 % to 11 % of a K 256 product (i2-3).  The drift is up to about 5.7 % (i2-6).  The quirk entry of `browser-quirks.md` that still says more work for each byte loses less (i2-4) goes to M4's team, which cites it, as its first doc fix.
 * 2026-11-13, agent (orchestrator), intent review of M3, round 3: rounds 1 to 3 each found a new case in the rule for a gain (i1-2, i2-1, i3-1, i3-2).  So it is now the goal "A change lands only with a shown gain", with cases, and M4's milestone plan designs the rule.  M6 case 9 uses it (i3-1).  Each current kernel's WGSL stays the same byte for byte, since calibration does not protect the Radeon and the iPhone from a changed old kernel (i3-3).  M4's first commit fixes the quirk entry (i3-5).  The `wg10k` control needs patch 0001 too (i3-4).
 * 2026-11-13, agent (orchestrator), intent review of M3, round 4 (i4-1): case 3 of the gain goal uses M3's rule for a ratio in one page, not the rule for comparisons across pages, which would reject a real gain of BK 8.
+* 2026-11-13, agent (orchestrator), M4: the worker logs the chunk times with 2 decimals, and the same-session comparison reads each run's chunk lower quartile.  This reverses "Not taken: chunk times in 2 decimals" (intent review of M2).  Why: groups of slow chunks add about 9 % to a Chrome run's whole time and leave the lower quartile, and at 0.1 s the lower quartile moves in steps of 1.4 % to 2.1 %.
+* 2026-11-13, agent (team leader of M4): the same-session comparison is `e2e perf --base-dist`: blocks of base, head, head, base; `r = (H1 + H2) / (B1 + B2) - 1` for each block; a block whose two runs of a side differ by more than `N` is spoiled.  The verdict is the class of 2 blocks or more that are not spoiled, with at most one block of another class and not a loss and a gain together, up to 4 blocks; else undecided.  `T` = 1 % and `N` = 1.1 %, from an A/A session, checked by a second one.
+* 2026-11-13, agent (team leader of M4): a kernel lands only with a gain on a kind (large or small) with f16 weights, in at least one browser: its calibration total over the reference kernel's, `R`, is under 1 by more than the largest spread, in both pages.  Then each browser's comparison shows no loss, and each browser that chose it has the gain (`plans/active/gpu-speed-m4.md`, Step 7).
+* 2026-11-13, agent (implementer of M4): `v64k8` lands (`CALIBRATION` 4).  Safari chooses it; Chrome keeps `v64`.  `r64` does not land: no gain in either browser.
+* 2026-11-13, agent (implementer of M4): the tolerance of the gate stays 10 %, and `FUSED_MARGIN` stays 1.1.  Why: Safari's flip to split attention costs 3.4 %, 9.1 % with the drift.  A wider margin would change the time-axis choice on GPUs that this Mac cannot measure.  The cause of calibration's low split time in Safari goes to M5.
 ## Outcomes and retrospective
 
 Not yet.
