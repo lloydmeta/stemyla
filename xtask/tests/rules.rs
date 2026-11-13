@@ -764,6 +764,15 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (WIDE_SEARCH, "rtk mdfind x"),
     (WIDE_SEARCH, "timeout 60 mdfind x"),
     (WIDE_SEARCH, "env mdfind x"),
+    // Finding 5-4 of review round 5 of M3: a volume, such as
+    // `/Volumes/Macintosh HD`, which is `/`, and the volumes of the data volume.
+    (WIDE_SEARCH, "find \"/Volumes/Macintosh HD/\" -name x"),
+    (WIDE_SEARCH, "mdfind -onlyin \"/Volumes/Macintosh HD\" x"),
+    (WIDE_SEARCH, "find /System/Volumes/Data/Volumes -name x"),
+    (
+        WIDE_SEARCH,
+        "find \"/System/Volumes/Data/Volumes/Macintosh HD\" -name x",
+    ),
 ];
 
 /// Commands that the guard passes.
@@ -837,6 +846,7 @@ const GUARD_PASSES: &[&str] = &[
     "du -d 1 .",
     "mdfind -onlyin /Users/lloyd/Documents/rustt/stemyla x",
     "mdfind -onlyin . x",
+    "find \"/Volumes/Macintosh HD/Users/lloyd/Documents\" -name x",
     "",
 ];
 

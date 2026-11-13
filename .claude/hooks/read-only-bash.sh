@@ -277,10 +277,11 @@ check_git() {
 }
 
 # True if the path $1 is the whole disk, a home folder, the folder of all
-# users or the folder of all volumes: `/`, `~`, `~<name>`, `$HOME`,
-# `${HOME}`, `/Users`, `/Users/<name>` or `/Volumes`.  The data volume of
-# macOS, `/System/Volumes/Data`, with its `Users` folders, is the same.  Each
-# can have a final `/`, `/.` or `/*`.
+# users, the folder of all volumes or a volume: `/`, `~`, `~<name>`, `$HOME`,
+# `${HOME}`, `/Users`, `/Users/<name>`, `/Volumes` or `/Volumes/<name>`.
+# `/Volumes/Macintosh HD` is `/`.  The data volume of macOS,
+# `/System/Volumes/Data`, with its `Users` and `Volumes` folders, is the
+# same.  Each can have a final `/`, `/.` or `/*`.
 is_wide_path() {
   local path=$1 shorter
   while :; do
@@ -295,9 +296,9 @@ is_wide_path() {
   esac
   lower "$path"
   case $LOWERED in
-    '' | '~' | /users | /volumes | /system/volumes/data | /system/volumes/data/users) return 0 ;;
-    /users/*/* | /system/volumes/data/users/*/* | '~'*/*) return 1 ;;
-    /users/* | /system/volumes/data/users/* | '~'*) return 0 ;;
+    '' | '~' | /users | /volumes | /system/volumes/data | /system/volumes/data/users | /system/volumes/data/volumes) return 0 ;;
+    /users/*/* | /volumes/*/* | /system/volumes/data/users/*/* | /system/volumes/data/volumes/*/* | '~'*/*) return 1 ;;
+    /users/* | /volumes/* | /system/volumes/data/users/* | /system/volumes/data/volumes/* | '~'*) return 0 ;;
   esac
   return 1
 }

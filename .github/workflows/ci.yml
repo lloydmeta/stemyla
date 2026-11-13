@@ -186,8 +186,8 @@ jobs:
     # docs/plans/active/tech-debt-rungs.md) took 19.7 minutes for the steps
     # other than `e2e save`, with `web-test` 12.0, and 3.6 for `e2e save`.
     # The limit is the limit of `e2e save` of 60, 20 for the other steps,
-    # and 5 to spare.  So a run of `e2e save` that waits in vain ends on its
-    # own check.  Each test binary of `web-test`
+    # and 5 to spare.  The step limit ends `e2e save` before its own limit
+    # (TD-100).  Each wait has its own end.  Each test binary of `web-test`
     # may take 10 minutes (xtask/src/web_test.rs), so a slow `web-test` uses
     # the spare minutes first.  A hung browser must not hold the runner for
     # GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`

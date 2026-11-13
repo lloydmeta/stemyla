@@ -192,13 +192,13 @@ This entry concerns VERIFY-1, through the mutants run of a review round.
 
 This entry concerns GIT-1, and the read-only rule of the review agents.
 
-`.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It also refuses a wide search: `find` or `du` from the whole disk or a home folder, and `mdfind` without `-onlyin` a narrower folder.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more, and `the_bash_guard_explains_each_refusal` checks the whole line of a refusal.
+`.claude/hooks/read-only-bash.sh` is a PreToolUse hook on Bash for the review agents (harness phase 3, M2).  It refuses a command that would change the repo, a remote or a published package, by `git`, `cargo`, `gh` and a short list of other commands.  It also refuses a wide search: `find` or `du` from the whole disk, a volume or a home folder, and `mdfind` without `-onlyin` a narrower folder.  It matches the command text, so it stops mistakes, not an agent that tries to escape, as TD-28 says of the deny rules.  It fails closed for `git` subcommands only.  `the_bash_guard_refuses_writes` gives each rule of the guard one case or more, and `the_bash_guard_explains_each_refusal` checks the whole line of a refusal.
 
 These pass the guard.  Each item gives examples only, and the list is not complete:
 
 * `git --exec-path=`, and `git grep -O`, which starts a pager program;
 * `find -exec` and `find -delete`;
-* a wide search in another form, such as `cd / && find .`, `find ~/Pictures`, `find /U*`, `find /Users/lloyd/..`, `grep -r x /`, `ls -R ~` or `rg x /`;
+* a wide search in another form, such as `cd / && find .`, `find ~/Pictures`, `find /U*`, `find /Users/lloyd/..`, `grep -r x /`, `ls -R ~` or `rg x /`.  The guard also passes the home folders of a volume, such as `find "/Volumes/Macintosh HD/Users/lloyd"`;
 * `$(...)` inside double quotes, `$'...'` quoting, `$"..."` quoting such as `$"git" commit`, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
 * a redirection before the command, such as `2>/dev/null git commit`;
 * a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
@@ -539,10 +539,10 @@ This entry concerns VERIFY-1.  The cause is not known.
 
 This entry concerns no rule.  It concerns the time limit of each browser e2e scenario (the maintainer's request of 2026-11-13).
 
-* `e2e save` has a time limit of 60 minutes (`save::STEP_LIMIT_S`), from when xtask reads its options.  Its step in CI's `browser-tests` job has `timeout-minutes: 60`, from the start of the step.
-* The step starts before `cargo` builds xtask.  So on CI, the step limit always ends `save` first, and the run writes no limit line.
-* The risk is low.  Each wait of `save` has its own end, and all the waits together end within the limit (`WAITS_S`).  So a run that waits in vain ends on a check of its own.  CI discards a hosted runner after the job, with its browser and driver.
-* Fix: give the CI step a limit above the scenario's, for example 65 minutes.  Then raise the job limit (`timeout-minutes: 85`), so that it still holds the step.  Change `the_ci_job_limit_holds_its_save_steps` and the step's pin in `xtask/src/e2e/save.rs` with them.
+* `e2e save` has a time limit of 60 minutes (`save::STEP_LIMIT_S`), from when xtask reads its options.  CI has three `e2e save` steps, each with `timeout-minutes: 60` from the start of the step.  The `browser-tests` job has one step.  The `macos` job has one step for Safari and one for Chrome.
+* Each step starts before `cargo` builds xtask.  So on CI, the step limit always ends `save` first, and the run writes no limit line.
+* The risk is low.  Each wait of `save` has its own end.  CI discards a hosted runner after the job, with its browser and driver.
+* Fix: give each of the three steps a limit of 65 minutes, above the scenario's.  Then raise the job limits so that they still hold the steps: `browser-tests` to 90 minutes (now 85), and `macos` to 295 (now 285).  Change `the_ci_step_limit_is_the_waits_limit` and `the_ci_job_limit_holds_its_save_steps` in `xtask/src/e2e/save.rs` with them.
 
 ## Known breaches
 

@@ -197,11 +197,11 @@ const WEIGHTS_LIMIT_S: u64 = 2 * 60 * 60;
 /// that runs the model has [`MODEL_RUN_SECS`] with `swiftshader`, since no
 /// such run was measured.
 ///
-/// `save` has the limit of its CI step.  On CI, the step's clock starts
-/// before `cargo` builds xtask, so the step limit ends `save` first, with no
-/// limit line (TD-100).  Each wait of `save` has its own end, so a run that
-/// waits in vain still ends on a check of its own ([`save::STEP_LIMIT_S`]).
-/// CI discards a hosted runner after the job, with its browser and driver.
+/// `save` has the limit of its CI step ([`save::STEP_LIMIT_S`]).  On CI, the
+/// step's clock starts before `cargo` builds xtask, so the step limit ends
+/// `save` first, with no limit line (TD-100).  The risk is low.  Each wait of
+/// `save` has its own end.  CI discards a hosted runner after the job, with
+/// its browser and driver.
 fn scenario_limit_secs(scenario: &str, swiftshader: bool) -> Option<u64> {
     let model_run = |secs| if swiftshader { MODEL_RUN_SECS } else { secs };
     Some(match scenario {
@@ -3838,7 +3838,9 @@ mod tests {
 
     /// A fake WebDriver on a free port.  `execute/sync` gives `console`
     /// first and then no line, `execute/async` gives `script`, and each
-    /// other request gives `null`.  It sends each request it receives.
+    /// other request gives `null`.  It sends each request it receives on the
+    /// channel before it replies.  So a caller that has the reply finds the
+    /// request on the channel.
     fn fake_driver(
         console: &'static [&'static str],
         script: ScriptReply,
@@ -3880,14 +3882,14 @@ mod tests {
                 } else {
                     (200, Value::Null)
                 };
+                let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let _ = tx.send((request, body));
                 let reply = json!({ "value": value }).to_string();
                 let _ = write!(
                     stream,
                     "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}",
                     reply.len()
                 );
-                let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
-                let _ = tx.send((request, body));
             }
         });
         (port, rx)
