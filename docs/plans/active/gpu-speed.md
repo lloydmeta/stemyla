@@ -75,7 +75,7 @@ Find why Safari runs the same WGSL 1.4 to 1.7 times slower than Chrome.  Time va
 
 ### M4: a matmul with less workgroup memory for each unit of work
 
-A new `TILES` entry, with its f16 variant, from M3's result (`plans/active/gpu-speed-m3.md`, Decision log).  Safari sets workgroup memory to zero with one thread, byte by byte, so its cost grows with the bytes and the number of workgroups (`references/browser-quirks.md`).  The start point is `v64`'s 64 x 64 tile, 4 x 4 outputs for each thread and vec4 reads.  It has fewer bytes of workgroup memory for each unit of work.  Two candidates:
+A new `TILES` entry, with its f16 variant, from M3's result (`plans/completed/gpu-speed-m3.md`, Decision log).  Safari sets workgroup memory to zero with one thread, byte by byte, so its cost grows with the bytes and the number of workgroups (`references/browser-quirks.md`).  The start point is `v64`'s 64 x 64 tile, 4 x 4 outputs for each thread and vec4 reads.  It has fewer bytes of workgroup memory for each unit of work.  Two candidates:
 
 * `v64` with BK 8 (6 KiB with the pad of one vec4), with two barriers for each K tile, as `v64` has;
 * a register-tiled kernel with no workgroup memory.  M3 did not measure a kernel of this kind.
@@ -210,7 +210,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * 2026-11-12, M1 round 4 and M2 round 5: twice a wire reviewer changed a line in another reviewer's worktree, then reverted it.  In M2 it came after a failed `git worktree add` on a name in use, when the next commands of the chain ran in the wrong folder.  The validators ran each claim again in their own worktrees, and `review check` printed "no change".  TD-34 covers edits in worktrees; review agents should stop a command chain on a failed `worktree add`.
 
-* 2026-11-13, M3: why Safari 27.2 is slower than Chrome 157 on the same WGSL, on the M2 Pro.  The Surprises of `plans/active/gpu-speed-m3.md` hold the tables.  The logs and `m3/findings.md` stayed in the session scratchpad.  The controls are near 1 (FMA 1.05 to 1.08, copy 1.03 to 1.04), so the GPU's state does not explain it.  `v64`'s browser ratio is 1.76 on `freq qkv` with f16 weights (the parent's 1.70).  It falls as K grows: 2.4 at K 64, 1.76 at K 256, 1.45 at K 1,024.
+* 2026-11-13, M3: why Safari 27.2 is slower than Chrome 157 on the same WGSL, on the M2 Pro.  The Surprises of `plans/completed/gpu-speed-m3.md` hold the tables.  The logs and `m3/findings.md` stayed in the session scratchpad.  The controls are near 1 (FMA 1.05 to 1.08, copy 1.03 to 1.04), so the GPU's state does not explain it.  `v64`'s browser ratio is 1.76 on `freq qkv` with f16 weights (the parent's 1.70).  It falls as K grows: 2.4 at K 64, 1.76 at K 256, 1.45 at K 1,024.
 
   | Part of Safari's loss | Evidence | Share of `v64`'s loss |
   | - | - | - |
