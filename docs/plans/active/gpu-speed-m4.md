@@ -300,7 +300,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Step 10 (2026-11-13): the cost of each forced flip.  Each cost plus the drift (5.7 %) is under the tolerance (10 %): the largest real one is Safari's flip to split attention, 3.4 % (9.1 % with the drift).  The tolerance stays (Decision log).
 * [x] Step 11 (2026-11-13): the baselines.  Safari's went from 7.40 s to 7.38 s (bound 8.14 s to 8.12 s), from 5 runs at `a238db5`; Chrome's does not change, since Chrome did not choose `v64k8`.
 * [x] Step 12 (2026-11-13): the worker headroom.  `memory-budget` passed 3 times in each browser; each growth is 57 MB, as at M1, and `WORKER_HEADROOM_MB` stays -17 MB.
-* [ ] Step 13: the checks before review round 1.
+* [x] Step 13 (2026-11-13): the checks before review round 1, at `01e6953`.  `check --tier push` with `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` passed its 15 lines, with the GPU test line and both perf gates run (log `m4/check-push.log`).  Chrome's gate passed: 4.69 s against a bound of 5.17 s (`v64,v64`, split).  Safari's gate passed: 7.46 s against a bound of 8.12 s, margin 0.66 s (`v64k8,v64`, split attention).  `cargo build -p xtask` passed.  For the orchestrator: `m4/parent-m4.diff` (the parent plan) and `m4/claude-rules-gpu.diff` (`.claude/rules/gpu.md`: the pin of Step 3, and the rules of Steps 5 and 7).  Each passes `git apply --check` on HEAD, and `docs-check` passes with both applied.
 
 ## Surprises and discoveries
 
@@ -420,4 +420,4 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 ## Outcomes and retrospective
 
-Not yet.
+2026-11-13, before the review rounds.  `v64k8` (BK 8, 6 KiB of workgroup memory) lands as a calibration candidate.  Safari chooses it, and its in-page gain is 5.4 % to 5.6 % of the large products; Chrome keeps `v64`.  In Safari the separation is 2.4 % faster when calibration keeps fused attention on the time axis (7.20 to 7.22 s for each chunk, against 7.37 to 7.42 s at the base).  `v64k8` also lowers calibration's time for split attention, so Safari now puts the time axis on split in about half of its calibrations, and those runs are about 1 % slower than the base.  Calibration's split time in Safari was about 0.5 s for each chunk too low before M4 too; M5 is the place for its cause.  `r64`, with no workgroup memory, is slower than `v64` on the large products in both browsers, and does not land.  The zero-init cost is not linear in the bytes: in Safari, 6 KiB costs about a quarter of 10 KiB.  M4 also leaves three tools for M5 and M6: `--raise` for each raise of a bound, the pin of each current kernel's WGSL, and `e2e perf --base-dist` with `T` 1 % and `N` 1.1 % from two A/A sessions.
