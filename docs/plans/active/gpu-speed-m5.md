@@ -333,10 +333,23 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * `the_queries_of_a_comparison_never_split_the_frequency_axis` (`query_refusal`, a stub): `"--head-query" in ""`.
   * `each_side_of_a_comparison_runs_its_own_query`, with the two queries swapped: `left: "mm=v64k8,v64k8&attn=freq"`, `right: "mm=v64k8,v64k8&attn=fused"`.
   * Then `cargo test -p xtask` passes (802 unit tests).
+* [x] Step 3 (2026-11-13): the check of the goal, in `docs/references/local-browser-testing.md`.  It fails first at `ab40862` in Safari: a loss of `freq` of 3 % or more.  Chrome gives a gain of `freq`, so no failure there.
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-11-13, Step 3: the check at the page of `ab40862`, base `attn=fused`, head `attn=freq`, the same page on both sides.  Each figure is a chunk lower quartile, in seconds, in the order B H H B.
+
+  | Browser, pins | Block | Runs | `r` | Class |
+  | - | - | - | - | - |
+  | Safari 27.2, `v64k8,v64k8` | 1 | 7.22, 7.45, 7.45, 7.22 | +3.19 % | loss |
+  | | 2 | 7.21, 7.28, 7.28, 6.98 | +2.61 % | loss, spoiled (3.30 %) |
+  | | 3 | 7.00, 7.28, 7.28, 6.99 | +4.07 % | loss |
+  | Chrome 157, `v64,v64` | 1 | 4.68, 4.62, 4.63, 4.68 | -1.18 % | gain |
+  | | 2 | 4.68, 4.62, 4.62, 4.68 | -1.28 % | gain |
+
+  * Safari: the verdict is a loss, 3 % or more.  `freq` is choosable there (M4), so the check fails, as the goal's case 2 needs.  Whole times: `fused` 77.0 to 79.7 s, `freq` 80.3 to 86.7 s.  Chunk medians: `fused` 6.99 to 7.23 s, `freq` 7.29 to 7.46 s.  Log: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step3-safari-1/output.log`.
+  * Chrome: the verdict is a gain of `freq` (2 blocks), so the check passes.  Whole times: `fused` 51.9 to 52.9 s, `freq` 51.3 to 52.4 s.  Chunk medians: `fused` 4.69 to 4.71 s, `freq` 4.62 to 4.63 s.  `freq` is about 0.06 s faster for each chunk, not 0.10 s as M2 gave.  Log: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step3-chrome-1/output.log`.
+  * Safari's two `fused` runs of block 2 were 7.21 and 6.98 s.  From then on, both policies ran about 0.22 to 0.23 s faster for each chunk.  The cause is not known; the GPU clock is a guess.
 
 ## Decision log
 

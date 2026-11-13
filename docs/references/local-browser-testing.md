@@ -52,6 +52,20 @@ The rule for a new matmul kernel (M4 of `plans/active/gpu-speed.md`, Step 7).  M
 * A gain on a kind in a browser: `R < 1` and `1 - R > S`, in both pages.  A loss: `R > 1 + S` in both pages.  Else no effect is seen.
 * The candidate lands only with a gain on a kind, with f16 weights, in at least one browser.  Then each browser's same-session comparison must show no loss, and each browser that chose it must have a gain for it.
 
+## Each calibration choice is not slower
+
+The check of the goal "Each calibration choice is not slower", for one page and one browser (M5 of `plans/active/gpu-speed.md`).  M6 uses it too.
+
+* A policy is a time-axis attention policy, by the name in the `kernels:` line: `fused` or `freq`.  The check never forces `split` or `time`, which split the frequency axis.
+* The ratio at the flip point of a calibration is its fused time over its split time, from its `kernels for this GPU` line.
+* A policy is choosable when 12 or more calibrations of the page in that browser show either of these:
+  * calibration chose it at least once;
+  * the mean ratio at the flip point, plus or minus 2 standard deviations, crosses `FUSED_MARGIN`.
+* The pins: the matmul policy that the page's calibration chooses most often in that browser, from the `kernels:` lines of its runs.  Check a second matmul policy only with a reason in the plan's Decision log.
+* For each unordered pair `{p, q}` of policies where `p` is choosable, run one comparison with the page on both sides: `e2e perf --base-dist <page> --dist <page> --query "mm=<pins>&attn=<q>" --head-query "attn=<p>" --runs 4`.  One comparison gives both signs: a loss of the head is a gain of the base.
+* The check fails when a choosable policy is slower than another policy: a loss when it is the head, a gain when it is the base.  Else it passes.
+* An undecided comparison runs again in a later session.  Twice undecided fails the check, unless the plan's Decision log gives a reason.
+
 ## Known local failures
 
 Check `main` before treating any of these as a regression:
