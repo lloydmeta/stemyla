@@ -22,7 +22,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 * Each `e2e perf` run has a time limit of 10 minutes, from when the run opens its page.  At the limit, the run fails with one line, and ends its WebDriver session and its driver.  So a hung Safari run does not hold Safari for hours (2026-11-13: one Safari run hung for 3 hours).  The limits of the other scenarios are in `README.md` (browser tests).
 * Keep the screen unlocked and do not use the Mac during the Safari run.  A locked screen fails the Safari line at once.
 * A Chrome update can stop the Chrome line until `CHROMEDRIVER` names a driver of the new version.  An old driver may still drive the new Chrome, with a warning.
-* The gate compares across browser versions, and prints a line when the version is not the baseline's.  After a browser update, measure again with `e2e perf --runs 5 --update-baselines`, and record both figures.
+* The gate compares across browser versions, and prints a line when the version is not the baseline's.  After a browser update, measure again with `e2e perf --runs 5 --update-baselines`, and record both figures.  A raise of the bound needs `--raise "<reason>"` with any browser version.  After a browser update, the reason names it, for example `--raise "Safari 27.2 to 27.3"`.
 
 ## Known local failures
 

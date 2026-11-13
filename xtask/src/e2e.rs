@@ -93,9 +93,10 @@
 //!   never a pass: `--gate` and `--update-baselines` fail it.
 //!   `--update-baselines` with `--runs 5` or more writes the key's
 //!   baseline.  In an update, a run over the old bound gives a note, and
-//!   `update_refusal` decides: it refuses a raise of the bound
-//!   with the same browser version, unless `--raise "<reason>"` gives the
-//!   reason.
+//!   `update_refusal` decides: it refuses each raise of the bound, with
+//!   any browser version, unless `--raise "<reason>"` gives the reason.
+//!   After a browser update, the reason names it, for example
+//!   `--raise "Safari 27.2 to 27.3"`.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),

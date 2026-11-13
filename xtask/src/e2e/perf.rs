@@ -685,18 +685,31 @@ fn bound_of(e: &Entry) -> f64 {
 
 /// The reason to refuse an update from `old` to `new`, or `None`.  An
 /// update may not raise the bound, the baseline times (1 + tolerance /
-/// 100), unless the browser version differs from the old entry's, or
-/// `raise` gives a reason.  So a wider tolerance is a raise too.
+/// 100), unless `raise` gives a reason that is not blank.  This holds for
+/// any browser version.  After a browser update, the reason names it, for
+/// example `--raise "Safari 27.2 to 27.3"`.  A wider tolerance is a raise
+/// too.
 pub(super) fn update_refusal(old: Option<&Entry>, new: &Entry, raise: &str) -> Option<String> {
     let old = old?;
     let (old_bound, new_bound) = (bound_of(old), bound_of(new));
-    if new_bound <= old_bound + EPSILON || new.version != old.version || !raise.trim().is_empty() {
+    if new_bound <= old_bound + EPSILON || !raise.trim().is_empty() {
         return None;
     }
-    Some(format!(
-        "the new bound {new_bound:.2} s ({:.2} s + {:.0} %) is over the old bound {old_bound:.2} s ({:.2} s + {:.0} %) with the same browser version {}: give --raise \"<reason>\" to raise it",
-        new.baseline, new.tolerance_pct, old.baseline, old.tolerance_pct, old.version
-    ))
+    let figures = format!(
+        "the new bound {new_bound:.2} s ({:.2} s + {:.0} %) is over the old bound {old_bound:.2} s ({:.2} s + {:.0} %)",
+        new.baseline, new.tolerance_pct, old.baseline, old.tolerance_pct
+    );
+    Some(if new.version == old.version {
+        format!(
+            "{figures} with the same browser version {}: give --raise \"<reason>\" to raise it",
+            old.version
+        )
+    } else {
+        format!(
+            "{figures}, and the browser version changed from {} to {}: give --raise \"<reason>\" that names the browser update, for example --raise \"{} to {}\"",
+            old.version, new.version, old.version, new.version
+        )
+    })
 }
 
 /// The line that an update prints: the key, and the old and the new
@@ -1281,8 +1294,11 @@ mod tests {
     /// * the same baseline with a tolerance of 20 % (bound 6.0 s) is
     ///   refused;
     /// * a baseline of 5.6 s is refused, and the reason names `--raise`;
-    /// * the same 5.6 s passes with a new browser version, or with a
-    ///   reason;
+    /// * the same 5.6 s with a new browser version and no reason is
+    ///   refused, and the reason names the old and the new version and
+    ///   asks for a reason that names the browser update;
+    /// * the same 5.6 s passes with a reason, with the same or a new
+    ///   browser version;
     /// * the same 5.6 s is refused with a blank reason (`"  "`);
     /// * any baseline passes with no old entry.
     #[test]
@@ -1298,7 +1314,14 @@ mod tests {
             version: "158.0.7100.0".into(),
             ..entry(5.6, 10.0)
         };
-        assert_eq!(update_refusal(Some(&old), &newer, ""), None);
+        let update = update_refusal(Some(&old), &newer, "").unwrap_or_default();
+        for want in ["157.0.7000.0", "158.0.7100.0", "--raise", "browser update"] {
+            assert!(update.contains(want), "{want:?} in {update:?}");
+        }
+        assert_eq!(
+            update_refusal(Some(&old), &newer, "Chrome 157 to 158"),
+            None
+        );
         assert_eq!(
             update_refusal(Some(&old), &entry(5.6, 10.0), "a slower kernel"),
             None

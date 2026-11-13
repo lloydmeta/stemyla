@@ -284,8 +284,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 * [x] Plan review round 1 (2026-11-13): 2 blockers, 7 should-fix and 3 nits, each applied.
 * [x] Plan review round 2 (2026-11-13): 1 blocker, 5 should-fix and 5 nits, each applied.
-* [ ] Step 1: the quirk entry.
-* [ ] Step 2: every raise of a bound needs `--raise`.
+* [x] Step 1 (2026-11-13): the quirk entry, commit "Quirks: fewer bytes for each workgroup, not more work for each byte".  `docs-check` passed.
+* [x] Step 2 (2026-11-13): every raise of a bound needs `--raise`.  The changed test `a_raise_over_the_tolerance_needs_a_reason` failed first on its assert (`"157.0.7000.0" in ""`, perf.rs:1306), then passed.  `cargo test -p xtask` and `docs-check` passed.  The orchestrator applied the change of `.claude/rules/gpu.md`; this step's commit adds it.
 * [ ] Step 3: the WGSL of each current kernel, pinned.
 * [ ] Step 4: the `wg` controls.
 * [ ] Step 5: the chunk line in 2 decimals, the same-session comparison, and its A/A sessions.
