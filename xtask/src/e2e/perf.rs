@@ -1056,6 +1056,71 @@ pub(super) fn compare_refusal(
     None
 }
 
+/// The page query of `side` in a same-session comparison, with no `?` at
+/// its start.  The base gets `query`.  The head gets `query` with each
+/// key of `head_query` set to its value: a key of both takes the head's
+/// value, and a new key goes at the end.
+pub(super) fn side_query(query: Option<&str>, head_query: Option<&str>, side: Side) -> String {
+    let pairs = |q: Option<&str>| -> Vec<String> {
+        q.unwrap_or_default()
+            .trim_start_matches('?')
+            .split('&')
+            .filter(|pair| !pair.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let base = pairs(query);
+    if side == Side::Base {
+        return base.join("&");
+    }
+    let key = |pair: &str| pair.split('=').next().unwrap_or_default().to_string();
+    let head = pairs(head_query);
+    let head_value = |k: &str| head.iter().rev().find(|h| key(h) == k).cloned();
+    let kept = base
+        .iter()
+        .map(|b| head_value(&key(b)).unwrap_or_else(|| b.clone()));
+    let added = head
+        .iter()
+        .filter(|h| !base.iter().any(|b| key(b) == key(h)))
+        .cloned();
+    kept.chain(added).collect::<Vec<_>>().join("&")
+}
+
+/// The reason to refuse the queries of `e2e perf` before any run, or
+/// `None`.  It refuses `--head-query` without `--base-dist`.  In a
+/// comparison, it refuses `attn=split` and `attn=time` in `--query` or
+/// `--head-query`: both split the frequency axis, 2.2 to 3.6 times
+/// slower, so no comparison forces them.
+pub(super) fn query_refusal(
+    compare: bool,
+    query: Option<&str>,
+    head_query: Option<&str>,
+) -> Option<String> {
+    if !compare {
+        return head_query.map(|_| {
+            "--head-query needs --base-dist: it sets the query of the head side of a comparison"
+                .to_string()
+        });
+    }
+    let split = ["split", "time"].into_iter().find_map(|policy| {
+        let attn = format!("attn={policy}");
+        [query, head_query]
+            .into_iter()
+            .flatten()
+            .any(|q| {
+                q.trim_start_matches('?')
+                    .split('&')
+                    .any(|pair| pair == attn)
+            })
+            .then_some(attn)
+    });
+    split.map(|attn| {
+        format!(
+            "--base-dist with {attn}: it splits the frequency axis, 2.2 to 3.6 times slower, so no comparison forces it"
+        )
+    })
+}
+
 /// The problems of one entry of the baselines file, or none: fewer than
 /// [`MIN_RUNS`] runs, a baseline that is not the median of the runs'
 /// chunk lower quartiles, or a tolerance that is not the rule's for them.
@@ -2357,6 +2422,90 @@ mod tests {
         names(compare_refusal(2, false, false, false), "--runs 2");
         assert_eq!(compare_refusal(4, false, false, false), None);
         assert_eq!(compare_refusal(8, false, false, false), None);
+    }
+
+    /// Asserts that `side_query`:
+    /// * gives the base `--query`, and the head `--query` with the value of
+    ///   `--head-query` (`mm=v64k8,v64k8&attn=fused` and `attn=freq`);
+    /// * adds a key of `--head-query` that `--query` does not have, at the
+    ///   end (`profile=1`), and gives the head `--head-query` alone with no
+    ///   `--query`;
+    /// * gives the head `--query` with an empty or no `--head-query`;
+    /// * drops a `?` at the start of either.
+    #[test]
+    fn the_head_query_sets_its_keys_on_the_query() {
+        let both = |q: Option<&str>, h: Option<&str>| {
+            (side_query(q, h, Side::Base), side_query(q, h, Side::Head))
+        };
+        let pinned = "mm=v64k8,v64k8&attn=fused";
+        assert_eq!(
+            both(Some(pinned), Some("attn=freq")),
+            (pinned.to_string(), "mm=v64k8,v64k8&attn=freq".to_string())
+        );
+        assert_eq!(
+            both(Some(pinned), Some("profile=1&attn=freq")),
+            (
+                pinned.to_string(),
+                "mm=v64k8,v64k8&attn=freq&profile=1".to_string()
+            )
+        );
+        assert_eq!(
+            both(None, Some("attn=freq")),
+            (String::new(), "attn=freq".to_string())
+        );
+        assert_eq!(
+            both(Some(pinned), Some("")),
+            (pinned.to_string(), pinned.to_string())
+        );
+        assert_eq!(
+            both(Some(pinned), None),
+            (pinned.to_string(), pinned.to_string())
+        );
+        assert_eq!(
+            both(Some("?mm=v64,v64&attn=fused"), Some("?attn=freq")),
+            (
+                "mm=v64,v64&attn=fused".to_string(),
+                "mm=v64,v64&attn=freq".to_string()
+            )
+        );
+        assert_eq!(both(None, None), (String::new(), String::new()));
+    }
+
+    /// Asserts that `query_refusal`:
+    /// * refuses `--head-query` without `--base-dist`, with a reason that
+    ///   names both;
+    /// * in a comparison, refuses `attn=split` and `attn=time` in `--query`
+    ///   and in `--head-query`, with a reason that names the policy;
+    /// * passes `attn=fused`, `attn=freq` and a policy name that it does
+    ///   not know (`attn=vfused`), with and without `--base-dist`;
+    /// * passes `attn=split` with no comparison, as a single run.
+    #[test]
+    fn the_queries_of_a_comparison_never_split_the_frequency_axis() {
+        let names = |r: Option<String>, want: &str| {
+            let r = r.unwrap_or_default();
+            assert!(r.contains(want), "{want:?} in {r:?}");
+        };
+        names(
+            query_refusal(false, None, Some("attn=freq")),
+            "--head-query",
+        );
+        names(query_refusal(false, None, Some("attn=freq")), "--base-dist");
+        for policy in ["split", "time"] {
+            let attn = format!("attn={policy}");
+            names(
+                query_refusal(true, Some(&format!("mm=v64,v64&{attn}")), None),
+                &attn,
+            );
+            names(query_refusal(true, Some("mm=v64,v64"), Some(&attn)), &attn);
+            names(query_refusal(true, Some(&format!("?{attn}")), None), &attn);
+        }
+        for policy in ["fused", "freq", "vfused"] {
+            let attn = format!("attn={policy}");
+            assert_eq!(query_refusal(true, Some(&attn), Some(&attn)), None);
+            assert_eq!(query_refusal(false, Some(&attn), None), None);
+        }
+        assert_eq!(query_refusal(false, Some("attn=split"), None), None);
+        assert_eq!(query_refusal(true, None, None), None);
     }
 
     /// Asserts, with an old baseline of 5.0 s and a tolerance of 10 % (a

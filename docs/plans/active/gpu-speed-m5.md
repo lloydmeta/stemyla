@@ -326,6 +326,13 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] 2026-11-13: the plan written.
 * [x] Plan review round 1 (2026-11-13): 2 blockers, 12 should-fix and 5 nits, each applied.
 * [x] Plan review round 2 (2026-11-13): 1 blocker, 7 should-fix and 7 nits, each applied.
+* [x] Step 1 (2026-11-13): TD-101's text, in its own commit.  `docs-check` passes.
+* [x] Step 2 (2026-11-13): `--head-query`.  Each new test failed first on an assert:
+  * `parses_scenario_and_options`: `left: Err("unknown option --head-query")`, `right: Ok((Some("attn=freq"), Some("mm=v64,v64")))`.
+  * `the_head_query_sets_its_keys_on_the_query` (`side_query`, a stub): `left: ("", "")`, `right: ("mm=v64k8,v64k8&attn=fused", "mm=v64k8,v64k8&attn=freq")`.
+  * `the_queries_of_a_comparison_never_split_the_frequency_axis` (`query_refusal`, a stub): `"--head-query" in ""`.
+  * `each_side_of_a_comparison_runs_its_own_query`, with the two queries swapped: `left: "mm=v64k8,v64k8&attn=freq"`, `right: "mm=v64k8,v64k8&attn=fused"`.
+  * Then `cargo test -p xtask` passes (802 unit tests).
 
 ## Surprises and discoveries
 

@@ -123,7 +123,13 @@
 //!   that are not spoiled, and needs 2 of them (`perf::mean_verdict`).
 //!   "3 % or more" then uses the size of that mean.  It prints each kernel
 //!   choice with its count, under "kernels differ".  `--query` applies to
-//!   both sides.  It refuses `--gate`, `--update-baselines` and
+//!   both sides.  `--head-query Q` sets each key of `Q` on the head's
+//!   query: a key of both takes the head's value, and a new key goes at
+//!   the end (`perf::side_query`).  The output gives the query of each
+//!   side before the first run.  A comparison refuses `attn=split` and
+//!   `attn=time` in `--query` or `--head-query`, since both split the
+//!   frequency axis.  `perf` refuses `--head-query` without
+//!   `--base-dist`.  It refuses `--gate`, `--update-baselines` and
 //!   `--swiftshader`.  It refuses a run on a fallback or a software adapter
 //!   (GPU-3).  It refuses a run whose chunk times have 1 decimal: the
 //!   oldest base is `59da862`, the first commit that logs them with 2.
@@ -135,8 +141,8 @@
 //! the GPU scenarios), `--weights FILE`, `--selftest-dir DIR`,
 //! `--reference DIR`, `--download`, `--flac`, `--hashes H1,...,H6` (the
 //! six SHA-256s of `stored-stems`, in the worker's stem order), `--runs N`,
-//! `--gate`, `--update-baselines`, `--raise REASON` and `--base-dist DIR`
-//! (`perf`), and click
+//! `--gate`, `--update-baselines`, `--raise REASON`, `--base-dist DIR` and
+//! `--head-query Q` (`perf`), and click
 //! positions `--play-x`,
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
 //!
@@ -323,6 +329,9 @@ pub struct Opts {
     pub raise: Option<String>,
     /// `perf`: the page of the base of a same-session comparison.
     pub base_dist: Option<PathBuf>,
+    /// `perf --base-dist`: the keys that the head's query sets on
+    /// `--query` ([`perf::side_query`]).
+    pub head_query: Option<String>,
     pub play_x: f64,
     pub tempo_x: f64,
     pub download_x: f64,
@@ -371,6 +380,7 @@ impl Opts {
             update_baselines: false,
             raise: None,
             base_dist: None,
+            head_query: None,
             // Positions in the 1100-pixel top bar with no model loaded.
             play_x: 600.0,
             // 75% on the 50..150% tempo slider while playing ("Pause" is
@@ -417,6 +427,7 @@ impl Opts {
                 "--update-baselines" => o.update_baselines = true,
                 "--raise" => o.raise = Some(value()?),
                 "--base-dist" => o.base_dist = Some(value()?.into()),
+                "--head-query" => o.head_query = Some(value()?),
                 "--play-x" => o.play_x = value()?.parse()?,
                 "--tempo-x" => o.tempo_x = value()?.parse()?,
                 "--download-x" => o.download_x = value()?.parse()?,
@@ -2327,6 +2338,13 @@ fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<
 /// baseline of its key (`perf.rs`).  With `--base-dist`, it runs the
 /// same-session comparison instead ([`perf_compare`]).
 fn perf(o: &Opts) -> Result<()> {
+    if let Some(refusal) = perf::query_refusal(
+        o.base_dist.is_some(),
+        o.query.as_deref(),
+        o.head_query.as_deref(),
+    ) {
+        bail!("perf: {refusal}");
+    }
     if let Some(base_dist) = &o.base_dist {
         return perf_compare(o, base_dist);
     }
@@ -2349,7 +2367,7 @@ fn perf(o: &Opts) -> Result<()> {
     let mut results = Vec::new();
     for n in 1..=o.runs {
         let name = format!("perf-{browser}-{n}");
-        let (mut p, result) = perf_run(o, &site, &name)?;
+        let (mut p, result) = perf_run(o, &site, &query(o, ""), &name)?;
         if let Some(result) = result {
             let key = perf::key_of(&result, &chip);
             let never = perf::never_a_pass(&result, o);
@@ -2405,14 +2423,19 @@ impl PerfSite {
     }
 }
 
-/// One run of `e2e perf` on the page of `site`, as `name`: it writes
+/// One run of `e2e perf` on the page of `site` with the query `q`, as
+/// `name`: it writes
 /// `<out>/<name>.json` and prints its line.  It gives the
 /// page, which the caller finishes, and the result, or `None` when the
 /// log gives none (a failed check of the page).
-fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf::PerfResult>)> {
+fn perf_run(
+    o: &Opts,
+    site: &PerfSite,
+    q: &str,
+    name: &str,
+) -> Result<(Page, Option<perf::PerfResult>)> {
     let browser = perf::browser_name(o.browser);
     let (frames, bands) = perf::perf_axes();
-    let q = query(o, "");
     let mut p = Page::open(
         o,
         site.base.clone(),
@@ -2460,10 +2483,13 @@ fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf:
 }
 
 /// The sites of a same-session comparison: one for the base page in
-/// `--base-dist`, one for the head page in `--dist`.
+/// `--base-dist`, one for the head page in `--dist`, each with the query
+/// of its side ([`perf::side_query`]).
 struct CompareSites<T> {
     base: T,
     head: T,
+    base_query: String,
+    head_query: String,
 }
 
 impl<T> CompareSites<T> {
@@ -2473,7 +2499,13 @@ impl<T> CompareSites<T> {
         let base_dist = o.base_dist.as_deref().context("no --base-dist")?;
         let base = start(base_dist)?;
         let head = start(&o.dist)?;
-        Ok(Self { base, head })
+        let side_query = |side| perf::side_query(o.query.as_deref(), o.head_query.as_deref(), side);
+        Ok(Self {
+            base,
+            head,
+            base_query: side_query(perf::Side::Base),
+            head_query: side_query(perf::Side::Head),
+        })
     }
 
     /// The site of `side`.
@@ -2481,6 +2513,14 @@ impl<T> CompareSites<T> {
         match side {
             perf::Side::Base => &self.base,
             perf::Side::Head => &self.head,
+        }
+    }
+
+    /// The page query of `side`.
+    fn query(&self, side: perf::Side) -> &str {
+        match side {
+            perf::Side::Base => &self.base_query,
+            perf::Side::Head => &self.head_query,
         }
     }
 }
@@ -2499,12 +2539,15 @@ fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
     }
     let sites = CompareSites::start(o, |dist| PerfSite::start(o, dist))?;
     let browser = perf::browser_name(o.browser);
+    for side in [perf::Side::Base, perf::Side::Head] {
+        println!("perf: the {} query: \"{}\"", side.name(), sites.query(side));
+    }
     perf::run_comparison(
         browser,
         o.runs,
         |side, _n, name| {
-            let site = sites.of(side);
-            let (p, result) = perf_run(o, site, name).map_err(|e| format!("run {name}: {e:#}"))?;
+            let (p, result) = perf_run(o, sites.of(side), sites.query(side), name)
+                .map_err(|e| format!("run {name}: {e:#}"))?;
             p.finish().map_err(|e| format!("run {name}: {e:#}"))?;
             result.ok_or_else(|| format!("run {name} gave no result"))
         },
@@ -3575,6 +3618,14 @@ mod tests {
         assert_eq!(c.runs, 8);
         assert_eq!(d.base_dist, None);
         assert!(Opts::parse(&args("perf --base-dist")).is_err());
+        let h = Opts::parse(&args(
+            "perf --base-dist /tmp/base --head-query attn=freq --query mm=v64,v64",
+        ))
+        .map(|o| (o.head_query, o.query))
+        .map_err(|e| e.to_string());
+        assert_eq!(h, Ok((Some("attn=freq".into()), Some("mm=v64,v64".into()))));
+        assert_eq!(d.head_query, None);
+        assert!(Opts::parse(&args("perf --head-query")).is_err());
     }
 
     #[test]
@@ -3616,6 +3667,21 @@ mod tests {
         assert_eq!(started, [base.clone(), head.clone()]);
         assert_eq!(*sites.of(perf::Side::Base), base);
         assert_eq!(*sites.of(perf::Side::Head), head);
+    }
+
+    /// Asserts that `CompareSites::start`, with the options of `perf
+    /// --base-dist /tmp/base/dist --query mm=v64k8,v64k8&attn=fused
+    /// --head-query attn=freq`, gives the base `--query` and the head
+    /// `--query` with `attn=freq`.
+    #[test]
+    fn each_side_of_a_comparison_runs_its_own_query() {
+        let o = Opts::parse(&args(
+            "perf --base-dist /tmp/base/dist --query mm=v64k8,v64k8&attn=fused --head-query attn=freq",
+        ))
+        .expect("options");
+        let sites = CompareSites::start(&o, |dist| Ok(dist.to_path_buf())).expect("sites");
+        assert_eq!(sites.query(perf::Side::Base), "mm=v64k8,v64k8&attn=fused");
+        assert_eq!(sites.query(perf::Side::Head), "mm=v64k8,v64k8&attn=freq");
     }
 
     /// Asserts that `selftest_query`:
