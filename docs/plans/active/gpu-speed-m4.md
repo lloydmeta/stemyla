@@ -286,7 +286,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Plan review round 2 (2026-11-13): 1 blocker, 5 should-fix and 5 nits, each applied.
 * [x] Step 1 (2026-11-13): the quirk entry, commit "Quirks: fewer bytes for each workgroup, not more work for each byte".  `docs-check` passed.
 * [x] Step 2 (2026-11-13): every raise of a bound needs `--raise`.  The changed test `a_raise_over_the_tolerance_needs_a_reason` failed first on its assert (`"157.0.7000.0" in ""`, perf.rs:1306), then passed.  `cargo test -p xtask` and `docs-check` passed.  The orchestrator applied the change of `.claude/rules/gpu.md`; this step's commit adds it.
-* [ ] Step 3: the WGSL of each current kernel, pinned.
+* [x] Step 3 (2026-11-13): the WGSL of each current kernel, pinned by `current_kernels_keep_their_wgsl` (12 sources; `NEW_KERNELS` empty).  `fnv1a` and `FNV_OFFSET` serve the test and `kernels_id`, whose value stays `0xd4f493a491195bc8` (printed before and after).  With one changed byte in the first comment of `matmul_vec4.wgsl`, the test failed on its assert: `v64: hash 0xb6bd57ba6e7f0898, pinned 0x2bf06de948042584` and `v64-f16: hash 0xe871347a10b57f98, pinned 0xbb9577526ab450c6`.  Without the byte, `cargo test -p roformer-gpu --lib` passed (51 tests).
 * [ ] Step 4: the `wg` controls.
 * [ ] Step 5: the chunk line in 2 decimals, the same-session comparison, and its A/A sessions.
 * [ ] Step 6: the candidates.

@@ -2539,18 +2539,24 @@ fn kernel_sources() -> Vec<String> {
         .collect()
 }
 
+/// The FNV-1a hash (64 bits) of no bytes: its offset basis.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The FNV-1a hash (64 bits) `hash` continued over `bytes`.  From
+/// [`FNV_OFFSET`], it is the hash of `bytes`.
+fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
+}
+
 /// Identifies the compiled kernels that calibration chooses between
 /// (FNV-1a over [`kernel_sources`]), so a per-GPU choice is redone
 /// whenever they change.
 pub fn kernels_id() -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for src in kernel_sources() {
-        for b in src.bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    h
+    kernel_sources()
+        .iter()
+        .fold(FNV_OFFSET, |h, src| fnv1a(h, src.as_bytes()))
 }
 
 #[cfg(test)]
@@ -3020,6 +3026,66 @@ mod tests {
         assert_eq!(on_disk, checked);
         let s64 = TILES.iter().find(|t| t.hand_written).expect("s64");
         assert_eq!(s64.source(), include_str!("shaders/matmul.wgsl"));
+    }
+
+    /// The FNV-1a hash ([`fnv1a`]) of the WGSL of each current kernel, by
+    /// the name of [`generated_sources`] or [`SHADER_FILES`].
+    const PINNED_WGSL: [(&str, u64); 12] = [
+        ("i64", 0x6735_eed0_8cca_09cc),
+        ("i128x64", 0xf9e3_a175_acf0_66cf),
+        ("s64", 0x1553_8389_9726_7e72),
+        ("v64", 0x2bf0_6de9_4804_2584),
+        ("i64-f16", 0xf950_2bac_2fb3_4efe),
+        ("i128x64-f16", 0x71ad_576f_be76_36a5),
+        ("s64-f16", 0x524e_ac59_f5a3_b9d4),
+        ("v64-f16", 0xbb95_7752_6ab4_50c6),
+        ("attention", 0xa091_9877_a004_c08c),
+        ("softmax.wgsl", 0x88a8_02c9_98a6_ac21),
+        ("rmsnorm.wgsl", 0x051c_929e_5b3b_f568),
+        ("elementwise.wgsl", 0x2df7_4f02_9bc1_b129),
+    ];
+
+    /// The names of new kernels that have no pinned hash yet.  A kernel
+    /// that lands moves from here to [`PINNED_WGSL`].
+    const NEW_KERNELS: [&str; 0] = [];
+
+    /// Asserts:
+    /// * each source of [`generated_sources`] and [`SHADER_FILES`] whose
+    ///   name is in [`PINNED_WGSL`] has the FNV-1a hash pinned there;
+    /// * each source with no pinned hash has its name in [`NEW_KERNELS`];
+    /// * each name in [`PINNED_WGSL`] and in [`NEW_KERNELS`] is the name
+    ///   of a source.
+    ///
+    /// Why: calibration protects the GPUs that this Mac cannot measure
+    /// from a new candidate, which it times, but not from a changed
+    /// current kernel.  So the WGSL of each current kernel stays the same
+    /// byte for byte (M4 of `plans/active/gpu-speed.md`).
+    #[test]
+    fn current_kernels_keep_their_wgsl() {
+        let all: Vec<(String, String)> = generated_sources()
+            .chain(SHADER_FILES.map(|(name, src)| (name.to_string(), src.to_string())))
+            .collect();
+        let mut problems = Vec::new();
+        for (name, src) in &all {
+            let hash = fnv1a(FNV_OFFSET, src.as_bytes());
+            match PINNED_WGSL.iter().find(|(pinned, _)| pinned == name) {
+                Some((_, want)) if *want != hash => {
+                    problems.push(format!("{name}: hash {hash:#018x}, pinned {want:#018x}"))
+                }
+                Some(_) => {}
+                None if !NEW_KERNELS.contains(&name.as_str()) => problems.push(format!(
+                    "{name}: hash {hash:#018x}, not pinned and not in NEW_KERNELS"
+                )),
+                None => {}
+            }
+        }
+        let names: Vec<&str> = all.iter().map(|(name, _)| name.as_str()).collect();
+        for name in PINNED_WGSL.map(|(name, _)| name).iter().chain(&NEW_KERNELS) {
+            if !names.contains(name) {
+                problems.push(format!("{name}: no such source"));
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
     }
 
     /// Every shader the GPU compiles fits WebGPU's default limits (GPU-1):
