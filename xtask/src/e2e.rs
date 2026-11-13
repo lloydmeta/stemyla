@@ -2459,14 +2459,30 @@ fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf:
     Ok((p, result))
 }
 
-/// The folders of the pages of a same-session comparison, in the order of
-/// `Side::index`: the folder at `side.index()` is `base` for the base,
-/// and `head` (`--dist`) for the head.  `perf_compare` makes its sites in
-/// this order.
-fn compare_dists<'a>(base: &'a Path, head: &'a Path) -> [&'a Path; 2] {
-    let mut dists = [base; 2];
-    dists[perf::Side::Head.index()] = head;
-    dists
+/// The sites of a same-session comparison: one for the base page in
+/// `--base-dist`, one for the head page in `--dist`.
+struct CompareSites<T> {
+    base: T,
+    head: T,
+}
+
+impl<T> CompareSites<T> {
+    /// Starts the site of each side of `o` with `start`: the base with
+    /// `--base-dist`, then the head with `--dist`.
+    fn start(o: &Opts, mut start: impl FnMut(&Path) -> Result<T>) -> Result<Self> {
+        let base_dist = o.base_dist.as_deref().context("no --base-dist")?;
+        let base = start(base_dist)?;
+        let head = start(&o.dist)?;
+        Ok(Self { base, head })
+    }
+
+    /// The site of `side`.
+    fn of(&self, side: perf::Side) -> &T {
+        match side {
+            perf::Side::Base => &self.base,
+            perf::Side::Head => &self.head,
+        }
+    }
 }
 
 /// `e2e perf --base-dist <dir>`: the same-session comparison of the base
@@ -2481,16 +2497,13 @@ fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
     if !base_dist.join("index.html").is_file() {
         bail!("perf: {} has no index.html", base_dist.display());
     }
-    let sites = compare_dists(base_dist, &o.dist)
-        .into_iter()
-        .map(|dist| PerfSite::start(o, dist))
-        .collect::<Result<Vec<_>>>()?;
+    let sites = CompareSites::start(o, |dist| PerfSite::start(o, dist))?;
     let browser = perf::browser_name(o.browser);
     perf::run_comparison(
         browser,
         o.runs,
         |side, _n, name| {
-            let site = &sites[side.index()];
+            let site = sites.of(side);
             let (p, result) = perf_run(o, site, name).map_err(|e| format!("run {name}: {e:#}"))?;
             p.finish().map_err(|e| format!("run {name}: {e:#}"))?;
             result.ok_or_else(|| format!("run {name} gave no result"))
@@ -3578,15 +3591,31 @@ mod tests {
         assert_eq!(page_errors(&log), log[2..]);
     }
 
-    /// Asserts that `compare_dists` puts the base folder at
-    /// `Side::Base.index()` and the `--dist` folder at
-    /// `Side::Head.index()`.
+    /// Asserts that `CompareSites::start`, with the options of `perf
+    /// --dist /tmp/head/dist --base-dist /tmp/base/dist` and a start that
+    /// gives each folder it is given:
+    /// * starts the base folder, then the head folder;
+    /// * gives the base folder's site for `Side::Base`, and the head
+    ///   folder's site for `Side::Head`.
     #[test]
     fn each_side_of_a_comparison_runs_its_own_page() {
-        let (base, head) = (Path::new("/tmp/base/dist"), Path::new("/tmp/head/dist"));
-        let dists = compare_dists(base, head);
-        assert_eq!(dists[perf::Side::Base.index()], base);
-        assert_eq!(dists[perf::Side::Head.index()], head);
+        let o = Opts::parse(&args(
+            "perf --dist /tmp/head/dist --base-dist /tmp/base/dist",
+        ))
+        .expect("options");
+        let mut started = Vec::new();
+        let sites = CompareSites::start(&o, |dist| {
+            started.push(dist.to_path_buf());
+            Ok(dist.to_path_buf())
+        })
+        .expect("sites");
+        let (base, head) = (
+            PathBuf::from("/tmp/base/dist"),
+            PathBuf::from("/tmp/head/dist"),
+        );
+        assert_eq!(started, [base.clone(), head.clone()]);
+        assert_eq!(*sites.of(perf::Side::Base), base);
+        assert_eq!(*sites.of(perf::Side::Head), head);
     }
 
     /// Asserts that `selftest_query`:
@@ -3638,6 +3667,10 @@ mod tests {
         assert_eq!(
             selftest_query(Some("selftest=stages&step_limit")),
             "selftest=stages&step_limit&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("selftest=stages&step_limit=abc")),
+            "selftest=stages&step_limit=abc&step_limit=600"
         );
         assert_eq!(
             selftest_query(Some("selftest=stages&step_limit=")),
