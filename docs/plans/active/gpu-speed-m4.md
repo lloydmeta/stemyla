@@ -299,7 +299,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Step 9 (2026-11-13): the same-session comparison of `v64k8`: no change in Chrome, which did not choose it, and a gain in Safari, which chose it and has its in-page gain of Step 7.  `v64k8` stays.
 * [x] Step 10 (2026-11-13): the cost of each forced flip.  Each cost plus the drift (5.7 %) is under the tolerance (10 %): the largest real one is Safari's flip to split attention, 3.4 % (9.1 % with the drift).  The tolerance stays (Decision log).
 * [x] Step 11 (2026-11-13): the baselines.  Safari's went from 7.40 s to 7.38 s (bound 8.14 s to 8.12 s), from 5 runs at `a238db5`; Chrome's does not change, since Chrome did not choose `v64k8`.
-* [ ] Step 12: the worker headroom.
+* [x] Step 12 (2026-11-13): the worker headroom.  `memory-budget` passed 3 times in each browser; each growth is 57 MB, as at M1, and `WORKER_HEADROOM_MB` stays -17 MB.
 * [ ] Step 13: the checks before review round 1.
 
 ## Surprises and discoveries
@@ -394,6 +394,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   Calibration's split time is too low in Safari, by about the same amount at the base and the head.  At the base, it gave fused / split 0.97 (M2: 0.975 to 0.992), and a forced split cost 9.5 % (M2 Step 5.3), about 0.70 s for each chunk.  At the head, it gives fused / split 1.10, and split costs 3.4 %, about 0.25 s for each chunk.  Both put calibration's split about 0.5 s for each chunk below the separation's.  The cause is not known.
 
 * 2026-11-13, Step 11: Safari's baseline from 5 runs of `e2e perf --runs 5 --update-baselines` at `a238db5` (Safari 27.2 at the start and the end; log `m4/s11-safari.stdout`).  The chunk lower quartiles: 7.44 s (`v64k8,v64`, split), 7.38 s (`v64k8,v64k8`, split), 7.47 s (`v64k8,v64`, split), 7.22 s and 7.22 s (`v64k8,v64k8`, fused).  The baseline is their median, 7.38 s, with a tolerance of 10 %: a bound of 8.12 s, against 7.40 s and 8.14 s before.  So it went down a little, with no `--raise`.  Calibration chose split in 3 of the 5 runs.  Chrome's baseline does not change: its calibration did not choose `v64k8` (Step 9).
+
+* 2026-11-13, Step 12: `memory-budget` at `29d8567`, 3 runs in Chrome 157.0.8103.51 and 3 in Safari 27.2 (logs `m4/s12.txt`, `m4/runs/s12-{chrome,safari}-{1,2,3}.stdout`).  Each run passed its checks.  The worker grew by 57 MB in each of the 12 separations (the 1-minute and the 4-minute song of each run), as at M1 (57 MB, noise 1 MB).  So check 3's margin is 6.16 MB in each: the budget is 63.16 MB (the peak 80.16 MB plus -17 MB).  The tab total was 799 MB in each Chrome separation, and 758 MB in 5 Safari separations and 801 MB in one, at most 943 MB.  `git log 156324a..HEAD -- roformer/` is empty, so `roformer::separate::working_set` has no change since M1: the peak is still 80.16 MB, and the smallest lost-cut rise of cut 3 is still 9.44 MB.  So each growth is M1's, the margin is in the band of the doc, and `WORKER_HEADROOM_MB` stays -17 MB.
 
 
 ## Decision log
