@@ -117,8 +117,8 @@ const ONE_MIB: f64 = 1_048_576.0;
 pub(super) const WASM_BOUND_BYTES: f64 = 3.0 * ONE_MIB;
 /// The limit of the `e2e save` step in CI's `browser-tests` job
 /// (`timeout-minutes`), in seconds.  It is the longest that every wait of a
-/// run can take (finding 3-1 of review round 3 of M8).  So a run that
-/// waits in vain still ends on a check of its own.  A step that CI stops
+/// run can take (finding 3-1 of review round 3 of M8).  On CI, the step's
+/// clock starts first, so the step limit ends such a run (TD-100).  A step that CI stops
 /// writes no `save.log`, but each note of the run also goes to the step's
 /// output.  Since review round speed 4 of M8, a run takes about 3 minutes
 /// on the maintainer's Mac (174 to 176 s), in Chrome and with

@@ -847,6 +847,7 @@ const GUARD_PASSES: &[&str] = &[
     "mdfind -onlyin /Users/lloyd/Documents/rustt/stemyla x",
     "mdfind -onlyin . x",
     "find \"/Volumes/Macintosh HD/Users/lloyd/Documents\" -name x",
+    "find \"/System/Volumes/Data/Volumes/Macintosh HD/Users/lloyd/Documents\" -name x",
     "",
 ];
 
