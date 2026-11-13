@@ -289,6 +289,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Step 3 (2026-11-13): the WGSL of each current kernel, pinned by `current_kernels_keep_their_wgsl` (12 sources; `NEW_KERNELS` empty).  `fnv1a` and `FNV_OFFSET` serve the test and `kernels_id`, whose value stays `0xd4f493a491195bc8` (printed before and after).  With one changed byte in the first comment of `matmul_vec4.wgsl`, the test failed on its assert: `v64: hash 0xb6bd57ba6e7f0898, pinned 0x2bf06de948042584` and `v64-f16: hash 0xe871347a10b57f98, pinned 0xbb9577526ab450c6`.  Without the byte, `cargo test -p roformer-gpu --lib` passed (51 tests).
 * [x] Step 4 (2026-11-13): the `wg` controls, on the scratch branch `scratch/m4-controls` (removed), patch in `m4/controls.patch`.  One set, `runs/s4-{safari,chrome}-{1,2}.log`.  The quirk entry gives the figures.
 * [ ] Step 5: the chunk line in 2 decimals, the same-session comparison, and its A/A sessions.
+  * [x] 5.1 (2026-11-13): the worker logs each chunk time with 2 decimals.  The test `chunk_times_have_two_decimals` failed first on its assert (`"chunk {done}/{total}: {:.2} s; {}", in worker/src/web.rs`), then passed with `cargo test -p xtask --lib` (779 tests).
 * [ ] Step 6: the candidates.
 * [ ] Step 7: the gain rule, and the candidates that land.
 * [ ] Step 8: the self-tests.
@@ -324,6 +325,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-13, agent (team leader), plan review round 1: the `wg` controls run on a scratch branch, do not land, and do not gate `v64k8`.  Why: they only predict BK 8's gain, and Step 7's own ratios decide.  The parent asks for them first, and their figures go into the quirk entry.
 * 2026-11-13, agent (team leader), plan review rounds 1 and 2: the pin of Step 3 covers each generated source and each shader file, not only the kernels that calibration chooses, and each candidate that lands.  Why: calibration protects none of them once they are current, and M5 and M6 use the pin.
 * 2026-11-13, agent (team leader), plan review round 2: a candidate is committed when it has an in-page gain (Step 7), and reverted when Step 9 finds a loss, twice undecided, or a browser that chose it with no gain.  Why: Step 9's base is the commit before the candidate.
+
+* 2026-11-13, agent (implementer), Step 5.1: the chunk line keeps PROTO-1 with no change of `stem-protocol`.  Why: the line is the text of a `Reply::Log` message, whose encoder and decoder do not change.  The one writer of the text is `worker/src/web.rs`.  The one reader is `chunk_done` and `chunk_times` in `xtask/src/e2e.rs` and `xtask/src/e2e/perf.rs`.  The test `chunk_times_have_two_decimals` reads the writer's format in `worker/src/web.rs`, and parses a line of 2 decimals in the same commit.  `xtask` does not take `stem-protocol`, so a shared format function there would add a dependency for one log line.
 
 ## Outcomes and retrospective
 

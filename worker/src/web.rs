@@ -1479,7 +1479,7 @@ async fn separate_chunks<S: MixSource<Error: Display>>(
         }
         let done = d.chunk_index().min(total) as u32;
         log(&format!(
-            "chunk {done}/{total}: {:.1} s; {}",
+            "chunk {done}/{total}: {:.2} s; {}",
             now_s() - tc,
             net.so_far()
         ));

@@ -776,7 +776,7 @@ mod tests {
         ];
         for (i, secs) in chunks.iter().enumerate() {
             log.push(format!(
-                "{at}chunk {}/{n}: {secs:.1} s; so far 1022 GPU steps, 1.22 TFLOP/s on average (steps after the first of each kind); memory: worker wasm 91 MB",
+                "{at}chunk {}/{n}: {secs:.2} s; so far 1022 GPU steps, 1.22 TFLOP/s on average (steps after the first of each kind); memory: worker wasm 91 MB",
                 i + 1
             ));
         }
@@ -784,6 +784,23 @@ mod tests {
         log.push(format!("{at}6 stems in 52.0 s"));
         log.push(format!("{at}memory: page wasm 33 MB with the stems shown"));
         log
+    }
+
+    /// Asserts:
+    /// * `worker/src/web.rs` writes the chunk line with the format
+    ///   `"chunk {done}/{total}: {:.2} s; {}"`, so each chunk time has 2
+    ///   decimals;
+    /// * `perf_result` reads the chunk times 4.71, 4.69, 4.73 and 4.70 from
+    ///   such lines exactly.
+    #[test]
+    fn chunk_times_have_two_decimals() {
+        let worker = std::fs::read_to_string(crate::workspace_root().join("worker/src/web.rs"))
+            .expect("worker/src/web.rs");
+        let format = r#""chunk {done}/{total}: {:.2} s; {}","#;
+        assert!(worker.contains(format), "{format} in worker/src/web.rs");
+        let chunks = [4.71, 4.69, 4.73, 4.70];
+        let result = result_of(&log_of(&chunks)).expect("a result");
+        assert_eq!(result.chunks, chunks);
     }
 
     fn without(log: &[String], text: &str) -> Vec<String> {
