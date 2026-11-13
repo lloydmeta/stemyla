@@ -29,8 +29,12 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 `e2e perf --base-dist <dir>` compares the page of a base commit with the head page, in one session (M4 of `plans/active/gpu-speed.md`).  M4, M5 and M6 use it to show no loss and a gain of 3 % or more.
 
 * Build the base page in a worktree, with its own target folder: `git worktree add --detach <wt> <base commit>`, then `(cd <wt>/app && CARGO_TARGET_DIR=<wt>/target trunk build --release)`.  Build the head page in `app/dist`.
+* The oldest base is `59da862`.  A page from before it logs the chunk times with 1 decimal, and the comparison refuses its runs.
 * Run `STEMYLA_PERF_WEIGHTS=<model> cargo run -p xtask -- e2e perf --browser <b> --weights <model> --base-dist <wt>/app/dist --runs 4`, in Chrome, then in Safari.  Each browser takes about 15 to 30 minutes.
+* Use `--runs 8` when calibration has a near choice in that browser (two kernels or two attention policies within 10 % of the point where it flips).  With `--runs 4`, a head whose slow choice (+10 %) comes in 40 % of the runs can stop at "no change" after 2 blocks of fast runs, in about 13 % of comparisons.  With `--runs 8`, that is under 2 %.
 * The runs go in blocks of base, head, head, base.  The figure of a run is its chunk lower quartile.  The output gives each run in its order with its kernels, each block with its change `r`, and the verdict.
+* When the runs of each side chose the same kernels, a block whose two runs of a side differ by more than `N` (1.1 %) is spoiled and does not count.  The verdict is the class of 2 blocks or more, with at most one block of another class.  A block is a loss when `r` is over `T` (1 %), and a gain when it is under `-T`.
+* When the runs of a side chose different kernels, a slow choice is part of what the head does, not noise.  Then no block is spoiled, the comparison runs each of its blocks, and the verdict is the class of the mean `r`.  The output gives each kernel choice with its count, under "kernels differ".
 * The verdict is a loss, a gain, no change, or undecided.  "3 % or more" follows a loss or a gain when the mean `|r|` of its blocks is 0.03 or more.  Undecided is not "no loss" and not a gain: run it again in a later session.
 * If the browser version changes during a comparison, the output says so.  Run the comparison again in full.
 * Remove the worktree after the comparison with `git worktree remove`.
@@ -40,7 +44,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 The rule for a new matmul kernel (M4 of `plans/active/gpu-speed.md`, Step 7).  M5 and M6 use it too.
 
 * Build the head page with the candidate.  Run one set of pages, in the order Safari, Chrome, Safari, Chrome: `cargo run -p xtask -- e2e bench --browser <b> --query "bench=v64,<candidate>&bench_rounds=5" --dist app/dist --out <dir>`.  Add the kernel that calibration chooses at the base, if it is not `v64`.
-* For each page, weight format and kind (large, small): `R` is the candidate's calibration total over the reference kernel's.  A calibration total is the sum over calibration's shapes of that kind of `per_chunk x flops / rate`.  `S` is the largest spread of the bench lines that go into `R`.  Give the ratio of each shape too.
+* For each page, weight format and kind (large, small): `R` is the candidate's calibration total over the reference kernel's.  The reference kernel is the kernel that calibration chooses for that kind at the base, in that browser.  A calibration total is the sum over calibration's shapes of that kind of `per_chunk x flops / rate`.  `S` is the largest spread of the bench lines that go into `R`.  Give the ratio of each shape too.
 * A gain on a kind in a browser: `R < 1` and `1 - R > S`, in both pages.  A loss: `R > 1 + S` in both pages.  Else no effect is seen.
 * The candidate lands only with a gain on a kind, with f16 weights, in at least one browser.  Then each browser's same-session comparison must show no loss, and each browser that chose it must have a gain for it.
 

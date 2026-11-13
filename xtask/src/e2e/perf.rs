@@ -112,6 +112,10 @@ pub(super) struct PerfResult {
     pub tflops: f64,
     /// The GPU time by group, for a run with `profile=1` only.
     pub groups: Option<Groups>,
+    /// Whether each chunk time of the log has 2 decimals or more.  A page
+    /// from before `59da862` logs them with 1 decimal.
+    #[serde(default)]
+    pub two_decimals: bool,
 }
 
 /// The browser, the adapter text and the host's chip: one baseline each.
@@ -191,10 +195,23 @@ fn lower_quartile(values: &[f64]) -> f64 {
     sorted[(sorted.len() - 1) / 4]
 }
 
+/// The number of decimals of the number after `key` in `line`.
+fn decimals_after(line: &str, key: &str) -> usize {
+    let Some(at) = line.find(key) else { return 0 };
+    let rest = &line[at + key.len()..];
+    let number = &rest[..rest
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(rest.len())];
+    number
+        .split_once('.')
+        .map_or(0, |(_, decimals)| decimals.len())
+}
+
 /// The time of each chunk, chunk 1 first, from the `chunk k/N: X s`
-/// lines.  Each chunk of 1 to N must have one line.
-fn chunk_times(log: &[String]) -> Result<Vec<f64>, String> {
-    let mut found: Vec<(u32, u32, f64)> = Vec::new();
+/// lines, and whether each of them has 2 decimals or more.  Each chunk of
+/// 1 to N must have one line.
+fn chunk_times(log: &[String]) -> Result<(Vec<f64>, bool), String> {
+    let mut found: Vec<(u32, u32, f64, usize)> = Vec::new();
     for line in log {
         let Some(k) = chunk_done(line) else { continue };
         let at = &line[line.find("chunk ").unwrap_or(0)..];
@@ -207,22 +224,25 @@ fn chunk_times(log: &[String]) -> Result<Vec<f64>, String> {
         let Ok(total) = total.parse::<u32>() else {
             continue;
         };
-        let Some(secs) = number_after(at, &format!("chunk {k}/{total}: ")) else {
+        let key = format!("chunk {k}/{total}: ");
+        let Some(secs) = number_after(at, &key) else {
             continue;
         };
-        found.push((k, total, secs));
+        found.push((k, total, secs, decimals_after(at, &key)));
     }
     let total = found.last().map_or(0, |f| f.1);
-    let times: Vec<f64> = (1..=total)
-        .filter_map(|k| found.iter().find(|f| f.0 == k && f.1 == total).map(|f| f.2))
+    let lines: Vec<&(u32, u32, f64, usize)> = (1..=total)
+        .filter_map(|k| found.iter().find(|f| f.0 == k && f.1 == total))
         .collect();
+    let times: Vec<f64> = lines.iter().map(|f| f.2).collect();
+    let two_decimals = lines.iter().all(|f| f.3 >= 2);
     if total < 2 || times.len() != total as usize {
         return Err(format!(
             "the chunk lines: {} of {total} chunks found, and a median needs chunks 1 to N with N of 2 or more",
             times.len()
         ));
     }
-    Ok(times)
+    Ok((times, two_decimals))
 }
 
 /// The result of one run, from the page's `log`.  `frames` and `bands` are
@@ -252,7 +272,7 @@ pub(super) fn perf_result(
         .and_then(|(_, w)| w.split_once(" weights"))
         .map(|(w, _)| w)
         .ok_or(missing("kernels: with a weight format"))?;
-    let chunks = chunk_times(log)?;
+    let (chunks, two_decimals) = chunk_times(log)?;
     let separation = after_last(log, "separator: separation: ").ok_or(missing("separation:"))?;
     let tflops = separation
         .split(" TFLOP/s")
@@ -279,6 +299,7 @@ pub(super) fn perf_result(
         whole_secs,
         tflops,
         groups: profile_groups(log, frames, bands),
+        two_decimals,
     })
 }
 
@@ -774,6 +795,180 @@ pub(super) fn compared(blocks: &[Block], max_blocks: usize) -> Option<Compared> 
         None if blocks.len() < max_blocks => None,
         None => Some(Compared::Undecided),
     }
+}
+
+/// The verdict when the runs of a side chose different kernels: the class
+/// of the mean `r` of all `blocks`, none spoiled, and whether its size is
+/// [`CLEAR_CHANGE`] or more.
+pub(super) fn mean_verdict(blocks: &[Block]) -> Compared {
+    let mean = blocks.iter().map(Block::change).sum::<f64>() / blocks.len().max(1) as f64;
+    let class = if mean > CHANGE_T + EPSILON {
+        Class::Loss
+    } else if mean < -CHANGE_T - EPSILON {
+        Class::Gain
+    } else {
+        Class::NoChange
+    };
+    Compared::Decided(class, mean.abs() >= CLEAR_CHANGE - EPSILON)
+}
+
+/// The verdict from `blocks`, or `None` when the comparison runs one more
+/// block.  `mixed`: the runs of a side chose different kernels somewhere
+/// in the comparison.  Then a slow choice is part of what the head does,
+/// not noise: the comparison runs `max_blocks` blocks and takes
+/// [`mean_verdict`].  Else [`compared`].
+pub(super) fn decided(blocks: &[Block], mixed: bool, max_blocks: usize) -> Option<Compared> {
+    match mixed {
+        true if blocks.len() < max_blocks => None,
+        true => Some(mean_verdict(blocks)),
+        false => compared(blocks, max_blocks),
+    }
+}
+
+/// The stem of the files of run `n` of `side`:
+/// `perf-<browser>-<base or head>-<n>`.
+pub(super) fn compare_run_name(browser: &str, side: Side, n: usize) -> String {
+    format!("perf-{browser}-{}-{n}", side.name())
+}
+
+/// What a same-session comparison found.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct Comparison {
+    pub blocks: Vec<Block>,
+    pub mixed: bool,
+    pub verdict: Compared,
+}
+
+/// The same-session comparison of `runs` runs of each side, in `browser`.
+/// `run(side, n, name)` makes run `n` of `side`, whose files are `name`
+/// ([`compare_run_name`]), and gives its result.  `say` takes each line
+/// of the output: each run in its order with its kernels, each block,
+/// each kernel choice with its count when the kernels differ, a line when
+/// the browser version changed, and the verdict.  The comparison runs
+/// `runs / 2` blocks of [`BLOCK_ORDER`], then one more block at a time
+/// until [`decided`] gives a verdict, up to the larger of `runs / 2` and
+/// [`MAX_BLOCKS`].  It fails on a failed run, and on a run whose chunk
+/// times have fewer than 2 decimals.
+pub(super) fn run_comparison(
+    browser: &str,
+    runs: usize,
+    mut run: impl FnMut(Side, usize, &str) -> Result<PerfResult, String>,
+    mut say: impl FnMut(String),
+) -> Result<Comparison, String> {
+    let first = runs / 2;
+    let max_blocks = first.max(MAX_BLOCKS);
+    let mut counts = [0usize; 2];
+    let mut kernels: [Vec<String>; 2] = [Vec::new(), Vec::new()];
+    let mut versions: Vec<String> = Vec::new();
+    let mut blocks = Vec::new();
+    let mut order = 0;
+    let differ = |k: &[String]| k.iter().any(|x| *x != k[0]);
+    let (verdict, mixed) = loop {
+        let mut figures = [0.0; 4];
+        for (at, side) in BLOCK_ORDER.into_iter().enumerate() {
+            let s = usize::from(side == Side::Head);
+            counts[s] += 1;
+            order += 1;
+            let name = compare_run_name(browser, side, counts[s]);
+            let result = run(side, counts[s], &name)?;
+            if !result.two_decimals {
+                return Err(format!(
+                    "run {name}: its chunk times have fewer than 2 decimals, so its page is from before 59da862, which logs them with 2; build the base at 59da862 or later"
+                ));
+            }
+            say(format!(
+                "perf: compare run {order} (block {}, {name}): chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, kernels {}",
+                blocks.len() + 1,
+                result.chunk_lower_quartile,
+                result.chunk_median,
+                result.whole_secs,
+                result.kernels
+            ));
+            if !versions.contains(&result.version) {
+                versions.push(result.version.clone());
+            }
+            kernels[s].push(result.kernels);
+            figures[at] = result.chunk_lower_quartile;
+        }
+        let block = Block::of(figures);
+        blocks.push(block);
+        let in_block = |k: &[String]| differ(&k[k.len() - 2..]);
+        let note = if in_block(&kernels[0]) || in_block(&kernels[1]) {
+            ", kernels differ"
+        } else if block.spoiled() {
+            ", spoiled"
+        } else {
+            ""
+        };
+        say(format!(
+            "perf: compare block {}: r {:+.2} %, runs of a side apart by up to {:.2} %, {}{note}",
+            blocks.len(),
+            100.0 * block.change(),
+            100.0 * block.apart(),
+            block.class().name(),
+        ));
+        let mixed = differ(&kernels[0]) || differ(&kernels[1]);
+        if blocks.len() < first {
+            continue;
+        }
+        if let Some(verdict) = decided(&blocks, mixed, max_blocks) {
+            break (verdict, mixed);
+        }
+    };
+    if versions.len() > 1 {
+        say(format!(
+            "perf: compare: the browser version changed during the comparison ({}): run it again",
+            versions.join(", ")
+        ));
+    }
+    if mixed {
+        for (side, runs) in [Side::Base, Side::Head].into_iter().zip(&kernels) {
+            let mut choices: Vec<(&String, usize)> = Vec::new();
+            for k in runs {
+                match choices.iter_mut().find(|(c, _)| *c == k) {
+                    Some((_, n)) => *n += 1,
+                    None => choices.push((k, 1)),
+                }
+            }
+            let text: Vec<String> = choices.iter().map(|(k, n)| format!("{k} x{n}")).collect();
+            say(format!(
+                "perf: compare: kernels differ, {}: {}",
+                side.name(),
+                text.join("; ")
+            ));
+        }
+    }
+    let rule = if mixed {
+        format!(
+            "the mean r of {} blocks, since the kernels differ",
+            blocks.len()
+        )
+    } else {
+        format!("{} blocks", blocks.len())
+    };
+    say(match verdict {
+        Compared::Decided(class, clear) => format!(
+            "perf: compare verdict: {}{} (T {:.1} %, N {:.1} %, {rule})",
+            class.name(),
+            if clear && class != Class::NoChange {
+                ", 3 % or more"
+            } else {
+                ""
+            },
+            100.0 * CHANGE_T,
+            100.0 * SPOIL_N,
+        ),
+        Compared::Undecided => format!(
+            "perf: compare verdict: undecided (T {:.1} %, N {:.1} %, {rule}): run it again in a later session",
+            100.0 * CHANGE_T,
+            100.0 * SPOIL_N,
+        ),
+    });
+    Ok(Comparison {
+        blocks,
+        mixed,
+        verdict,
+    })
 }
 
 /// The reason to refuse a same-session comparison (`--base-dist`) before
@@ -1638,6 +1833,247 @@ mod tests {
         let even = [loss, none, loss, none];
         assert_eq!(compared(&even, MAX_BLOCKS), Some(Compared::Undecided));
         assert_eq!(compared(&even, 6), None);
+    }
+
+    /// A result of a comparison's run: its chunk lower quartile, kernels
+    /// and browser version, with 2 decimals.
+    fn compare_result(chunk_lower_quartile: f64, kernels: &str, version: &str) -> PerfResult {
+        PerfResult {
+            chunk_lower_quartile,
+            kernels: kernels.into(),
+            version: version.into(),
+            two_decimals: true,
+            ..PerfResult::default()
+        }
+    }
+
+    /// The runs, the lines and the comparison of `run_comparison` in
+    /// Chrome with `runs`, and a fake run `make(side, n)`.
+    fn comparison_with(
+        runs: usize,
+        mut make: impl FnMut(Side, usize) -> PerfResult,
+    ) -> (Vec<String>, Vec<String>, Result<Comparison, String>) {
+        let mut names = Vec::new();
+        let mut lines = Vec::new();
+        let result = run_comparison(
+            "chrome",
+            runs,
+            |side, n, name| {
+                names.push(name.to_string());
+                Ok(make(side, n))
+            },
+            |line| lines.push(line),
+        );
+        (names, lines, result)
+    }
+
+    /// Asserts, with a fake head 3.5 % slower than a base of 5.0 s, and
+    /// the same kernels on each run:
+    /// * with `--runs` 4, 6, 8 and 10: the verdict is a loss, "3 % or
+    ///   more", from `--runs` / 2 blocks, and the verdict line says
+    ///   "loss, 3 % or more";
+    /// * each block runs base, head, head, base, and the counters of each
+    ///   side go 1, 2, 3 and so on;
+    /// * with `--runs` 4, the files are `perf-chrome-base-1`,
+    ///   `perf-chrome-head-1`, `perf-chrome-head-2`, `perf-chrome-base-2`,
+    ///   and the same with 3 and 4;
+    /// * no line says that the browser version changed;
+    /// * a fake head 3.5 % faster gives a gain, so a swap of the sides
+    ///   fails this test.
+    #[test]
+    fn a_comparison_runs_its_blocks_in_order() {
+        let slower = |side: Side, _n: usize| {
+            let lq = if side == Side::Head { 5.175 } else { 5.0 };
+            compare_result(lq, "matmul v64,v64, attention freq", "157.0")
+        };
+        for runs in [4, 6, 8, 10] {
+            let (names, lines, result) = comparison_with(runs, slower);
+            let c = result.expect("a comparison");
+            assert_eq!(c.verdict, Compared::Decided(Class::Loss, true), "{runs}");
+            assert_eq!(c.blocks.len(), runs / 2, "{runs}");
+            assert_eq!(names.len(), 2 * runs, "{runs}");
+            let mut counts = [0, 0];
+            for (i, name) in names.iter().enumerate() {
+                let side = BLOCK_ORDER[i % 4];
+                let s = usize::from(side == Side::Head);
+                counts[s] += 1;
+                assert_eq!(*name, compare_run_name("chrome", side, counts[s]), "{runs}");
+            }
+            let verdict = lines.last().cloned().unwrap_or_default();
+            assert!(verdict.contains("verdict: loss, 3 % or more"), "{verdict}");
+            assert!(
+                !lines.iter().any(|l| l.contains("version changed")),
+                "{lines:?}"
+            );
+        }
+        let (names, _, _) = comparison_with(4, slower);
+        assert_eq!(
+            names,
+            [
+                "perf-chrome-base-1",
+                "perf-chrome-head-1",
+                "perf-chrome-head-2",
+                "perf-chrome-base-2",
+                "perf-chrome-base-3",
+                "perf-chrome-head-3",
+                "perf-chrome-head-4",
+                "perf-chrome-base-4",
+            ]
+        );
+        let faster = |side: Side, _n: usize| {
+            let lq = if side == Side::Head { 4.825 } else { 5.0 };
+            compare_result(lq, "matmul v64,v64, attention freq", "157.0")
+        };
+        let (_, lines, result) = comparison_with(4, faster);
+        assert_eq!(
+            result.map(|c| c.verdict),
+            Ok(Compared::Decided(Class::Gain, true))
+        );
+        let verdict = lines.last().cloned().unwrap_or_default();
+        assert!(verdict.contains("verdict: gain, 3 % or more"), "{verdict}");
+    }
+
+    /// Asserts that a comparison prints a line that the browser version
+    /// changed when run 5 has another version, and no such line when each
+    /// run has the same version.
+    #[test]
+    fn a_comparison_says_when_the_browser_version_changed() {
+        let mut order = 0;
+        let (_, lines, result) = comparison_with(4, |_, _| {
+            order += 1;
+            let version = if order >= 5 { "158.0" } else { "157.0" };
+            compare_result(5.0, "matmul v64,v64, attention freq", version)
+        });
+        assert!(result.is_ok(), "{result:?}");
+        let changed: Vec<&String> = lines
+            .iter()
+            .filter(|l| l.contains("browser version changed"))
+            .collect();
+        assert_eq!(changed.len(), 1, "{lines:?}");
+        assert!(changed[0].contains("157.0, 158.0"), "{changed:?}");
+    }
+
+    /// Asserts that a run whose chunk times have 1 decimal fails the
+    /// comparison, with a reason that names the run and `59da862`.
+    #[test]
+    fn a_comparison_refuses_chunk_times_of_one_decimal() {
+        let (_, _, result) = comparison_with(4, |side, n| PerfResult {
+            two_decimals: !(side == Side::Base && n == 1),
+            ..compare_result(5.0, "matmul v64,v64, attention freq", "157.0")
+        });
+        let reason = result.expect_err("a refusal");
+        assert!(reason.contains("perf-chrome-base-1"), "{reason}");
+        assert!(reason.contains("59da862"), "{reason}");
+    }
+
+    /// Asserts that `perf_result` gives `two_decimals` true for chunk lines
+    /// of 2 decimals, and false when one chunk line has 1 decimal.
+    #[test]
+    fn a_result_records_whether_its_chunk_times_have_two_decimals() {
+        let two = result_of(&log_of(&[4.71, 4.69, 4.73, 4.70])).expect("a result");
+        assert!(two.two_decimals);
+        let one: Vec<String> = log_of(&[4.71, 4.69, 4.73, 4.70])
+            .into_iter()
+            .map(|l| l.replace("chunk 3/4: 4.73 s", "chunk 3/4: 4.7 s"))
+            .collect();
+        assert!(!result_of(&one).expect("a result").two_decimals);
+    }
+
+    /// The head of a comparison whose calibration has two modes: run `n`
+    /// of the head is slow (+10 %, other kernels) when bit `n - 1` of
+    /// `slow` is set.  The base is 5.0 s on one choice.
+    fn bimodal(slow: u32) -> impl FnMut(Side, usize) -> PerfResult {
+        move |side, n| match side {
+            Side::Base => compare_result(5.0, "matmul v64,v64, attention fused", "27.2"),
+            Side::Head if slow & (1 << (n - 1)) != 0 => {
+                compare_result(5.5, "matmul v64k8,v64, attention freq", "27.2")
+            }
+            Side::Head => compare_result(5.0, "matmul v64k8,v64k8, attention fused", "27.2"),
+        }
+    }
+
+    /// Asserts, for a head whose runs choose a fast (+0 %) or a slow
+    /// (+10 %) set of kernels:
+    /// * one fast and one slow head run in block 1, then fast runs, with
+    ///   `--runs` 4, run 4 blocks, mark the comparison `mixed`, give no
+    ///   "no change", and print each kernel choice with its count under
+    ///   "kernels differ";
+    /// * over each of the 256 sequences of 8 head runs (4 blocks, `--runs`
+    ///   8), each run slow with a probability of 0.4, a mean loss of 4 %,
+    ///   the chance of "no change" is under 5 %.
+    #[test]
+    fn a_head_with_two_kernel_choices_is_judged_on_the_mean() {
+        let (_, lines, result) = comparison_with(4, bimodal(0b10));
+        let c = result.expect("a comparison");
+        assert!(c.mixed);
+        assert_eq!(c.blocks.len(), MAX_BLOCKS);
+        assert!(
+            !matches!(c.verdict, Compared::Decided(Class::NoChange, _)),
+            "{:?}",
+            c.verdict
+        );
+        let differ = lines
+            .iter()
+            .find(|l| l.contains("kernels differ, head"))
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            differ.contains("matmul v64k8,v64, attention freq x1")
+                && differ.contains("matmul v64k8,v64k8, attention fused x7"),
+            "{lines:?}"
+        );
+        let mut no_change = 0.0;
+        for slow in 0..256_u32 {
+            let k = f64::from(slow.count_ones());
+            let chance = 0.4_f64.powf(k) * 0.6_f64.powf(8.0 - k);
+            let (_, _, result) = comparison_with(8, bimodal(slow));
+            if matches!(
+                result.map(|c| c.verdict),
+                Ok(Compared::Decided(Class::NoChange, _))
+            ) {
+                no_change += chance;
+            }
+        }
+        assert!(no_change < 0.05, "{no_change}");
+    }
+
+    /// Asserts the edges of the rule:
+    /// * `r` of exactly `T` and of exactly `-T` is no change;
+    /// * two runs of a side exactly `N` apart do not spoil a block;
+    /// * a mean `|r|` of exactly 3 % is "3 % or more";
+    /// * with 5 blocks, 3 losses and 2 of no change are undecided;
+    /// * `mean_verdict` of blocks of +0.5 % and +2 % (mean 1.25 %) is a
+    ///   loss, and of +0.5 % and +1 % no change;
+    /// * `CHANGE_T` is 2 % or less, so that a uniform loss of 3 % is a loss
+    ///   with a margin (M4's Step 5).
+    #[test]
+    fn the_rule_holds_at_its_edges() {
+        const { assert!(CHANGE_T <= 0.02 + EPSILON) };
+        let at = |r: f64| Block::of([1.0, 1.0 + r, 1.0 + r, 1.0]);
+        assert_eq!(at(CHANGE_T).class(), Class::NoChange);
+        assert_eq!(at(-CHANGE_T).class(), Class::NoChange);
+        assert_eq!(at(CHANGE_T + 4.0 * EPSILON).class(), Class::Loss);
+        assert_eq!(at(-CHANGE_T - 4.0 * EPSILON).class(), Class::Gain);
+        assert!(!Block::of([1.0, 1.0, 1.0, 1.0 + SPOIL_N]).spoiled());
+        assert!(Block::of([1.0, 1.0, 1.0, 1.0 + SPOIL_N + 4.0 * EPSILON]).spoiled());
+        let clear = at(CLEAR_CHANGE);
+        assert_eq!(
+            compared(&[clear, clear], MAX_BLOCKS),
+            Some(Compared::Decided(Class::Loss, true))
+        );
+        let (loss, none) = (at(2.0 * CHANGE_T), at(0.0));
+        assert_eq!(
+            compared(&[loss, loss, loss, none, none], MAX_BLOCKS),
+            Some(Compared::Undecided)
+        );
+        assert_eq!(
+            mean_verdict(&[at(0.005), at(0.02)]),
+            Compared::Decided(Class::Loss, false)
+        );
+        assert_eq!(
+            mean_verdict(&[at(0.005), at(0.01)]),
+            Compared::Decided(Class::NoChange, false)
+        );
     }
 
     /// Asserts that `compare_refusal` refuses `--gate`,

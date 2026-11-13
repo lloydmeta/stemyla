@@ -544,6 +544,15 @@ This entry concerns no rule.  It concerns the time limit of each browser e2e sce
 * The risk is low.  Each wait of `save` has its own end.  CI discards a hosted runner after the job, with its browser and driver.
 * Fix: give each of the three steps a limit of 65 minutes, above the scenario's.  Then raise the job limits so that they still hold the steps: `browser-tests` to 90 minutes (now 85), and `macos` to 295 (now 285).  Change `the_ci_step_limit_is_the_waits_limit` and `the_ci_job_limit_holds_its_save_steps` in `xtask/src/e2e/save.rs` with them.
 
+### TD-101: Safari's calibration puts the time axis on split attention too often
+
+This entry concerns no rule.  It concerns the speed of a separation in Safari (M4 of `plans/active/gpu-speed.md`).
+
+* On the M2 Pro, with `v64k8`, Safari's calibration times split attention at 3.11 to 3.16 s and fused at 3.42 to 3.51 s for each chunk.  That is at `FUSED_MARGIN` (1.1).
+* So it chooses split in about 6 of 16 calibrations (Steps 9 to 11 of `plans/active/gpu-speed-m4.md`).  Those runs are 3.4 % slower than fused, and about 1 % slower than the base.
+* Calibration times split about 0.5 s for each chunk too low in Safari, before `v64k8` too.  The cause is not known.
+* Fix: M5 of `plans/active/gpu-speed.md` finds the cause, then times split as the separation runs it.
+
 ## Known breaches
 
 ### TD-52: the FLAC encoder writes a wrong minimum block size, and no 24 bits
@@ -668,10 +677,10 @@ M9 of `plans/completed/stream-from-storage.md` adds an f16 variant of each matmu
 
 This entry concerns the time to the first separation (MEM-4 does not apply).
 
-`Gpu::check_kernels` compiles and runs the f16 variant of all four tiles, also when a stored kernel choice names only two of them.  The net reuses the pipelines that the check compiled: a `OnceCell` for each tile and format in `Gpu`'s kernels, and the worker keeps the checked `Gpu`.  So only the unchosen tiles cost extra.  In Safari on this Mac, the f16 part of the check took 1330 ms on 2026-10-30, against about 43 ms in Chrome, so the unchosen tiles cost up to about 1 s there.  M10 reads the iPhone's time from the line `f16 weights: the start-up check passed (matmul checks: f32 N ms, f16 M ms)`.
+`Gpu::check_kernels` compiles and runs the f16 variant of each tile of `TILES` (five since M4 of `plans/active/gpu-speed.md`), also when a stored kernel choice names only two of them.  The net reuses the pipelines that the check compiled: a `OnceCell` for each tile and format in `Gpu`'s kernels, and the worker keeps the checked `Gpu`.  So only the unchosen tiles cost extra.  In Safari on this Mac, the f16 part of the check took 1330 ms on 2026-10-30, with four tiles, against about 43 ms in Chrome, so the unchosen tiles cost up to about 1 s there.  M10 reads the iPhone's time from the line `f16 weights: the start-up check passed (matmul checks: f32 N ms, f16 M ms)`.
 
 * 2026-10-30: a later run in Safari on the Mac, with a stored choice, logged `matmul checks: f32 47 ms, f16 51 ms`.  So the 1330 ms was a first compile, and Safari keeps the compiled shaders.
-* Fix: check only the tiles of the stored choice.  A first run calibrates, which needs all four tiles anyway.
+* Fix: check only the tiles of the stored choice.  A first run calibrates, which needs each tile anyway.
 
 ### TD-65: no test plants an internal error in an f16 variant
 

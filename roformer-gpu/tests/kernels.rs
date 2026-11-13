@@ -331,8 +331,8 @@ fn output_of(
 /// Asserts, for each kernel of [`CANDIDATES`]:
 /// * it is in `TILES`;
 /// * it runs each product itself, not the fallback;
-/// * it gives `v64`'s output bit for bit, with f32 weights and with f16
-///   weights.
+/// * it gives `v64`'s output bit for bit, with f32 weights, and with f16
+///   weights on an adapter that unpacks f16 (else the f16 half skips).
 ///
 /// The products: the large and small linear products of calibration
 /// (`time qkv`, `time ff down`, `freq ff up`, `time gates`) at their full
@@ -343,11 +343,13 @@ fn output_of(
 /// Why bit for bit: in both kernels each output adds an explicit `fma`
 /// chain in K order, x, y, z, w of each vec4, and no form changes that
 /// order.  Where K is a multiple of 4 but not of the tile's K, a kernel
-/// adds terms of zero, and `fma(0, 0, acc)` is `acc`.  This holds for this
+/// adds terms of zero, and `fma(0, 0, acc)` is `acc`, or `+0` for an `acc`
+/// of `-0`, which `bit_differences` counts as equal.  This holds for this
 /// native test only: Safari compiles with `MTLMathModeRelaxed`.
 #[test]
 fn candidates_match_v64_bit_for_bit() {
-    let Some(g) = f16_gpu() else { return };
+    let Some(g) = gpu() else { return };
+    let f16 = g.has_f16_unpack();
     let index = |name: &str| TILES.iter().position(|t| t.name == name);
     let v64 = index("v64").expect("v64 in TILES");
     let candidates: Vec<usize> = CANDIDATES.iter().filter_map(|name| index(name)).collect();
@@ -445,8 +447,9 @@ fn candidates_match_v64_bit_for_bit() {
             .map(|&h| half::f16::from_bits(h).to_f32())
             .collect();
         let (ab, biasb) = (g.upload("a", &a), g.upload("bias", &bias));
-        let (b32, b16) = (g.upload_weight("b f32", &b), g.upload_f16("b f16", &bits));
-        for weight in [&b32, &b16] {
+        let b32 = g.upload_weight("b f32", &b);
+        let b16 = f16.then(|| g.upload_f16("b f16", &bits));
+        for weight in std::iter::once(&b32).chain(b16.as_ref()) {
             let bufs = (&*ab, weight, c0.as_slice(), &*biasb);
             let want = output_of(&g, v64, spec, bufs, c_len);
             for &t in &candidates {
@@ -477,6 +480,12 @@ fn candidates_match_v64_bit_for_bit() {
                 );
             }
         }
+    }
+    if !f16 {
+        skip(
+            Need::F16,
+            "adapter without SHADER_F16_IN_F32: the f16 half of candidates_match_v64_bit_for_bit",
+        );
     }
 }
 

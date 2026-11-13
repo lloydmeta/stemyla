@@ -491,11 +491,15 @@ pub fn bit_differences(got: &[f32], want: &[f32]) -> BitDifferences {
 /// times.  Calibration chooses it only on a GPU where it measures faster.
 ///
 /// The first entry is the fallback: a GPU on which it fails is not used.
-/// Rows are padded by 32 / `bk` floats (`s64`: 1; `v64`: one vec4, so
-/// neighbouring threads' vec4 reads of the B tile fall in different
-/// banks): when K is the contiguous axis (every nn.Linear operand), 32
-/// consecutive threads store 32 / `bk` rows of `bk` values, and this
-/// padding spreads them over all 32 banks.
+/// The pad of the rows of each tile, in floats, and why:
+/// * `i64` (BK 16): 2, and `i128x64` (BK 8): 4.  That is 32 / `bk`: when K
+///   is the contiguous axis (every nn.Linear operand), 32 consecutive
+///   threads store 32 / `bk` rows of `bk` values, and this pad spreads
+///   them over all 32 banks.
+/// * `s64`: 1, the hand-written kernel's pad; its stores conflict 2-way.
+/// * `v64` (BK 16) and `v64k8` (BK 8): 4, one vec4, so neighbouring
+///   threads' vec4 reads of the B tile fall in different banks
+///   (`bank_conflicts`).
 pub const TILES: [Tile; 5] = [
     Tile {
         name: "i64",
@@ -2579,7 +2583,12 @@ fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
 /// (FNV-1a over [`kernel_sources`]), so a per-GPU choice is redone
 /// whenever they change.
 pub fn kernels_id() -> u64 {
-    kernel_sources()
+    id_of(&kernel_sources())
+}
+
+/// FNV-1a over `sources`, one after the other.
+fn id_of(sources: &[String]) -> u64 {
+    sources
         .iter()
         .fold(FNV_OFFSET, |h, src| fnv1a(h, src.as_bytes()))
 }
@@ -3614,6 +3623,24 @@ mod tests {
     #[should_panic(expected = "occurs 2 times")]
     fn a_substitution_must_match_once() {
         replace_once("b b", "b", "c");
+    }
+
+    /// Asserts:
+    /// * `kernels_id` is the FNV-1a hash (64 bits, offset basis
+    ///   0xcbf29ce484222325, prime 0x100000001b3) of the bytes of
+    ///   `kernel_sources`, one after the other, computed here again;
+    /// * one more byte in one source changes the identifier.
+    #[test]
+    fn kernels_id_is_the_fnv1a_of_the_kernel_sources() {
+        let sources = kernel_sources();
+        let mut want: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in sources.iter().flat_map(|s| s.bytes()) {
+            want = (want ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        }
+        assert_eq!(kernels_id(), want);
+        let mut changed = sources.clone();
+        changed[0].push(' ');
+        assert_ne!(id_of(&changed), kernels_id());
     }
 
     /// Calibration's key covers every kernel it can choose, f16 variants

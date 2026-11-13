@@ -36,7 +36,11 @@
 //!   lag 0 (M8, M3 and M4 of `docs/plans/completed/m4a.md`, `e2e/save.rs`).
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
-//!   (`--weights`, and `xtask roformer-selftest` output).
+//!   (`--weights`, and `xtask roformer-selftest` output).  With no
+//!   `--query`, it tests `mm=s64`.  A `--query` with no `selftest` key
+//!   gets `selftest=stages&step_limit=600&` before it: `--query
+//!   mm=<kernel>` tests that kernel, and `--query selftest=stages` tests
+//!   the kernels that the GPU chooses.
 //! * `separate`: drop a clip and the model, Separate, lanes appear
 //!   (`--weights`).  The clip is kept in browser storage, so it separates
 //!   on the storage path; a fallback to the memory path fails it.  The clip
@@ -102,16 +106,22 @@
 //!   `xtask` for both.  It runs blocks of 4 runs in the order base, head,
 //!   head, base.  `--runs` is the count of each side: even, and 4 or more.
 //!   It starts with `--runs` / 2 blocks, then runs one more block at a
-//!   time, up to 4 blocks, until a verdict.  Each run writes
-//!   `<out>/perf-<browser>-<base or head>-<n>.json`.  The figure of a run
-//!   is its chunk lower quartile.  The change of a block is
-//!   `(H1 + H2) / (B1 + B2) - 1`.  A block whose two runs of a side
-//!   differ by more than `SPOIL_N` is spoiled and does not count.  A
-//!   block is a loss over `CHANGE_T`, a gain under `-CHANGE_T`, else no
-//!   change.  The verdict is the class of 2 blocks or more, with at most
-//!   one block of another class and not a loss and a gain together.  Else
-//!   it is undecided (`perf::compared`).  `--query` applies to both sides.
-//!   It refuses `--gate` and `--update-baselines`.
+//!   time until a verdict, up to 4 blocks, or `--runs` / 2 when that is
+//!   more.  Each run writes `<out>/perf-<browser>-<base or head>-<n>.json`.
+//!   The figure of a run is its chunk lower quartile.  The change of a
+//!   block is `(H1 + H2) / (B1 + B2) - 1`.  A block is a loss over
+//!   `CHANGE_T`, a gain under `-CHANGE_T`, else no change.  When the runs
+//!   of each side chose the same kernels, a block whose two runs of a side
+//!   differ by more than `SPOIL_N` is spoiled and does not count.  The
+//!   verdict is then the class of 2 blocks or more, with at most one block
+//!   of another class and not a loss and a gain together; else it is
+//!   undecided (`perf::compared`).  When the runs of a side chose
+//!   different kernels, it runs each block up to the most, and the verdict
+//!   is the class of the mean change of all blocks (`perf::mean_verdict`).
+//!   It prints each kernel choice with its count, under "kernels differ".
+//!   `--query` applies to both sides.  It refuses `--gate` and
+//!   `--update-baselines`, and a run whose chunk times have 1 decimal: the
+//!   oldest base is `59da862`, the first commit that logs them with 2.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -1455,6 +1465,27 @@ fn drop_model(p: &mut Page, url: &str) -> Result<()> {
     p.drop_files(&[(url, &name, "application/octet-stream")])
 }
 
+/// The query of `selftest`: with no `--query`, the default
+/// (`selftest=stages&step_limit=600&mm=s64`).  A `--query` with no
+/// `selftest` key gets `selftest=stages&step_limit=600&` before it, so
+/// `--query mm=v64k8` tests `v64k8`, and `--query selftest=stages` tests
+/// the kernels that the GPU chooses.  A `--query` with a `selftest` key
+/// stays as it is.
+fn selftest_query(query: Option<&str>) -> String {
+    let Some(query) = query else {
+        return "selftest=stages&step_limit=600&mm=s64".to_string();
+    };
+    let query = query.trim_start_matches('?');
+    let asks = query
+        .split('&')
+        .any(|pair| pair.split('=').next() == Some("selftest"));
+    if asks {
+        query.to_string()
+    } else {
+        format!("selftest=stages&step_limit=600&{query}")
+    }
+}
+
 /// The in-app GPU self-test's verdict, with the model
 /// dropped on the page (the file picker cannot be driven over WebDriver).
 fn selftest(o: &Opts) -> Result<()> {
@@ -1467,7 +1498,7 @@ fn selftest(o: &Opts) -> Result<()> {
     }
     let model = weights_mount(o, &mut mounts)?;
     let base = start_server(&o.dist, mounts, &["console.js"])?;
-    let q = query(o, "selftest=stages&step_limit=600&mm=s64");
+    let q = selftest_query(o.query.as_deref());
     let mut p = Page::open(
         o,
         base,
@@ -2305,7 +2336,7 @@ fn perf(o: &Opts) -> Result<()> {
     let chip = perf::command_text("sysctl", &["-n", "machdep.cpu.brand_string"]);
     let mut results = Vec::new();
     for n in 1..=o.runs {
-        let name = format!("{browser}-{n}");
+        let name = format!("perf-{browser}-{n}");
         let (mut p, result) = perf_run(o, &site, &name)?;
         if let Some(result) = result {
             let key = perf::key_of(&result, &chip);
@@ -2362,8 +2393,8 @@ impl PerfSite {
     }
 }
 
-/// One run of `e2e perf` on the page of `site`, as `perf-<name>`: it
-/// writes `<out>/perf-<name>.json` and prints its line.  It gives the
+/// One run of `e2e perf` on the page of `site`, as `name`: it writes
+/// `<out>/<name>.json` and prints its line.  It gives the
 /// page, which the caller finishes, and the result, or `None` when the
 /// log gives none (a failed check of the page).
 fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf::PerfResult>)> {
@@ -2379,7 +2410,7 @@ fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf:
         ],
         &format!("index.html?{q}"),
     )?;
-    p.scenario = format!("perf-{name}");
+    p.scenario = name.to_string();
     p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     open_song(&mut p, "/test/1/song.wav", "the 1-minute song opens")?;
     load_and_separate(&mut p, o, &site.model, "the 1-minute song separates")?;
@@ -2390,7 +2421,7 @@ fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf:
             None
         }
         Ok(result) => {
-            let file = o.out.join(format!("perf-{name}.json"));
+            let file = o.out.join(format!("{name}.json"));
             std::fs::write(&file, serde_json::to_string_pretty(&result)?)?;
             p.note(&format!(
                 "perf: {browser} {version}, run {name}: chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, {:.2} TFLOP/s, kernels {}, {} weights, adapter {} (fallback adapter {}); {}",
@@ -2417,12 +2448,9 @@ fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf:
 }
 
 /// `e2e perf --base-dist <dir>`: the same-session comparison of the base
-/// page in `<dir>` and the head page in `--dist` (`perf.rs`, [`perf::compared`]).
-/// It runs blocks of B H H B, `--runs` / 2 blocks first, then one more
-/// block at a time until a verdict, up to [`perf::MAX_BLOCKS`].  Each run
-/// writes `<out>/perf-<browser>-<base or head>-<n>.json`.  It prints each
-/// run in its order with its kernels, each block with its change, and the
-/// verdict.  A failed run fails the comparison.
+/// page in `<dir>` and the head page in `--dist`.  [`perf::run_comparison`]
+/// holds the schedule and the verdict; this gives it the runs of each
+/// side's page and prints its lines.
 fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
     if let Some(refusal) = perf::compare_refusal(o.runs, o.gate, o.update_baselines) {
         bail!("perf: {refusal}");
@@ -2432,81 +2460,18 @@ fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
     }
     let sites = [PerfSite::start(o, base_dist)?, PerfSite::start(o, &o.dist)?];
     let browser = perf::browser_name(o.browser);
-    let first = o.runs / 2;
-    let max_blocks = first.max(perf::MAX_BLOCKS);
-    let mut counts = [0usize; 2];
-    let mut versions: Vec<String> = Vec::new();
-    let mut blocks = Vec::new();
-    let mut order = 0;
-    let verdict = loop {
-        let mut figures = [0.0; 4];
-        for (at, side) in perf::BLOCK_ORDER.into_iter().enumerate() {
-            let s = usize::from(side == perf::Side::Head);
-            counts[s] += 1;
-            order += 1;
-            let name = format!("{browser}-{}-{}", side.name(), counts[s]);
-            let (p, result) = perf_run(o, &sites[s], &name)?;
-            p.finish()?;
-            let result = result.with_context(|| format!("perf: run {name} gave no result"))?;
-            println!(
-                "perf: compare run {order} (block {}, {}): chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, kernels {}",
-                blocks.len() + 1,
-                name,
-                result.chunk_lower_quartile,
-                result.chunk_median,
-                result.whole_secs,
-                result.kernels
-            );
-            versions.push(result.version.clone());
-            figures[at] = result.chunk_lower_quartile;
-        }
-        let block = perf::Block::of(figures);
-        blocks.push(block);
-        println!(
-            "perf: compare block {}: r {:+.2} %, runs of a side apart by up to {:.2} %, {}",
-            blocks.len(),
-            100.0 * block.change(),
-            100.0 * block.apart(),
-            if block.spoiled() {
-                "spoiled".to_string()
-            } else {
-                block.class().name().to_string()
-            }
-        );
-        if blocks.len() < first {
-            continue;
-        }
-        if let Some(verdict) = perf::compared(&blocks, max_blocks) {
-            break verdict;
-        }
-    };
-    versions.dedup();
-    if versions.len() > 1 {
-        println!(
-            "perf: compare: the browser version changed during the comparison ({}): run it again",
-            versions.join(", ")
-        );
-    }
-    match verdict {
-        perf::Compared::Decided(class, clear) => println!(
-            "perf: compare verdict: {}{} (T {:.1} %, N {:.1} %, {} blocks)",
-            class.name(),
-            if clear && class != perf::Class::NoChange {
-                ", 3 % or more"
-            } else {
-                ""
-            },
-            100.0 * perf::CHANGE_T,
-            100.0 * perf::SPOIL_N,
-            blocks.len()
-        ),
-        perf::Compared::Undecided => println!(
-            "perf: compare verdict: undecided (T {:.1} %, N {:.1} %, {} blocks): run it again in a later session",
-            100.0 * perf::CHANGE_T,
-            100.0 * perf::SPOIL_N,
-            blocks.len()
-        ),
-    }
+    perf::run_comparison(
+        browser,
+        o.runs,
+        |side, _n, name| {
+            let site = &sites[usize::from(side == perf::Side::Head)];
+            let (p, result) = perf_run(o, site, name).map_err(|e| format!("run {name}: {e:#}"))?;
+            p.finish().map_err(|e| format!("run {name}: {e:#}"))?;
+            result.ok_or_else(|| format!("run {name} gave no result"))
+        },
+        |line| println!("{line}"),
+    )
+    .map_err(|e| anyhow::anyhow!("perf: {e}"))?;
     Ok(())
 }
 
@@ -3566,6 +3531,11 @@ mod tests {
         assert!(Opts::parse(&args("--browser chrome")).is_err());
         assert!(Opts::parse(&args("smoke --play-x")).is_err());
         assert!(Opts::parse(&args("smoke --frobnicate")).is_err());
+        let c = Opts::parse(&args("perf --base-dist /tmp/base --runs 8")).unwrap();
+        assert_eq!(c.base_dist, Some(PathBuf::from("/tmp/base")));
+        assert_eq!(c.runs, 8);
+        assert_eq!(d.base_dist, None);
+        assert!(Opts::parse(&args("perf --base-dist")).is_err());
     }
 
     #[test]
@@ -3580,6 +3550,33 @@ mod tests {
         .map(str::to_string)
         .to_vec();
         assert_eq!(page_errors(&log), log[2..]);
+    }
+
+    /// Asserts that `selftest_query`:
+    /// * gives `selftest=stages&step_limit=600&mm=s64` with no `--query`;
+    /// * puts `selftest=stages&step_limit=600&` before a `--query` with no
+    ///   `selftest` key (`mm=v64k8`, and `?mm=v64k8&weights=f16`);
+    /// * keeps a `--query` with a `selftest` key (`selftest=stages`, and
+    ///   `mm=i64&selftest=full`) as it is.
+    #[test]
+    fn a_selftest_query_always_asks_for_the_self_test() {
+        assert_eq!(
+            selftest_query(None),
+            "selftest=stages&step_limit=600&mm=s64"
+        );
+        assert_eq!(
+            selftest_query(Some("mm=v64k8")),
+            "selftest=stages&step_limit=600&mm=v64k8"
+        );
+        assert_eq!(
+            selftest_query(Some("?mm=v64k8&weights=f16")),
+            "selftest=stages&step_limit=600&mm=v64k8&weights=f16"
+        );
+        assert_eq!(selftest_query(Some("selftest=stages")), "selftest=stages");
+        assert_eq!(
+            selftest_query(Some("mm=i64&selftest=full")),
+            "mm=i64&selftest=full"
+        );
     }
 
     /// Findings 1-29 and 1-72 of review round 1 of M5: a wait ends on its
