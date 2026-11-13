@@ -35,6 +35,15 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 * If the browser version changes during a comparison, the output says so.  Run the comparison again in full.
 * Remove the worktree after the comparison with `git worktree remove`.
 
+## A kernel lands only with a shown gain
+
+The rule for a new matmul kernel (M4 of `plans/active/gpu-speed.md`, Step 7).  M5 and M6 use it too.
+
+* Build the head page with the candidate.  Run one set of pages, in the order Safari, Chrome, Safari, Chrome: `cargo run -p xtask -- e2e bench --browser <b> --query "bench=v64,<candidate>&bench_rounds=5" --dist app/dist --out <dir>`.  Add the kernel that calibration chooses at the base, if it is not `v64`.
+* For each page, weight format and kind (large, small): `R` is the candidate's calibration total over the reference kernel's.  A calibration total is the sum over calibration's shapes of that kind of `per_chunk x flops / rate`.  `S` is the largest spread of the bench lines that go into `R`.  Give the ratio of each shape too.
+* A gain on a kind in a browser: `R < 1` and `1 - R > S`, in both pages.  A loss: `R > 1 + S` in both pages.  Else no effect is seen.
+* The candidate lands only with a gain on a kind, with f16 weights, in at least one browser.  Then each browser's same-session comparison must show no loss, and each browser that chose it must have a gain for it.
+
 ## Known local failures
 
 Check `main` before treating any of these as a regression:

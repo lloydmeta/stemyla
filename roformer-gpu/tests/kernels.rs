@@ -291,6 +291,195 @@ fn matmul_vec4_variants() {
     ));
 }
 
+/// The kernels of M4 (`plans/active/gpu-speed-m4.md`) that must give
+/// `v64`'s output bit for bit.
+const CANDIDATES: [&str; 1] = ["v64k8"];
+
+/// The output of `spec` with kernel `t`, B held in `weight`.
+fn output_of(
+    g: &Gpu,
+    t: usize,
+    spec: &Spec,
+    (a, weight, c0, bias): (&wgpu::Buffer, &roformer_gpu::Weight, &[f32], &wgpu::Buffer),
+    len: usize,
+) -> Vec<f32> {
+    let cb = g.upload("c", c0);
+    let mut mm = MatMul::new(
+        (a, spec.a),
+        (weight, spec.b),
+        (&cb, spec.c),
+        spec.m,
+        spec.n,
+        spec.k,
+    );
+    mm.outer = spec.outer;
+    mm.inner = spec.inner;
+    mm.alpha = spec.alpha;
+    mm.act = spec.act;
+    mm.accumulate = spec.accumulate;
+    mm.bias = spec.bias.map(|(off, bo)| (bias, off, bo));
+    mm.tile = Some(t);
+    let mut r = g.rec();
+    r.matmul(&mm);
+    r.submit();
+    let out = read(g, &cb, len);
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    out
+}
+
+/// Asserts, for each kernel of [`CANDIDATES`]:
+/// * it is in `TILES`;
+/// * it runs each product itself, not the fallback;
+/// * it gives `v64`'s output bit for bit, with f32 weights and with f16
+///   weights.
+///
+/// The products: the large and small linear products of calibration
+/// (`time qkv`, `time ff down`, `freq ff up`, `time gates`) at their full
+/// sizes, and the vec4 products of `matmul_vec4_variants`.  These are K 300
+/// (a ragged K tile of 12 for `v64`) with offsets, bias and GELU; K 4 with
+/// alpha, tanh and accumulate; and a batch with a bias for each batch.
+///
+/// Why bit for bit: in both kernels each output adds an explicit `fma`
+/// chain in K order, x, y, z, w of each vec4, and no form changes that
+/// order.  Where K is a multiple of 4 but not of the tile's K, a kernel
+/// adds terms of zero, and `fma(0, 0, acc)` is `acc`.  This holds for this
+/// native test only: Safari compiles with `MTLMathModeRelaxed`.
+#[test]
+fn candidates_match_v64_bit_for_bit() {
+    let Some(g) = f16_gpu() else { return };
+    let index = |name: &str| TILES.iter().position(|t| t.name == name);
+    let v64 = index("v64").expect("v64 in TILES");
+    let candidates: Vec<usize> = CANDIDATES.iter().filter_map(|name| index(name)).collect();
+    assert_eq!(
+        candidates.len(),
+        CANDIDATES.len(),
+        "the candidates {CANDIDATES:?} in TILES"
+    );
+    let linear = |m, n, k, act| Spec {
+        m,
+        n,
+        k,
+        outer: 1,
+        inner: 1,
+        a: View::rows(0, k),
+        b: View::t(0, k),
+        c: View::rows(0, n),
+        bias: Some((0, 0)),
+        alpha: 1.0,
+        act,
+        accumulate: false,
+    };
+    let (t, f) = (1151, 88 * 62);
+    let mut specs = vec![
+        ("time qkv", linear(t, 1536, 256, Act::None)),
+        ("time ff down", linear(t, 256, 1024, Act::None)),
+        ("freq ff up", linear(f, 1024, 256, Act::Gelu)),
+        ("time gates", linear(t, 8, 256, Act::None)),
+    ];
+    specs.push((
+        "K 300, offsets, bias, gelu",
+        Spec {
+            m: 129,
+            n: 65,
+            k: 300,
+            outer: 1,
+            inner: 1,
+            a: View::rows(8, 300),
+            b: View::t(4, 300),
+            c: View::rows(3, 65),
+            bias: Some((5, 0)),
+            alpha: 1.0,
+            act: Act::Gelu,
+            accumulate: false,
+        },
+    ));
+    specs.push((
+        "K 4, alpha, tanh, accumulate",
+        Spec {
+            m: 70,
+            n: 130,
+            k: 4,
+            outer: 1,
+            inner: 1,
+            a: View::rows(0, 4),
+            b: View::t(0, 4),
+            c: View::rows(0, 130),
+            bias: None,
+            alpha: 0.3,
+            act: Act::Tanh,
+            accumulate: true,
+        },
+    ));
+    specs.push((
+        "batched, per-outer bias",
+        Spec {
+            m: 33,
+            n: 24,
+            k: 256,
+            outer: 3,
+            inner: 1,
+            a: View::rows(4, 256).batch(33 * 256, 0),
+            b: View::t(0, 256).batch(24 * 256, 0),
+            c: View::rows(0, 24).batch(33 * 24, 0),
+            bias: Some((0, 24)),
+            alpha: 1.0,
+            act: Act::Tanh,
+            accumulate: false,
+        },
+    ));
+    for (what, spec) in &specs {
+        let last = |v: View, rows: usize, cols: usize| {
+            v.off + (spec.outer - 1) * v.bo + (rows - 1) * v.rs + (cols - 1) * v.cs + 1
+        };
+        let a_len = last(spec.a, spec.m, spec.k);
+        let b_len = last(spec.b, spec.k, spec.n);
+        let c_len = last(spec.c, spec.m, spec.n);
+        let bias_len = spec
+            .bias
+            .map_or(1, |(off, bo)| off + (spec.outer - 1) * bo + spec.n);
+        let (a, c0, bias) = (rand(a_len, 1), rand(c_len, 3), rand(bias_len, 4));
+        let bits = f16_weights(b_len, 2);
+        let b: Vec<f32> = bits
+            .iter()
+            .map(|&h| half::f16::from_bits(h).to_f32())
+            .collect();
+        let (ab, biasb) = (g.upload("a", &a), g.upload("bias", &bias));
+        let (b32, b16) = (g.upload_weight("b f32", &b), g.upload_f16("b f16", &bits));
+        for weight in [&b32, &b16] {
+            let bufs = (&*ab, weight, c0.as_slice(), &*biasb);
+            let want = output_of(&g, v64, spec, bufs, c_len);
+            for &t in &candidates {
+                let probe = MatMul::new(
+                    (&ab, spec.a),
+                    (weight, spec.b),
+                    (&ab, spec.c),
+                    spec.m,
+                    spec.n,
+                    spec.k,
+                );
+                assert_eq!(
+                    TILES[probe.kernel(t)].name,
+                    TILES[t].name,
+                    "{what}: {} hands it to the fallback",
+                    TILES[t].name
+                );
+                let got = output_of(&g, t, spec, bufs, c_len);
+                let d = bit_differences(&got, &want);
+                assert_eq!(
+                    d.count,
+                    0,
+                    "{what}, {} weights: {} differs from v64 in {} values, the largest by {:e}",
+                    weight.format().name(),
+                    TILES[t].name,
+                    d.count,
+                    d.largest
+                );
+            }
+        }
+    }
+}
+
 /// Products the vec4 kernel cannot read as vec4s go to the fallback and
 /// still match the CPU: K = 62 (the frequency p.v product, its scores rows
 /// 62 floats apart), K = 62 with every stride aligned, an offset of 2, and

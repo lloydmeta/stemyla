@@ -293,8 +293,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * [x] 5.2 and 5.3 (2026-11-13): the pure functions of the comparison in `xtask/src/e2e/perf.rs` (`BLOCK_ORDER`, `Block`, `compared`, `compare_refusal`), and `e2e perf --base-dist` in `xtask/src/e2e.rs`.  The 5 new tests failed first on their asserts, with stubs: `a_block_runs_b_h_h_b_and_gives_its_change` (`left: [Base, Head, Base, Head]`), `a_uniform_change_gives_its_class` (`left: None`), `a_slow_run_spoils_only_its_block` (no block spoiled), `mixed_blocks_need_more_or_are_undecided` (`left: None`) and `a_comparison_refuses_a_gate_an_update_and_odd_runs` (`"--gate" in ""`).  Then `cargo test -p xtask --lib` passed (784 tests).  `CHANGE_T` and `SPOIL_N` are 2 % until the A/A session sets them.
   * [x] 5.4 and 5.5 (2026-11-13): the first A/A session set `T` = 1 % and `N` = 1.1 % (Surprises).  The second A/A comparison gave "no change" in Chrome and in Safari.  The tests of 5.2 pass with the new constants.
   * [x] 5.6 (2026-11-13): how to run it, in `docs/references/local-browser-testing.md`, the `perf` paragraph of `README.md` and the module doc of `xtask/src/e2e.rs` (with the commit of 5.2).
-* [ ] Step 6: the candidates.
-* [ ] Step 7: the gain rule, and the candidates that land.
+* [x] Step 6 (2026-11-13): the candidates `v64k8` and `r64`, in the working tree and in `m4/candidates.patch` (`git apply --check` passed in a clean worktree at `a5e6a4c`).  A new field `direct` of `Tile` came first, false for each current tile (no change of their WGSL).  Then the tests failed first on their asserts: `every_kernel_fits_the_default_limits` (the `want` list names `v64k8`, `r64` and their f16 variants), `workgroup_memory_within_defaults` (`left: None, right: Some(6144)`), `bank_conflicts` (`left: ["v64"], right: ["v64", "v64k8"]`), `current_kernels_keep_their_wgsl` (the 4 names of `NEW_KERNELS` name no source), `choice_keys_name_the_format` (`left: 3, right: 4`), and the native `candidates_match_v64_bit_for_bit` (`the candidates ["v64k8", "r64"] in TILES`, `left: 0, right: 2`).  With the code, `cargo test -p roformer-gpu --lib` passed (51 tests), and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed on the M2 Pro (Metal), the bit-for-bit test included.  With the unpadded `want` of `v64` (`[1, 1, 1, 4]`), `bank_conflicts` fails for `v64k8` (`left: [1, 1, 1, 2]`), as the plan says.
+* [x] Step 7 (2026-11-13): the gain rule, and the candidates that land.  `v64k8` has a gain in Safari with f16 weights, and lands: its pinned hashes replace its names in `NEW_KERNELS`, which is empty again.  `r64` has none in either browser, and does not land (`m4/r64.patch`).  The rule is in `docs/references/local-browser-testing.md`.
 * [ ] Step 8: the self-tests.
 * [ ] Step 9: the same-session comparison of the kernels.
 * [ ] Step 10: the cost of each forced flip.
@@ -342,6 +342,29 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
   Safari's H1 of block 1 chose `v64,i64` again, and was the slowest run (7.42 s).
 
+* 2026-11-13, Step 7: one set of `?bench=v64,v64k8,r64,i64&bench_rounds=5` with the head page of the candidates (Safari 27.2, Chrome 157.0.8103.51, the same in each page; logs `m4/runs/s7-{safari,chrome}-{1,2}.log`, figures `m4/s7-ratios.txt`).  The reference is `v64`.  `R`: the candidate's calibration total over `v64`'s.  `S`: the largest spread of the bench lines in `R`.  Each shape's ratio is the candidate's time over `v64`'s.  A star: an effect (a gain or a loss) by the rule of Step 7.
+
+  | Candidate, browser, format, kind | Page 1: `R` (`S`) | Page 2: `R` (`S`) | Shapes, page 1; page 2 | Verdict |
+  | - | - | - | - | - |
+  | `v64k8`, Safari, f16, large | 0.946 (1.5 %) | 0.944 (1.4 %) | qkv 0.919, ff down 1.022, freq ff up 0.916; 0.924, 1.012, 0.912 | gain * |
+  | `v64k8`, Safari, f32, large | 0.937 (1.8 %) | 0.940 (1.4 %) | 0.909, 1.009, 0.912; 0.915, 1.012, 0.909 | gain * |
+  | `v64k8`, Safari, f16, small | 0.993 (1.5 %) | 0.993 (1.9 %) | gates 0.828, p·v 1; 0.828, 1 | none |
+  | `v64k8`, Safari, f32, small | 0.993 (1.8 %) | 0.993 (1.4 %) | 0.828, 1; 0.830, 1 | none |
+  | `v64k8`, Chrome, f16, large | 1.311 (1.3 %) | 1.318 (1.4 %) | 1.357, 1.212, 1.343; 1.366, 1.216, 1.350 | loss * |
+  | `v64k8`, Chrome, f32, large | 1.321 (1.5 %) | 1.322 (1.7 %) | 1.371, 1.213, 1.356; 1.372, 1.215, 1.355 | loss * |
+  | `v64k8`, Chrome, f16, small | 1.006 (5.9 %) | 1.006 (5.7 %) | 1.176, 1; 1.172, 1 | none |
+  | `v64k8`, Chrome, f32, small | 1.007 (3.7 %) | 1.006 (4.8 %) | 1.210, 1; 1.176, 1 | none |
+  | `r64`, Safari, f16, large | 1.202 (1.5 %) | 1.208 (1.7 %) | 1.121, 1.329, 1.207; 1.132, 1.334, 1.205 | loss * |
+  | `r64`, Safari, f32, large | 1.254 (1.8 %) | 1.254 (1.4 %) | 1.151, 1.407, 1.269; 1.153, 1.407, 1.264 | loss * |
+  | `r64`, Safari, f16, small | 0.982 (2.3 %) | 0.981 (2.4 %) | 0.574, 1; 0.569, 1 | none |
+  | `r64`, Safari, f32, small | 0.983 (3.4 %) | 0.983 (2.0 %) | 0.608, 1; 0.611, 1 | none |
+  | `r64`, Chrome, f16, large | 2.545 (2.4 %) | 2.537 (1.1 %) | 2.555, 2.497, 2.578; 2.547, 2.493, 2.566 | loss * |
+  | `r64`, Chrome, f32, large | 1.931 (1.4 %) | 1.927 (1.2 %) | 1.874, 1.967, 1.979; 1.868, 1.970, 1.973 | loss * |
+  | `r64`, Chrome, f16, small | 1.058 (5.9 %) | 1.058 (5.7 %) | 2.797, 1; 2.795, 1 | none |
+  | `r64`, Chrome, f32, small | 1.007 (3.7 %) | 1.007 (3.7 %) | 1.236, 1; 1.227, 1 | none |
+
+  So `v64k8` has a gain on the large products with f16 weights in Safari (5.4 % to 5.6 % of the calibration total), and lands.  Its `time ff down` (K 1,024, 72 workgroups) is 1.01 to 1.02 times `v64`, and `time qkv` and `freq ff up` (K 256) are 0.91 to 0.92: near the 8.3 % to 8.4 % that Step 4 predicted for `freq qkv`.  In Chrome, `v64k8` is 1.31 to 1.32 times slower, so Chrome's calibration must keep `v64` (Step 9).  `r64` has no gain on a kind in either browser, and does not land; its code is in `m4/r64.patch`.  `r64` is 0.57 to 0.61 times `v64` on `time gates` in Safari, but the small kind's total is mostly `time p·v`, which each vec4 kernel hands to `i64`.  With `i64` as the reference of the small kind in Safari (calibration chose it in 3 of 16 runs at the base), `R` is 0.957 to 0.959 for `r64` and 0.968 to 0.969 for `v64k8`, also with f16 weights.  The plan's reference is `v64`, so this does not count for `r64`.
+
 
 ## Decision log
 
@@ -357,6 +380,9 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-13, agent (implementer), Step 5.2: the verdict takes the class of 2 blocks or more that are not spoiled, with at most one block of another class, and never with a loss and a gain together.  Why: the plan's case "a loss, then two blocks of no change, gives no change" needs one block of another class to be allowed.  A loss and a gain together say that the noise is larger than `T`, so they give undecided.
 * 2026-11-13, agent (implementer), Step 5.2: the test of a uniform loss of 3 % with a drift uses a drift of 1 % for each run only when `SPOIL_N` is 4 % or more; else a quarter of `SPOIL_N`.  Why: B1 and B2 of a block are 3 runs apart, so a drift of 1 % for each run puts them 3 % apart, and a smaller `N` spoils each block.  The drift still cancels in `r`.
 * 2026-11-13, agent (implementer), Step 5.2: a spoiled block is one whose two runs of a side differ by more than `N` of the faster run.
+* 2026-11-13, agent (implementer), Step 7: `v64k8` lands.  Why: a gain on the large products with f16 weights in Safari, in both pages (`R` 0.946 and 0.944, `S` 1.5 % and 1.4 %).  In Chrome it is a loss (`R` 1.31), so calibration must keep `v64` there; Step 9 checks it.
+* 2026-11-13, agent (implementer), Step 7: `r64` does not land.  Why: no gain on a kind with f16 weights in either browser, against the reference `v64` (Safari small `R` 0.98 within `S` 2.3 %; large 1.20; Chrome 1.06 and 2.54).  Its gain on `time gates` in Safari (0.57) does not show in the small total, which `time p·v` holds.
+* 2026-11-13, agent (implementer), Step 7: the field `direct` of `Tile` and `matmul_vec4_direct.wgsl` go with `r64`, since no other tile uses them.  The test `candidates_match_v64_bit_for_bit` stays, for `v64k8`.
 
 ## Outcomes and retrospective
 

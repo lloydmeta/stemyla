@@ -181,11 +181,21 @@ impl Tile {
             "{self:?}"
         );
         let (kv, sv) = (self.bk / 4, (self.bk + self.pad) / 4);
-        assert!(
-            (self.bm * kv).is_multiple_of(256) && (self.bn * kv).is_multiple_of(256),
-            "{self:?}"
-        );
-        let (la, lb) = (self.bm * kv / 256, self.bn * kv / 256);
+        let stage = if self.bm * kv == 128 && self.bn * kv == 128 {
+            // Each tile is 128 vec4s: threads 0 to 127 load A, and threads
+            // 128 to 255 load B, in one step.  A group of 32 threads is all
+            // on one side, so the branch does not diverge in it.
+            "    if (tid < 128u) { as_[slot(tid)] = a_get(tid, k0, row0, a_base); } else { bs_[slot(tid - 128u)] = b_get(tid - 128u, k0, col0, b_base); }".to_string()
+        } else {
+            assert!(
+                (self.bm * kv).is_multiple_of(256) && (self.bn * kv).is_multiple_of(256),
+                "{self:?}"
+            );
+            let (la, lb) = (self.bm * kv / 256, self.bn * kv / 256);
+            format!(
+                "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[slot(e)] = a_get(e, k0, row0, a_base); }}\n    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[slot(e)] = b_get(e, k0, col0, b_base); }}"
+            )
+        };
         let mut decls = String::new();
         let mut compute = String::new();
         let mut epilogue = String::new();
@@ -213,9 +223,6 @@ impl Tile {
                 }
             }
         }
-        let stage = format!(
-            "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[slot(e)] = a_get(e, k0, row0, a_base); }}\n    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[slot(e)] = b_get(e, k0, col0, b_base); }}"
-        );
         include_str!("shaders/matmul_vec4.wgsl")
             .replace("{BM}", &self.bm.to_string())
             .replace("{BN}", &self.bn.to_string())
@@ -476,13 +483,20 @@ pub fn bit_differences(got: &[f32], want: &[f32]) -> BitDifferences {
 /// product (the p.v product: K = 62 or 1,151, B not K-contiguous), the
 /// fallback `i64` runs it instead.
 ///
+/// `v64k8` is `v64` with BK 8, from M4 of `plans/active/gpu-speed.md`: 6
+/// KiB of workgroup memory, not 10 KiB, with `v64`'s grid, thread map and
+/// sum order.  Safari sets workgroup memory to zero with one thread, byte
+/// by byte (`references/browser-quirks.md`).  There it took 0.94 to 0.95
+/// times `v64`'s time on the large products; in Chrome 1.31 to 1.32
+/// times.  Calibration chooses it only on a GPU where it measures faster.
+///
 /// The first entry is the fallback: a GPU on which it fails is not used.
 /// Rows are padded by 32 / `bk` floats (`s64`: 1; `v64`: one vec4, so
 /// neighbouring threads' vec4 reads of the B tile fall in different
 /// banks): when K is the contiguous axis (every nn.Linear operand), 32
 /// consecutive threads store 32 / `bk` rows of `bk` values, and this
 /// padding spreads them over all 32 banks.
-pub const TILES: [Tile; 4] = [
+pub const TILES: [Tile; 5] = [
     Tile {
         name: "i64",
         bm: 64,
@@ -521,6 +535,17 @@ pub const TILES: [Tile; 4] = [
         bm: 64,
         bn: 64,
         bk: 16,
+        tm: 4,
+        tn: 4,
+        pad: 4,
+        hand_written: false,
+        vec4: true,
+    },
+    Tile {
+        name: "v64k8",
+        bm: 64,
+        bn: 64,
+        bk: 8,
         tm: 4,
         tn: 4,
         pad: 4,
@@ -2710,7 +2735,9 @@ mod tests {
     /// reads 2-way at a thread stride of 4, 4-way at 8).  `v64` reads
     /// conflict-free; its stores, once per K tile against 32 reads, conflict
     /// 2-way, the price of the padding that keeps the reads free (unpadded,
-    /// its B reads conflict 4-way).
+    /// its B reads conflict 4-way).  `v64k8` (BK 8) with the same pad of
+    /// one vec4 also gives 2-way stores and reads with no conflict;
+    /// unpadded, its B reads conflict 2-way, not 4-way.
     #[test]
     fn bank_conflicts() {
         for t in TILES.iter().filter(|t| !t.vec4) {
@@ -2721,10 +2748,18 @@ mod tests {
             };
             assert_eq!(conflicts(t), want, "{}", t.name);
         }
-        for t in TILES.iter().filter(|t| t.vec4) {
+        let staged: Vec<&Tile> = TILES.iter().filter(|t| t.vec4).collect();
+        let names: Vec<&str> = staged.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["v64", "v64k8"]);
+        for t in staged {
             assert_eq!(conflicts_vec4(t), [2, 2, 1, 1], "{}", t.name);
             let unpadded = Tile { pad: 0, ..*t };
-            assert_eq!(conflicts_vec4(&unpadded), [1, 1, 1, 4], "{}", t.name);
+            let want = if t.bk == 8 {
+                [1, 1, 1, 2]
+            } else {
+                [1, 1, 1, 4]
+            };
+            assert_eq!(conflicts_vec4(&unpadded), want, "{}", t.name);
         }
     }
 
@@ -2746,10 +2781,19 @@ mod tests {
             .sum()
     }
 
-    /// Every generated kernel fits WebGPU's default 16 KiB of workgroup
-    /// memory.
+    /// Asserts:
+    /// * each entry of [`TILES`] declares the bytes of workgroup memory of
+    ///   its formula, in its f32 kernel and its f16 variant, and at most
+    ///   16 KiB;
+    /// * `v64k8` declares 6,144 bytes;
+    /// * fused attention declares 12 to 16 KiB.
     #[test]
     fn workgroup_memory_within_defaults() {
+        let bytes_of = |name: &str| {
+            let t = TILES.iter().find(|t| t.name == name);
+            t.map(|t| workgroup_bytes(&t.source()))
+        };
+        assert_eq!(bytes_of("v64k8"), Some(6144));
         for t in &TILES {
             let bytes = workgroup_bytes(&t.source());
             assert_eq!(workgroup_bytes(&t.f16_source()), bytes, "{} f16", t.name);
@@ -3030,15 +3074,17 @@ mod tests {
 
     /// The FNV-1a hash ([`fnv1a`]) of the WGSL of each current kernel, by
     /// the name of [`generated_sources`] or [`SHADER_FILES`].
-    const PINNED_WGSL: [(&str, u64); 12] = [
+    const PINNED_WGSL: [(&str, u64); 14] = [
         ("i64", 0x6735_eed0_8cca_09cc),
         ("i128x64", 0xf9e3_a175_acf0_66cf),
         ("s64", 0x1553_8389_9726_7e72),
         ("v64", 0x2bf0_6de9_4804_2584),
+        ("v64k8", 0x4741_f1df_d45f_f6d1),
         ("i64-f16", 0xf950_2bac_2fb3_4efe),
         ("i128x64-f16", 0x71ad_576f_be76_36a5),
         ("s64-f16", 0x524e_ac59_f5a3_b9d4),
         ("v64-f16", 0xbb95_7752_6ab4_50c6),
+        ("v64k8-f16", 0xc324_6da6_933d_ea43),
         ("attention", 0xa091_9877_a004_c08c),
         ("softmax.wgsl", 0x88a8_02c9_98a6_ac21),
         ("rmsnorm.wgsl", 0x051c_929e_5b3b_f568),
@@ -3102,10 +3148,12 @@ mod tests {
             "i128x64",
             "s64",
             "v64",
+            "v64k8",
             "i64-f16",
             "i128x64-f16",
             "s64-f16",
             "v64-f16",
+            "v64k8-f16",
             "attention",
             "softmax.wgsl",
             "rmsnorm.wgsl",

@@ -766,7 +766,8 @@ impl Choice {
 /// Pro 5500M where a longer bench measured fused 2.5 times faster.
 /// Version 3 calibrates once for each weight format, with the f16
 /// variants for f16 weights (M9 of `plans/completed/stream-from-storage.md`).
-pub const CALIBRATION: u32 = 3;
+/// Version 4 adds `v64k8`, from M4 of `plans/active/gpu-speed.md`.
+pub const CALIBRATION: u32 = 4;
 
 /// The key of this GPU's stored kernel choice for weights in `format`:
 /// `"<adapter>|<kernels_id>|<CALIBRATION>|<f32 or f16>"`.  The formats
@@ -1201,14 +1202,14 @@ mod tests {
     /// calibration version.
     #[test]
     fn choice_keys_name_the_format() {
-        assert_eq!(CALIBRATION, 3);
+        assert_eq!(CALIBRATION, 4);
         assert_eq!(
             choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F32),
-            "AMD Radeon Pro 5500M|00000000000000ab|3|f32"
+            "AMD Radeon Pro 5500M|00000000000000ab|4|f32"
         );
         assert_eq!(
             choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F16),
-            "AMD Radeon Pro 5500M|00000000000000ab|3|f16"
+            "AMD Radeon Pro 5500M|00000000000000ab|4|f16"
         );
     }
 
