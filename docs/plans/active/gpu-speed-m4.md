@@ -295,10 +295,10 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * [x] 5.6 (2026-11-13): how to run it, in `docs/references/local-browser-testing.md`, the `perf` paragraph of `README.md` and the module doc of `xtask/src/e2e.rs` (with the commit of 5.2).
 * [x] Step 6 (2026-11-13): the candidates `v64k8` and `r64`, in the working tree and in `m4/candidates.patch` (`git apply --check` passed in a clean worktree at `a5e6a4c`).  A new field `direct` of `Tile` came first, false for each current tile (no change of their WGSL).  Then the tests failed first on their asserts: `every_kernel_fits_the_default_limits` (the `want` list names `v64k8`, `r64` and their f16 variants), `workgroup_memory_within_defaults` (`left: None, right: Some(6144)`), `bank_conflicts` (`left: ["v64"], right: ["v64", "v64k8"]`), `current_kernels_keep_their_wgsl` (the 4 names of `NEW_KERNELS` name no source), `choice_keys_name_the_format` (`left: 3, right: 4`), and the native `candidates_match_v64_bit_for_bit` (`the candidates ["v64k8", "r64"] in TILES`, `left: 0, right: 2`).  With the code, `cargo test -p roformer-gpu --lib` passed (51 tests), and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed on the M2 Pro (Metal), the bit-for-bit test included.  With the unpadded `want` of `v64` (`[1, 1, 1, 4]`), `bank_conflicts` fails for `v64k8` (`left: [1, 1, 1, 2]`), as the plan says.
 * [x] Step 7 (2026-11-13): the gain rule, and the candidates that land.  `v64k8` has a gain in Safari with f16 weights, and lands: its pinned hashes replace its names in `NEW_KERNELS`, which is empty again.  `r64` has none in either browser, and does not land (`m4/r64.patch`).  The rule is in `docs/references/local-browser-testing.md`.
-* [ ] Step 8: the self-tests.
-* [ ] Step 9: the same-session comparison of the kernels.
-* [ ] Step 10: the cost of each forced flip.
-* [ ] Step 11: the baselines.
+* [x] Step 8 (2026-11-13): the self-tests of `v64k8`, with the head page of `a238db5`.  `e2e selftest --query "selftest=stages&step_limit=600&mm=v64k8"` passed in Safari and in Chrome, and with no `mm` (the kernels that each browser chose) in both (worst stage 69.4 dB each; logs `m4/runs/s8-{safari,chrome}-{mm-v64k8,auto}.stdout`).  Safari chose `v64k8,v64k8` and Chrome `v64,v64`.  A `--query` replaces the scenario's default query, so it names `selftest=stages` too: a first run with `--query mm=v64k8` alone never started the self-test, and was stopped.
+* [x] Step 9 (2026-11-13): the same-session comparison of `v64k8`: no change in Chrome, which did not choose it, and a gain in Safari, which chose it and has its in-page gain of Step 7.  `v64k8` stays.
+* [x] Step 10 (2026-11-13): the cost of each forced flip.  Each cost plus the drift (5.7 %) is under the tolerance (10 %): the largest real one is Safari's flip to split attention, 3.4 % (9.1 % with the drift).  The tolerance stays (Decision log).
+* [x] Step 11 (2026-11-13): the baselines.  Safari's went from 7.40 s to 7.38 s (bound 8.14 s to 8.12 s), from 5 runs at `a238db5`; Chrome's does not change, since Chrome did not choose `v64k8`.
 * [ ] Step 12: the worker headroom.
 * [ ] Step 13: the checks before review round 1.
 
@@ -365,6 +365,36 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
   So `v64k8` has a gain on the large products with f16 weights in Safari (5.4 % to 5.6 % of the calibration total), and lands.  Its `time ff down` (K 1,024, 72 workgroups) is 1.01 to 1.02 times `v64`, and `time qkv` and `freq ff up` (K 256) are 0.91 to 0.92: near the 8.3 % to 8.4 % that Step 4 predicted for `freq qkv`.  In Chrome, `v64k8` is 1.31 to 1.32 times slower, so Chrome's calibration must keep `v64` (Step 9).  `r64` has no gain on a kind in either browser, and does not land; its code is in `m4/r64.patch`.  `r64` is 0.57 to 0.61 times `v64` on `time gates` in Safari, but the small kind's total is mostly `time p·v`, which each vec4 kernel hands to `i64`.  With `i64` as the reference of the small kind in Safari (calibration chose it in 3 of 16 runs at the base), `R` is 0.957 to 0.959 for `r64` and 0.968 to 0.969 for `v64k8`, also with f16 weights.  The plan's reference is `v64`, so this does not count for `r64`.
 
+* 2026-11-13, Step 9: the same-session comparison of `v64k8`, base `a5e6a4c` (the commit before Step 7's commit), head `a238db5`, `--runs 4` (Chrome 157.0.8103.51, then Safari 27.2; logs `m4/runs/s9-{chrome,safari}.stdout` and the folders `m4/runs/s9-{chrome,safari}/`).  Chrome: no change.  Safari: a gain of about 2.4 %, from 3 blocks.  No head run in Chrome named `v64k8`; each Safari head run named it.
+
+  | Browser, block | B1 | H1 | H2 | B2 | `r` | Apart | Class |
+  | - | - | - | - | - | - | - | - |
+  | Chrome 1 | 4.69 | 4.69 | 4.70 | 4.70 | 0.00 % | 0.21 % | no change |
+  | Chrome 2 | 4.70 | 4.70 | 4.69 | 4.71 | -0.21 % | 0.21 % | no change |
+  | Safari 1 | 7.37 | 7.46 | 7.20 | 7.42 | -0.88 % | 3.61 % | spoiled |
+  | Safari 2 | 7.38 | 7.20 | 7.21 | 7.39 | -2.44 % | 0.14 % | gain |
+  | Safari 3 | 7.39 | 7.21 | 7.21 | 7.38 | -2.37 % | 0.14 % | gain |
+
+  The kernels of each run.  Chrome: `v64,v64`, attention `freq`, in each base and head run.  Safari base: `v64,v64` or `v64,i64` (B2 of block 1), attention `fused`.  Safari head: `v64k8,v64k8` with attention `fused` in 5 runs (7.20 to 7.21 s), and `v64k8,v64` with attention `freq` in H1 of block 1 (7.46 s).  So in that run, calibration put the time axis on split attention, and the run was 3.6 % slower than the other head runs, and 0.9 % slower than the base runs.  With `v64k8`, calibration timed split attention at 3.13 to 3.14 s for each chunk, against 3.54 to 3.55 s with `v64` at the base, and fused at 3.42 to 3.46 s.  The fused / split ratio, 1.09 to 1.105, is now at `FUSED_MARGIN` (1.1).  So the time axis flips between fused and split from one calibration to the next.  The separation says that split is the slower one.  Step 10 measures the cost of that flip.
+
+* 2026-11-13, Step 10: the cost of each forced flip between near choices, with the head page of `a238db5` (Chrome 157.0.8103.51, Safari 27.2, the same at the start and the end; logs `m4/s10-{chrome,safari}.txt` and `m4/runs/s10-{chrome,safari}-<n>/`).  The near choices, from the `kernels for this GPU` lines of Step 9's head runs.  Chrome: the small products (`v64` 0.74 s; `v64k8` 0.74 to 0.75 s, `i64` 0.75 s, `s64` 0.79 to 0.81 s).  Its large products (`v64` 0.78 s, the next 1.03 s) and its attention (fused / split 1.23 to 1.24) are not near.  Safari: the large products (`v64k8` 1.25 to 1.26 s, `v64` 1.33 to 1.34 s), the small products (`v64k8` 1.18 to 1.20 s, `v64` 1.19 to 1.25 s, `i64` 1.22 to 1.27 s), and the time axis (fused / split 1.09 to 1.105).  The runs went unforced, forced, forced, unforced, with the unforced runs between two flips shared.  Cost: (forced median - unforced median) / unforced median, of the chunk lower quartiles.
+
+  | Browser, flip | Unforced runs (kernels) | Forced runs (kernels) | Cost |
+  | - | - | - | - |
+  | Chrome, `mm=v64,v64k8` | 4.70, 4.69 (`v64,v64`, split) | 4.72, 4.72 | +0.5 % |
+  | Chrome, `mm=v64,i64` | 4.69, 4.69 | 4.72, 4.72 | +0.6 % |
+  | Chrome, `mm=v64,s64` | 4.69, 4.69 | 4.78, 4.77 | +1.8 % |
+  | Safari, `mm=v64,v64k8` | 7.44 (split), 7.38 (split) | 7.38 (fused), 8.04 (split) | +4.0 % |
+  | Safari, `mm=v64k8,v64` | 7.38 (split), 7.21 (fused) | 7.23 (fused), 7.47 (split) | +0.8 % |
+  | Safari, `mm=v64k8,i64` | 7.21 (fused), 7.36 (fused) | 7.52 (split), 7.48 (split) | +3.0 % |
+  | Safari, `attn=freq` | 7.36 (fused), 7.22 (fused) | 7.45, 7.47 | +2.3 % |
+
+  In Safari the time axis decides the figure, not the matmul kernel.  Over the 13 Safari runs: each run with fused attention and `v64k8` for the large products took 7.21 to 7.36 s (median 7.225 s, 4 runs).  Each run with split attention and `v64k8` took 7.38 to 7.52 s (median 7.47 s, 7 runs): 3.4 % slower.  Calibration chose split in 2 of the 5 unforced runs, and in 1 of the 6 head runs of Step 9.  It timed split at 3.11 to 3.16 s and fused at 3.42 to 3.51 s for each chunk in each run, so its choice falls on each side of `FUSED_MARGIN` by chance.  The run of 8.04 s had `v64` for the large products and split attention.  A calibration does not choose that pair: with `v64`, it times split at 3.54 to 3.55 s, and chooses fused.  The URL forced `v64` after calibration had chosen split with `v64k8`.
+  
+  Calibration's split time is too low in Safari, by about the same amount at the base and the head.  At the base, it gave fused / split 0.97 (M2: 0.975 to 0.992), and a forced split cost 9.5 % (M2 Step 5.3), about 0.70 s for each chunk.  At the head, it gives fused / split 1.10, and split costs 3.4 %, about 0.25 s for each chunk.  Both put calibration's split about 0.5 s for each chunk below the separation's.  The cause is not known.
+
+* 2026-11-13, Step 11: Safari's baseline from 5 runs of `e2e perf --runs 5 --update-baselines` at `a238db5` (Safari 27.2 at the start and the end; log `m4/s11-safari.stdout`).  The chunk lower quartiles: 7.44 s (`v64k8,v64`, split), 7.38 s (`v64k8,v64k8`, split), 7.47 s (`v64k8,v64`, split), 7.22 s and 7.22 s (`v64k8,v64k8`, fused).  The baseline is their median, 7.38 s, with a tolerance of 10 %: a bound of 8.12 s, against 7.40 s and 8.14 s before.  So it went down a little, with no `--raise`.  Calibration chose split in 3 of the 5 runs.  Chrome's baseline does not change: its calibration did not choose `v64k8` (Step 9).
+
 
 ## Decision log
 
@@ -383,6 +413,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-13, agent (implementer), Step 7: `v64k8` lands.  Why: a gain on the large products with f16 weights in Safari, in both pages (`R` 0.946 and 0.944, `S` 1.5 % and 1.4 %).  In Chrome it is a loss (`R` 1.31), so calibration must keep `v64` there; Step 9 checks it.
 * 2026-11-13, agent (implementer), Step 7: `r64` does not land.  Why: no gain on a kind with f16 weights in either browser, against the reference `v64` (Safari small `R` 0.98 within `S` 2.3 %; large 1.20; Chrome 1.06 and 2.54).  Its gain on `time gates` in Safari (0.57) does not show in the small total, which `time p·v` holds.
 * 2026-11-13, agent (implementer), Step 7: the field `direct` of `Tile` and `matmul_vec4_direct.wgsl` go with `r64`, since no other tile uses them.  The test `candidates_match_v64_bit_for_bit` stays, for `v64k8`.
+* 2026-11-13, agent (implementer), Step 10: the tolerance of 10 % stays, and `v64k8` stays.  Why: each flip that a calibration can make costs at most 3.4 % (Safari, split attention), 9.1 % with the drift of 5.7 %, under 10 %.  The run of 8.04 s (+11.3 %) had a pair that only a URL can force.  Not taken: a wider `FUSED_MARGIN`.  It would change the time-axis choice on GPUs that this Mac cannot measure; the UHD 630 lost 20 % with fused.  Not taken: a revert of `v64k8`.  Step 9 shows no loss, and Safari's fused runs gain 2.4 %.
+* 2026-11-13, agent (implementer), Step 10: open, for the orchestrator and M5: with `v64k8`, Safari's calibration puts the time axis on split attention in about 3 of 11 calibrations, and those runs are 3.4 % slower than the fused ones, and about 1 % slower than the base.  A block of two such head runs is a loss by the comparison's rule (`r` about +1.1 %).  Calibration's split time in Safari is about 0.5 s for each chunk too low at the base and at the head.  M5 works on the time axis, so it is the place to find the cause.
 
 ## Outcomes and retrospective
 
