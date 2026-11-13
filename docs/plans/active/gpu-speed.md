@@ -116,7 +116,7 @@ M6's milestone plan designs the order of the work and the read-back.  It must me
 8. `memory-budget` passes its four checks, with the tab total at most `TAB_BUDGET_MB` (MEM-4).  If it does not, M1's Step 6 names the next cuts, in order of cost.
 9. Each of the two changes meets "A change lands only with a shown gain" ("Validation and acceptance").  The gain of 3 % or more and the absence of a loss come from `e2e perf --base-dist` (`docs/references/local-browser-testing.md`).  The perf gate passes in both browsers.
 10. The chunk time covers the work that M6 moves.  Today the timer starts after `next_input`, so it leaves out the input read; a change that moves the next chunk's read or STFT across that edge gives a false gain or loss of up to the STFT's share (3 % to 6 %).  So before the first change, in its own commit, the chunk time runs from the end of the previous chunk's log line to this one's (chunk 1's from just before its `next_input`), and a source test (as `chunk_times_have_two_decimals`) fails first on the old form.  That commit is the oldest base of M6's comparisons.  It runs `e2e perf --base-dist --runs 4` against its parent in each browser; if that is not "no change", the baselines are measured again with `--raise "the chunk time covers the input read"`.
-11. Calibration times the time axis as the separation runs it, after each change too.  A change that alters `Pace` alters calibration's timing in the same commit, and bumps `CALIBRATION` if the timing changes.  The check of the goal "Each calibration choice is not slower" runs again at M6's head, by its case 5.
+11. Calibration times the time axis as the separation runs it, after each change too.  Since M5, `bench::time_axis_per_chunk` records each time-transformer step with the function that `Job::run` uses, and waits for the GPU after each step (`bench::STEP_WAITS`), as `Pace::run` does.  A change that alters `Pace`, such as a submission before the wait of the step before, alters `STEP_WAITS` or `time_axis_per_chunk` in the same commit, and bumps `CALIBRATION` if the timing changes.  The check of the goal "Each calibration choice is not slower" runs again at M6's head, by its case 5.
 
 ## Validation and acceptance
 
@@ -282,6 +282,30 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * 2026-11-13, CI run 43314717211 at eb81ed0: the macOS job failed in `trunk build`, because the `wasm-opt` that Trunk downloaded could not load `libbinaryen.dylib`.  The runs after it passed with no change, so it was the runner's download.  If it comes back, it gets a TD.
 
+* 2026-11-14, M5 (`plans/active/gpu-speed-m5.md`, Surprises, with each log): calibration's bias, its fix, and `vfused`.  M2 Pro, Safari 27.2 and Chrome 157.
+
+  | Step | Safari | Chrome |
+  | - | - | - |
+  | 3, the check at `ab40862` (base `fused`, head `freq`) | loss, 3 % or more: +3.19 %, spoiled, +4.07 %; so the check fails first | gain of `freq`: -1.18 %, -1.28 % |
+  | 4, `D` (the separation's cost of `freq`), its noise | +0.305 s, 0.030 s | -0.070 s, 0.00 s |
+  | 4, calibration's (split - fused), the bias | -0.212 s, -0.517 s | -0.357 s, -0.287 s |
+  | 4, the parts of `D`: attention, linear, other, gaps by difference | -0.166, +0.287, +0.141, +0.045 s | -0.461, +0.066, +0.013, +0.315 s |
+  | 5, the bias with whole steps (13 calibrations each, margin 1.0, 12 rounds) | -0.010 s; ratio 0.941, SD 0.005 | +0.006 s; ratio 1.021, SD 0.003 |
+  | 6, the fix against its base (`--runs 8`) | no change; `fused` on both sides | no change; `freq` on both sides |
+  | 6, the check at the head | passes: `fused` gains 4.0 % over `freq` | passes: `freq` gains 1.4 % over `fused` |
+  | 7, `i64` over `v64` on `time scores` (K 64) | 0.835 to 0.840: `v64` slower | 1.31 to 1.35 |
+  | 9, `vfused` over the references, whole steps (`S`) | 0.695 to 0.697 against `fused`, 0.661 to 0.663 against `freq` (2.3 %): gain | 0.656 to 0.669 against `freq` (1.9 %): gain |
+  | 11, `vfused` against its base (`--runs 8`) | gain, -20.3 %: 6.99 s to 5.57 s | gain, -22.4 %: 4.62 s to 3.59 s |
+  | 12, the check at the head | passes: `vfused` gains 20.2 % over `fused`, 23.4 % over `freq` | passes: 23.4 % over `fused`, 22.3 % over `freq` |
+  | 13, baseline | 7.38 s to 5.57 s | 4.70 s to 3.59 s |
+  | 14, `memory-budget`, 3 runs | growth 57 MB, margin 6.16 MB; tab total 758 MB | the same; tab total 756 MB (799 MB with `freq`) |
+
+  * The cause of TD-101: calibration timed the attention dispatches alone, with many submissions for each wait.  In Safari it left out the linear products and the other dispatches of the time transformer, at M 1,151 in 744 steps against M 4,604 in 192.  In Chrome it left out the waits between steps.  Calibration's attention-only times matched the profile's (3.07 against 3.06 s in Safari, 1.83 against 1.82 s in Chrome).
+  * Step 7's predictor said that vec4 reads would slow `vfused` in Safari.  `vfused` took 0.56 times the tiled kernel's attention time in Safari and 0.49 in Chrome, more than the predicted bound.  It also has 10 KiB of workgroup memory, not 12.25 KiB.  M5 did not split the gain between the causes.
+  * The first `vfused` gave wrong results on Metal: 4 threads wrote the components of one vec4 in workgroup memory, and they raced.  With each vec4 written whole by one thread, `vfused` gives the tiled kernel's output bit for bit natively, and the same `stored-stems` hashes in Chrome.
+  * `e2e stored-stems` did not read `--query`, so `attn=fused` ran split attention.  It now takes `attn` from `--query` (`a058eb6`).
+  * With `vfused`, `fused` and `freq` are no longer choosable on this Mac, and no two choices are near, so M5 measured no flip cost.
+
 ## Decision log
 
 * 2026-11-12, maintainer: the answers to "Decisions for the maintainer", 1 to 4.
@@ -324,6 +348,10 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-13, agent (orchestrator), intent review of M4, round 4 (i4-1): the check of "Each calibration choice is not slower" covers M5's candidate too, since calibration chooses it by the same timing.  The cost of `freq` is 2.3 % to 3.4 %.
 * 2026-11-13, maintainer: accepts `v64k8` with Safari's split-attention calibration until M5 closes TD-101, and the rule changes of M4 (`--raise` for every raise of a bound, a new browser version included; the pin of each current kernel's WGSL).
 * 2026-11-14, maintainer: `FUSED_MARGIN` goes to 1.0, with time-axis timings long enough to be stable (about 8 to 10 s more for each calibration).  Calibration then takes the faster time-axis policy.  Why: with M5's whole-step timing, a margin of 1.1 keeps Chrome on `fused`, 1.49 % slower than `freq`.  The cost: a GPU on which `freq` is 0 % to 10 % faster now holds about 42 MB more for the scores buffer; Chrome's tab total with `freq` is 799 MB, under `TAB_BUDGET_MB` (943 MB), and no iPhone run checks it (TD-54).
+* 2026-11-14, agent (implementer of M5): calibration times whole time-transformer steps, through the function that `Job::run` uses, with a wait after each step (form (c), `745a62b`).  Why: Step 4's table; in Safari, the linear products and the other dispatches are 83 % of the bias, so a timing of the attention and the gaps alone (forms (a), (b)) leaves more than half of `D`.
+* 2026-11-14, agent (implementer of M5): with the maintainer's `FUSED_MARGIN` 1.0, the time axis is timed for 12 rounds, not 3.  Why: at 3 rounds Chrome's ratio had an SD of 0.020 at a mean of 1.020, so it chose the slower policy now and then; at 12 rounds the SD is 0.003.  Calibration takes about 9.5 to 10.3 s more.
+* 2026-11-14, agent (implementer of M5): `vfused` lands (`9d6d447`), as a third time-axis policy with the tiled kernel on the frequency axis (`CALIBRATION` 6).  Why: Step 9's gain in both browsers against each reference, Step 11's gain of 20 % to 22 %, and Step 12's check.  Its P, V, row maxima and row sums are laid out so that each thread writes whole vec4s, not as M5's plan said, since the plan's layout races on Metal.
+
 ## Outcomes and retrospective
 
 Not yet.
