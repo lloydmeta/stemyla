@@ -671,8 +671,10 @@ pub(super) const CHANGE_T: f64 = 0.01;
 pub(super) const SPOIL_N: f64 = 0.011;
 
 /// The mean `|r|` of the verdict's blocks at which a comparison prints
-/// "3 % or more".  A true change of exactly 3 % gets it in about half of
-/// the comparisons, since the noise moves each `r` up or down.
+/// "3 % or more".  When the kernels differ ([`mean_verdict`]), it is the
+/// size of the mean `r` of the blocks that are not spoiled.  A true change
+/// of exactly 3 % gets it in about half of the comparisons, since the
+/// noise moves each `r` up or down.
 pub(super) const CLEAR_CHANGE: f64 = 0.03;
 
 /// The most blocks that a comparison runs before it is undecided, unless
@@ -796,7 +798,8 @@ impl Block {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Compared {
     /// The class, and whether the mean `|r|` of its blocks is
-    /// [`CLEAR_CHANGE`] or more.
+    /// [`CLEAR_CHANGE`] or more.  When the kernels differ, whether the size
+    /// of the mean `r` is.
     Decided(Class, bool),
     Undecided,
 }
@@ -835,14 +838,15 @@ pub(super) fn compared(blocks: &[Block], max_blocks: usize) -> Option<Compared> 
 /// The verdict when the runs of a side chose different kernels: the class
 /// of the mean `r` of the `blocks` that are not spoiled
 /// ([`Block::spoiled`]), and whether its size is [`CLEAR_CHANGE`] or
-/// more.  Undecided when each block is spoiled.
+/// more.  Undecided when fewer than 2 blocks are not spoiled, as in
+/// [`compared`].
 pub(super) fn mean_verdict(blocks: &[Block]) -> Compared {
     let counted: Vec<f64> = blocks
         .iter()
         .filter(|b| !b.spoiled())
         .map(Block::change)
         .collect();
-    if counted.is_empty() {
+    if counted.len() < 2 {
         return Compared::Undecided;
     }
     let mean = counted.iter().sum::<f64>() / counted.len() as f64;
@@ -988,7 +992,8 @@ pub(super) fn run_comparison(
     }
     let rule = if mixed {
         format!(
-            "the mean r of {} blocks, since the kernels differ",
+            "the mean r of {} of {} blocks, since the kernels differ",
+            blocks.iter().filter(|b| !b.spoiled()).count(),
             blocks.len()
         )
     } else {
@@ -1020,8 +1025,9 @@ pub(super) fn run_comparison(
 }
 
 /// The reason to refuse a same-session comparison (`--base-dist`) before
-/// any run, or `None`: with `--gate` or `--update-baselines`, or with a
-/// `--runs` that is odd or under 4.  `--runs` is the count of each side.
+/// any run, or `None`: with `--gate`, `--update-baselines` or
+/// `--swiftshader`, or with a `--runs` that is odd or under 4.  `--runs`
+/// is the count of each side.
 pub(super) fn compare_refusal(
     runs: usize,
     gate: bool,
@@ -2190,7 +2196,46 @@ mod tests {
         }
     }
 
-    /// Asserts, for `mean_verdict` of blocks of one `r` each:
+    /// Asserts, for a comparison whose base chose two sets of kernels (so
+    /// it is mixed), with blocks 1 to 3 spoiled by head runs on one choice
+    /// at 5.0 and 5.2 s, and block 4 at 5.1 and 5.1 s against 5.0 s:
+    /// * the verdict is undecided, since only 1 block is not spoiled;
+    /// * the verdict line says "the mean r of 1 of 4 blocks".
+    #[test]
+    fn one_block_that_is_not_spoiled_decides_nothing() {
+        let mut order = 0;
+        let (_, lines, result) = comparison_with(4, |side, _n| {
+            order += 1;
+            let k = "matmul v64,v64, attention fused";
+            match (side, order) {
+                (Side::Base, 4) => compare_result(5.0, "matmul v64,i64, attention fused", "27.2"),
+                (Side::Base, _) => compare_result(5.0, k, "27.2"),
+                (Side::Head, o) if o <= 12 && o % 4 == 3 => compare_result(5.2, k, "27.2"),
+                (Side::Head, o) if o <= 12 => compare_result(5.0, k, "27.2"),
+                (Side::Head, _) => compare_result(5.1, k, "27.2"),
+            }
+        });
+        let c = result.expect("a comparison");
+        assert!(c.mixed);
+        assert_eq!(c.verdict, Compared::Undecided, "{lines:#?}");
+        let verdict = lines.last().cloned().unwrap_or_default();
+        assert!(verdict.contains("the mean r of 1 of 4 blocks"), "{verdict}");
+    }
+
+    /// Asserts that `mean_verdict` of only spoiled blocks, and `decided` of
+    /// 4 spoiled blocks in mixed mode, are undecided.
+    #[test]
+    fn spoiled_blocks_alone_decide_nothing() {
+        let spoiled = Block::with_kernels([5.0, 5.0, 5.2, 5.0], ["a", "a", "a", "b"]);
+        assert!(spoiled.spoiled());
+        assert_eq!(mean_verdict(&[spoiled, spoiled]), Compared::Undecided);
+        assert_eq!(
+            decided(&[spoiled; 4], true, MAX_BLOCKS),
+            Some(Compared::Undecided)
+        );
+    }
+
+    /// Asserts, for `mean_verdict` of 2 blocks of one `r` each:
     /// * -5 % is a gain, 3 % or more; +5 % a loss, 3 % or more;
     /// * about +1 % and -1 % (`CHANGE_T`, `-CHANGE_T`) are no change;
     /// * `CLEAR_CHANGE` is a loss, 3 % or more;
@@ -2204,23 +2249,23 @@ mod tests {
         };
         let mean = |b: &[Block]| b.iter().map(Block::change).sum::<f64>() / b.len() as f64;
         assert_eq!(
-            mean_verdict(&[at(-0.05)]),
+            mean_verdict(&[at(-0.05), at(-0.05)]),
             Compared::Decided(Class::Gain, true)
         );
         assert_eq!(
-            mean_verdict(&[at(0.05)]),
+            mean_verdict(&[at(0.05), at(0.05)]),
             Compared::Decided(Class::Loss, true)
         );
         assert_eq!(
-            mean_verdict(&[at(CHANGE_T)]),
+            mean_verdict(&[at(CHANGE_T), at(CHANGE_T)]),
             Compared::Decided(Class::NoChange, false)
         );
         assert_eq!(
-            mean_verdict(&[at(-CHANGE_T)]),
+            mean_verdict(&[at(-CHANGE_T), at(-CHANGE_T)]),
             Compared::Decided(Class::NoChange, false)
         );
         assert_eq!(
-            mean_verdict(&[at(CLEAR_CHANGE)]),
+            mean_verdict(&[at(CLEAR_CHANGE), at(CLEAR_CHANGE)]),
             Compared::Decided(Class::Loss, true)
         );
         let mut up = vec![1.010_000_000_931_311_5; 127];

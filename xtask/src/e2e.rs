@@ -40,7 +40,8 @@
 //!   `--query`, it tests `mm=s64`.  A `--query` with no `selftest` key
 //!   gets `selftest=stages&` before it: `--query mm=<kernel>` tests that
 //!   kernel, and `--query selftest=stages` tests the kernels that the GPU
-//!   chooses.  A `--query` with no `step_limit` key gets `step_limit=600`.
+//!   chooses.  A `--query` with no `step_limit` that has a number gets
+//!   `step_limit=600` at its end.
 //! * `separate`: drop a clip and the model, Separate, lanes appear
 //!   (`--weights`).  The clip is kept in browser storage, so it separates
 //!   on the storage path; a fallback to the memory path fails it.  The clip
@@ -106,25 +107,26 @@
 //!   `xtask` for both.  It runs blocks of 4 runs in the order base, head,
 //!   head, base.  `--runs` is the count of each side: even, and 4 or more.
 //!   It starts with `--runs` / 2 blocks, then runs one more block at a
-//!   time until a verdict, up to 4 blocks, or `--runs` / 2 when that is
-//!   more.  Each run writes `<out>/perf-<browser>-<base or head>-<n>.json`.
-//!   The figure of a run is its chunk lower quartile.  The change of a
-//!   block is `(H1 + H2) / (B1 + B2) - 1`.  A block is a loss over
-//!   `CHANGE_T`, a gain under `-CHANGE_T`, else no change.  A block is
-//!   spoiled when the two runs of a side chose the same kernels and differ
-//!   by more than `SPOIL_N`; a spoiled block does not count.  When each
-//!   side chose one set of kernels, the verdict is the class of 2 blocks
-//!   or more, with at most one block of another class and not a loss and
-//!   a gain together; else it is undecided (`perf::compared`).  When the
-//!   runs of a side chose different kernels, it runs each block up to the
+//!   time until a verdict.  It runs 4 blocks at most, or `--runs` / 2 when
+//!   that is more.  Each run writes
+//!   `<out>/perf-<browser>-<base or head>-<n>.json`.  The figure of a run
+//!   is its chunk lower quartile.  The change of a block is
+//!   `(H1 + H2) / (B1 + B2) - 1`.  A block is a loss over `CHANGE_T`, a
+//!   gain under `-CHANGE_T`, else no change.  A block is spoiled when the
+//!   two runs of a side chose the same kernels and differ by more than
+//!   `SPOIL_N`.  A spoiled block does not count.  When each side chose one
+//!   set of kernels, the verdict is the class of 2 blocks or more
+//!   (`perf::compared`).  It allows at most one block of another class,
+//!   and not a loss and a gain together; else it is undecided.  When the
+//!   runs of a side chose different kernels, it runs each block up to that
 //!   most.  Then the verdict is the class of the mean change of the blocks
-//!   that are not spoiled, and "3 % or more" uses the size of that mean
-//!   (`perf::mean_verdict`).  It prints each kernel choice with its count,
-//!   under "kernels differ".  `--query` applies to both sides.  It refuses
-//!   `--gate`, `--update-baselines` and `--swiftshader`.  It refuses a run
-//!   on a fallback or a software adapter (GPU-3), and a run whose chunk
-//!   times have 1 decimal: the oldest base is `59da862`, the first commit
-//!   that logs them with 2.
+//!   that are not spoiled, and needs 2 of them (`perf::mean_verdict`).
+//!   "3 % or more" then uses the size of that mean.  It prints each kernel
+//!   choice with its count, under "kernels differ".  `--query` applies to
+//!   both sides.  It refuses `--gate`, `--update-baselines` and
+//!   `--swiftshader`.  It refuses a run on a fallback or a software adapter
+//!   (GPU-3).  It refuses a run whose chunk times have 1 decimal: the
+//!   oldest base is `59da862`, the first commit that logs them with 2.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -1472,8 +1474,8 @@ fn drop_model(p: &mut Page, url: &str) -> Result<()> {
 /// (`selftest=stages&step_limit=600&mm=s64`).  A `--query` with no
 /// `selftest` key gets `selftest=stages&` before it, so `--query
 /// mm=v64k8` tests `v64k8`, and `--query selftest=stages` tests the
-/// kernels that the GPU chooses.  A `--query` with no `step_limit` key
-/// gets `step_limit=600` too.
+/// kernels that the GPU chooses.  A `--query` with no `step_limit` that
+/// has a number gets `step_limit=600` too.
 fn selftest_query(query: Option<&str>) -> String {
     let Some(query) = query else {
         return "selftest=stages&step_limit=600&mm=s64".to_string();
@@ -1484,11 +1486,15 @@ fn selftest_query(query: Option<&str>) -> String {
             .split('&')
             .any(|pair| pair.split('=').next() == Some(key))
     };
-    match (has("selftest"), has("step_limit")) {
+    let step_limit = query.split('&').any(|pair| {
+        pair.split_once('=')
+            .is_some_and(|(key, value)| key == "step_limit" && value.parse::<f64>().is_ok())
+    });
+    match (has("selftest"), step_limit) {
         (true, true) => query.to_string(),
         (true, false) => format!("{query}&step_limit=600"),
         (false, true) => format!("selftest=stages&{query}"),
-        (false, false) => format!("selftest=stages&step_limit=600&{query}"),
+        (false, false) => format!("selftest=stages&{query}&step_limit=600"),
     }
 }
 
@@ -2453,13 +2459,14 @@ fn perf_run(o: &Opts, site: &PerfSite, name: &str) -> Result<(Page, Option<perf:
     Ok((p, result))
 }
 
-/// The folder of the page of `side` in a same-session comparison: `base`
-/// for the base, `head` (`--dist`) for the head.
-fn compare_dist<'a>(side: perf::Side, base: &'a Path, head: &'a Path) -> &'a Path {
-    match side {
-        perf::Side::Base => base,
-        perf::Side::Head => head,
-    }
+/// The folders of the pages of a same-session comparison, in the order of
+/// `Side::index`: the folder at `side.index()` is `base` for the base,
+/// and `head` (`--dist`) for the head.  `perf_compare` makes its sites in
+/// this order.
+fn compare_dists<'a>(base: &'a Path, head: &'a Path) -> [&'a Path; 2] {
+    let mut dists = [base; 2];
+    dists[perf::Side::Head.index()] = head;
+    dists
 }
 
 /// `e2e perf --base-dist <dir>`: the same-session comparison of the base
@@ -2474,8 +2481,10 @@ fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
     if !base_dist.join("index.html").is_file() {
         bail!("perf: {} has no index.html", base_dist.display());
     }
-    let start = |side| PerfSite::start(o, compare_dist(side, base_dist, &o.dist));
-    let sites = [start(perf::Side::Base)?, start(perf::Side::Head)?];
+    let sites = compare_dists(base_dist, &o.dist)
+        .into_iter()
+        .map(|dist| PerfSite::start(o, dist))
+        .collect::<Result<Vec<_>>>()?;
     let browser = perf::browser_name(o.browser);
     perf::run_comparison(
         browser,
@@ -3569,28 +3578,29 @@ mod tests {
         assert_eq!(page_errors(&log), log[2..]);
     }
 
-    /// Asserts that `compare_dist` gives the base folder for the base and
-    /// the `--dist` folder for the head, and that `Side::index` puts the
-    /// base at 0 and the head at 1, the order of the sites of
-    /// `perf_compare`.
+    /// Asserts that `compare_dists` puts the base folder at
+    /// `Side::Base.index()` and the `--dist` folder at
+    /// `Side::Head.index()`.
     #[test]
     fn each_side_of_a_comparison_runs_its_own_page() {
         let (base, head) = (Path::new("/tmp/base/dist"), Path::new("/tmp/head/dist"));
-        assert_eq!(compare_dist(perf::Side::Base, base, head), base);
-        assert_eq!(compare_dist(perf::Side::Head, base, head), head);
-        assert_eq!(perf::Side::Base.index(), 0);
-        assert_eq!(perf::Side::Head.index(), 1);
+        let dists = compare_dists(base, head);
+        assert_eq!(dists[perf::Side::Base.index()], base);
+        assert_eq!(dists[perf::Side::Head.index()], head);
     }
 
     /// Asserts that `selftest_query`:
     /// * gives `selftest=stages&step_limit=600&mm=s64` with no `--query`;
-    /// * puts `selftest=stages&step_limit=600&` before a `--query` with no
-    ///   `selftest` key (`mm=v64k8`, and `?mm=v64k8&weights=f16`);
+    /// * puts `selftest=stages&` before, and `&step_limit=600` after, a
+    ///   `--query` with no `selftest` key and no `step_limit` (`mm=v64k8`,
+    ///   `?mm=v64k8&weights=f16`, and `mm=i64&step_limit=`);
     /// * adds `&step_limit=600` to a `--query` with a `selftest` key and no
     ///   `step_limit` key (`selftest=stages`, and `mm=i64&selftest=full`);
     /// * keeps a `--query` with both keys as it is
     ///   (`selftest=stages&step_limit=60`), and puts only `selftest=stages&`
-    ///   before one with `step_limit` alone (`step_limit=60&mm=i64`).
+    ///   before one with `step_limit` alone (`step_limit=60&mm=i64`);
+    /// * adds `&step_limit=600` when `step_limit` has no number
+    ///   (`selftest=stages&step_limit`, `selftest=stages&step_limit=`).
     #[test]
     fn a_selftest_query_always_asks_for_the_self_test() {
         assert_eq!(
@@ -3599,11 +3609,11 @@ mod tests {
         );
         assert_eq!(
             selftest_query(Some("mm=v64k8")),
-            "selftest=stages&step_limit=600&mm=v64k8"
+            "selftest=stages&mm=v64k8&step_limit=600"
         );
         assert_eq!(
             selftest_query(Some("?mm=v64k8&weights=f16")),
-            "selftest=stages&step_limit=600&mm=v64k8&weights=f16"
+            "selftest=stages&mm=v64k8&weights=f16&step_limit=600"
         );
         assert_eq!(
             selftest_query(Some("selftest=stages")),
@@ -3620,6 +3630,18 @@ mod tests {
         assert_eq!(
             selftest_query(Some("step_limit=60&mm=i64")),
             "selftest=stages&step_limit=60&mm=i64"
+        );
+        assert_eq!(
+            selftest_query(Some("mm=i64&step_limit=")),
+            "selftest=stages&mm=i64&step_limit=&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("selftest=stages&step_limit")),
+            "selftest=stages&step_limit&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("selftest=stages&step_limit=")),
+            "selftest=stages&step_limit=&step_limit=600"
         );
     }
 
