@@ -348,6 +348,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Item 6 again at 1.0, with 12 rounds: both limits hold in each browser, and item 7 has no wrong choice (Surprises).
   * Item 8, with the head page of the working tree on `1e1c2cc`: `e2e selftest --query selftest=stages` passes in Safari (`v64k8,v64`, `fused`, worst stage 69.4 dB) and in Chrome (`v64,v64`, `freq`, 69.4 dB).  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-selftest-<browser>/`.
   * Item 8: `e2e stored-stems` in Chrome gives the same six hashes at `1e1c2cc` and at the head, with `attn=fused` and with `attn=freq`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-stored2-<base or head>-<policy>/`.  `stored-stems` took `attn` from `--query` only after a fix (Surprises).  Its test `stored_stems_takes_attn_from_the_query` failed first: `left: "split"`, `right: "fused"`.
+* [x] Step 6 (2026-11-14): the comparison of the fix gives no change in Chrome and in Safari (`--runs 8`).  The head's 12 calibrations in each browser give one choosable policy: `freq` in Chrome and `fused` in Safari.  The check of Step 3 passes in each browser.  No gain, so no new Safari baseline.  TD-101 is closed.
 
 ## Surprises and discoveries
 
@@ -426,6 +427,29 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * The 12 rounds cut Chrome's standard deviation from 0.020 to 0.0032, and Safari's from 0.0079 to 0.0052.
   * Item 7: Safari's one choosable policy is `fused`, the faster one.  Chrome's one choosable policy is `freq`, the faster one.  No browser has a wrong choice.
   * Safari chose `v64k8,v64` for the small products in 8 of 21 runs.  The two kernels time within 1 % there (1.16 to 1.18 s), so it is noise, not a defect.
+* 2026-11-14, Step 6: the same-session comparison of the fix.  Base: the page of `1e1c2cc`, whose `app/` is that of `a058eb6`, the commit before Step 5's commit.  Head: `745a62b`.  `--runs 8`, unforced.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step6-<browser>-1/output.log`.
+
+  | Browser | Block `r` | Kernels, base | Kernels, head | Verdict |
+  | - | - | - | - | - |
+  | Chrome 157 | -0.11 %, -0.11 %, -0.22 %, +0.00 % | `v64,v64` x5, `v64,v64k8` x3; `freq` x8 | `v64,v64`, `freq` x8 | no change (mean `r` of 4 blocks) |
+  | Safari 27.2 | -0.14 %, -0.07 %, -0.07 %, -0.07 % | `v64k8,v64` x4, `v64k8,v64k8` x4; `fused` x8 | `v64k8,v64k8` x5, `v64k8,v64` x3; `fused` x8 | no change (mean `r` of 4 blocks) |
+
+  * The base already chose the faster policy in each of its runs today: `freq` in Chrome, and `fused` in Safari.  So the fix gives no gain here.  At the base, Safari chose `freq` in about 10 of 22 calibrations of M4, and in none of 8 + 8 of M5.
+  * Chunk lower quartiles: Chrome 4.62 to 4.63 s on both sides; Safari 6.98 to 7.01 s on both sides.
+* 2026-11-14, Step 6, item 2: the head's calibrations, from the 8 head runs of item 1 and 4 more unforced runs in each browser (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step6free-<browser>-<n>/`).
+
+  | Browser | N | Policies | Matmul policies | Ratio: mean, SD | Mean plus or minus 2 SD | Choosable |
+  | - | - | - | - | - | - | - |
+  | Chrome 157 | 12 | `freq` x12 | `v64,v64` x9, `v64,v64k8` x3 | 1.0215, 0.0038 | 1.014 to 1.029 | `freq` |
+  | Safari 27.2 | 12 | `fused` x12 | `v64k8,v64k8` x8, `v64k8,v64` x4 | 0.9418, 0.0034 | 0.935 to 0.949 | `fused` |
+
+* 2026-11-14, Step 6, item 3: the check at the head page (`745a62b`), the same page on both sides, `--runs 4`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step6check-<browser>-1/output.log`.
+
+  | Browser, pins | Base, head | Block `r` | Verdict | The check |
+  | - | - | - | - | - |
+  | Chrome 157, `v64,v64` | `fused`, `freq` | -1.39 %, -1.39 % | gain of `freq` | passes: `freq` is not slower |
+  | Safari 27.2, `v64k8,v64k8` | `freq`, `fused` | -3.98 %, -4.05 % | gain of `fused`, 3 % or more | passes: `fused` is not slower |
+
 * 2026-11-14, Step 5, item 8: `e2e stored-stems` did not read `--query`.  Its page script set `mm: 's64', attn: 'split'`, so a run with `--query attn=fused` ran split attention, and gave the same hashes as `attn=freq`.  Now it takes `attn` from `--query` (`stored_stems_attn`), and logs the policy.  With it, `fused` and `freq` give different hashes, and each is the same at the base and the head.
 
 ## Decision log
