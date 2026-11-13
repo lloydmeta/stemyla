@@ -6,36 +6,36 @@
       "chip": "Apple M2 Pro"
     },
     "version": "157.0.8103.51",
-    "date": "2026-11-12",
-    "commit": "1a79cdd",
+    "date": "2026-11-14",
+    "commit": "9d6d447",
     "runs": [
       {
         "order": 1,
-        "kernels": "matmul v64,v64, attention freq",
-        "chunk_lower_quartile": 4.7
+        "kernels": "matmul v64,v64, attention vfused",
+        "chunk_lower_quartile": 3.58
       },
       {
         "order": 2,
-        "kernels": "matmul v64,v64, attention freq",
-        "chunk_lower_quartile": 4.7
+        "kernels": "matmul v64,v64, attention vfused",
+        "chunk_lower_quartile": 3.59
       },
       {
         "order": 3,
-        "kernels": "matmul v64,v64, attention freq",
-        "chunk_lower_quartile": 4.7
+        "kernels": "matmul v64,v64, attention vfused",
+        "chunk_lower_quartile": 3.59
       },
       {
         "order": 4,
-        "kernels": "matmul v64,v64, attention freq",
-        "chunk_lower_quartile": 4.7
+        "kernels": "matmul v64,v64, attention vfused",
+        "chunk_lower_quartile": 3.6
       },
       {
         "order": 5,
-        "kernels": "matmul v64,v64, attention freq",
-        "chunk_lower_quartile": 4.7
+        "kernels": "matmul v64,v64k8, attention vfused",
+        "chunk_lower_quartile": 3.61
       }
     ],
-    "baseline": 4.7,
+    "baseline": 3.59,
     "tolerance_pct": 10.0,
     "raise": ""
   },
@@ -46,36 +46,36 @@
       "chip": "Apple M2 Pro"
     },
     "version": "27.2",
-    "date": "2026-11-13",
-    "commit": "a238db5",
+    "date": "2026-11-14",
+    "commit": "9d6d447",
     "runs": [
       {
         "order": 1,
-        "kernels": "matmul v64k8,v64, attention freq",
-        "chunk_lower_quartile": 7.44
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.58
       },
       {
         "order": 2,
-        "kernels": "matmul v64k8,v64k8, attention freq",
-        "chunk_lower_quartile": 7.38
+        "kernels": "matmul v64k8,v64, attention vfused",
+        "chunk_lower_quartile": 5.55
       },
       {
         "order": 3,
-        "kernels": "matmul v64k8,v64, attention freq",
-        "chunk_lower_quartile": 7.47
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.57
       },
       {
         "order": 4,
-        "kernels": "matmul v64k8,v64k8, attention fused",
-        "chunk_lower_quartile": 7.22
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.57
       },
       {
         "order": 5,
-        "kernels": "matmul v64k8,v64k8, attention fused",
-        "chunk_lower_quartile": 7.22
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.58
       }
     ],
-    "baseline": 7.38,
+    "baseline": 5.57,
     "tolerance_pct": 10.0,
     "raise": ""
   }

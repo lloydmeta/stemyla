@@ -359,6 +359,9 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * `e2e stored-stems` in Chrome gives the same hashes at `1c232b6` and with the candidate, with `attn=fused` and with `attn=freq`.  With `attn=vfused` it gives the hashes of `attn=fused`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step8-stored-<side>-<policy>/`.
 * [x] Step 9 (2026-11-14): the gain rule for `vfused`.  A gain in each browser, in both pages, against each reference: `R` 0.66 to 0.70, with `S` 2.3 % or less.  So `vfused` lands.
 * [x] Step 10 (2026-11-14): with the candidate page, before the commit, `e2e selftest` passes in Safari and in Chrome, each with `--query attn=vfused` and with `--query selftest=stages` (the kernels that each browser chooses), worst stage 69.4 dB.  Safari chose `v64k8,v64` and `vfused`; Chrome `v64,v64` and `vfused`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step10-selftest-<browser>-<attn or selftest>/`.  Then the commit of `vfused`, with `vfused` moved from `NEW_KERNELS` to `PINNED_WGSL` (`0xed9b_5bcb_7b74_65a1`).
+* [x] Step 11 (2026-11-14): the comparison of `vfused` (`9d6d447`) against `d244d57`, `--runs 8`: a gain of 3 % or more in each browser, Chrome -22.4 % and Safari -20.3 % (the mean `r` of 4 blocks).  Each head run chose `vfused`.
+* [x] Step 12 (2026-11-14): at the head, `vfused` is the one choosable policy in each browser (12 of 12 calibrations), and the check passes: a gain of 20 % to 23 % against `fused` and against `freq`.  No two choices are near, so no flip cost is measured.
+* [x] Step 13 (2026-11-14): both browsers chose `vfused`, so both baselines are measured again with `e2e perf --runs 5 --update-baselines` at `9d6d447`.  Each bound is lower, so no `--raise`: Chrome 157 4.70 s to 3.59 s, Safari 27.2 7.38 s to 5.57 s.
 
 ## Surprises and discoveries
 
@@ -472,6 +475,42 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * The verdict: C1 is built, by the rule of Step 7: `i64` over `v64` on `time scores` is an effect in Chrome.
   * In Safari, the effect on `time scores` goes the other way: `v64` takes 1.19 times `i64`'s time at K 64, though it takes 0.80 times at K 256.  So vec4 reads are predicted to help C1 in Chrome and to slow it in Safari.  C1's loops have K 16 for each slice, nearer K 64 than K 256.
   * The attention-only figures of `measure_attention` (time axis, seconds for each chunk): Safari split 3.06 to 3.09, fused 3.24 to 3.30; Chrome split 1.82 to 1.84, fused 2.17 to 2.19.
+
+* 2026-11-14, Step 13: the baselines, from 5 runs in each browser at `9d6d447`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step13-<browser>/output.log`.
+
+  | Browser | Chunk lower quartiles | Kernels | Baseline, bound | Before |
+  | - | - | - | - | - |
+  | Chrome 157 | 3.58, 3.59, 3.59, 3.60, 3.61 | `v64,v64` x4, `v64,v64k8` x1; `vfused` x5 | 3.59 s, 3.95 s | 4.70 s, 5.17 s |
+  | Safari 27.2 | 5.58, 5.55, 5.57, 5.57, 5.58 | `v64k8,v64k8` x4, `v64k8,v64` x1; `vfused` x5 | 5.57 s, 6.13 s | 7.38 s, 8.12 s |
+
+* 2026-11-14, Step 12: the head's calibrations, from the 8 head runs of Step 11 and 4 more unforced runs in each browser (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step12free-<browser>-<n>/`).  The ratios are calibration's `vfused` time over its `fused` time, and over its split time.
+
+  | Browser | N | Policies | Matmul policies | `vfused` / `fused`: mean, SD | `vfused` / split: mean, SD | Choosable |
+  | - | - | - | - | - | - | - |
+  | Chrome 157 | 12 | `vfused` x12 | `v64,v64` x12 | 0.6492, 0.0019 | 0.6635, 0.0022 | `vfused` |
+  | Safari 27.2 | 12 | `vfused` x12 | `v64k8,v64k8` x10, `v64k8,v64` x2 | 0.6983, 0.0028 | 0.6612, 0.0034 | `vfused` |
+
+  * Calibration's times for each chunk: Chrome split 3.05 to 3.07 s, `fused` 3.12 to 3.14 s, `vfused` 2.03 to 2.04 s; Safari split 4.93 to 5.17 s, `fused` 4.71 to 4.95 s, `vfused` 3.28 to 3.45 s.
+  * No two choices are near by Terms: the two fused kernels are 30 % to 35 % apart, and the faster one over split is 0.66, not 0.99 to 1.21.  So Step 12 measures no flip cost.  The forced runs of the check give the cost of each flip from `vfused` anyway: about 30 % in Chrome and 25 % to 31 % in Safari.
+
+* 2026-11-14, Step 12: the check at the head page (`9d6d447`), `vfused` on the head, the same page on both sides, `--runs 4`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step12check-<browser>-<policy>/output.log`.
+
+  | Browser, pins | Base | Block `r` | Verdict | The check |
+  | - | - | - | - | - |
+  | Chrome 157, `v64,v64` | `fused` | -23.37 %, -23.37 % | gain, 3 % or more | passes |
+  | Chrome 157, `v64,v64` | `freq` | -22.40 %, -22.29 % | gain, 3 % or more | passes |
+  | Safari 27.2, `v64k8,v64k8` | `fused` | -20.14 %, -20.23 % | gain, 3 % or more | passes |
+  | Safari 27.2, `v64k8,v64k8` | `freq` | -23.47 %, -23.42 % | gain, 3 % or more | passes |
+
+* 2026-11-14, Step 11: the same-session comparison of `vfused`.  Base: the page of `1c232b6`, whose `app/` is that of `d244d57`, the commit before Step 10's commit.  Head: `9d6d447`.  `--runs 8`, unforced.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step11-<browser>-1/output.log`.
+
+  | Browser | Block `r` | Kernels, base | Kernels, head | Chunk lower quartiles, base; head | Verdict |
+  | - | - | - | - | - | - |
+  | Chrome 157 | -22.55 %, -22.38 %, -22.38 %, -22.38 % | `v64,v64k8` x4, `v64,v64` x4; `freq` x8 | `v64,v64`, `vfused` x8 | 4.62 to 4.64; 3.59 | gain, 3 % or more |
+  | Safari 27.2 | -20.26 %, -20.31 %, -20.46 %, -20.19 % | `v64k8,v64k8` x6, `v64k8,v64` x2; `fused` x8 | `v64k8,v64k8` x7, `v64k8,v64` x1; `vfused` x8 | 6.98 to 7.00; 5.54 to 5.58 | gain, 3 % or more |
+
+  * Whole times: Chrome 51.1 to 51.2 s at the base, 39.7 to 39.8 s at the head; Safari 77.0 to 77.7 s, 61.1 to 61.6 s.
+  * Each browser that chooses `vfused` has its gain of Step 9.
 
 * 2026-11-14, Step 9: the gain rule for `vfused`.  One set of `e2e bench --query "bench=v64&bench_rounds=5&mm=<pins>&attn=fused"` with the candidate page (the working tree on `d244d57`), in the order Safari, Chrome, Safari, Chrome; pins as in Step 7.  `R` is `vfused`'s time for each chunk over the reference's, in Step 5's form (whole time-transformer steps with a wait after each, as calibration times them).  `S` is the largest spread of the figures in `R`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step9-<browser>-<n>/`.
 
