@@ -377,9 +377,9 @@ pub(super) fn profile_groups(log: &[String], frames: usize, bands: usize) -> Opt
     Some(g)
 }
 
-/// The reason that a run can never pass the gate or be a baseline, or
-/// `None`.
-pub(super) fn never_a_pass(result: &PerfResult, o: &Opts) -> Option<String> {
+/// The reason that a run's adapter can never give evidence of speed, or
+/// `None` (GPU-3).
+pub(super) fn adapter_refusal(result: &PerfResult) -> Option<String> {
     if result.fallback != "no" {
         return Some(format!(
             "the fallback adapter value is {:?}, not \"no\": a fallback adapter, or one that the browser does not name (GPU-3)",
@@ -387,14 +387,22 @@ pub(super) fn never_a_pass(result: &PerfResult, o: &Opts) -> Option<String> {
         ));
     }
     let adapter = result.adapter.to_lowercase();
-    if let Some(name) = SOFTWARE_ADAPTERS
+    SOFTWARE_ADAPTERS
         .iter()
         .find(|name| adapter.contains(*name))
-    {
-        return Some(format!(
-            "the adapter {} is {name}, a software adapter (GPU-3)",
-            result.adapter
-        ));
+        .map(|name| {
+            format!(
+                "the adapter {} is {name}, a software adapter (GPU-3)",
+                result.adapter
+            )
+        })
+}
+
+/// The reason that a run can never pass the gate or be a baseline, or
+/// `None`.
+pub(super) fn never_a_pass(result: &PerfResult, o: &Opts) -> Option<String> {
+    if let Some(reason) = adapter_refusal(result) {
+        return Some(reason);
     }
     if o.swiftshader {
         return Some("--swiftshader asks for a software adapter (GPU-3)".into());
@@ -679,6 +687,15 @@ pub(super) enum Side {
 }
 
 impl Side {
+    /// 0 for the base and 1 for the head: the place of the side in an array
+    /// of the two sides, `[base, head]`.
+    pub fn index(self) -> usize {
+        match self {
+            Self::Base => 0,
+            Self::Head => 1,
+        }
+    }
+
     /// `base` or `head`, as in the names of the files of the runs.
     pub fn name(self) -> &'static str {
         match self {
@@ -692,11 +709,13 @@ impl Side {
 pub(super) const BLOCK_ORDER: [Side; 4] = [Side::Base, Side::Head, Side::Head, Side::Base];
 
 /// The figures of one block of B H H B, in seconds: the chunk lower
-/// quartiles of B1 and B2, and of H1 and H2.
+/// quartiles of B1 and B2, and of H1 and H2.  `same`: whether the two runs
+/// of the base, and of the head, chose the same kernels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct Block {
     pub base: [f64; 2],
     pub head: [f64; 2],
+    pub same: [bool; 2],
 }
 
 /// The class of a block, and of a verdict that is decided.
@@ -719,11 +738,22 @@ impl Class {
 }
 
 impl Block {
-    /// The block of the figures of its runs in the order B H H B.
+    /// The block of the figures of its runs in the order B H H B, each
+    /// side's runs on the same kernels.
     pub fn of(runs: [f64; 4]) -> Self {
         Self {
             base: [runs[0], runs[3]],
             head: [runs[1], runs[2]],
+            same: [true, true],
+        }
+    }
+
+    /// The block of the figures and the kernels of its runs in the order B
+    /// H H B.
+    pub fn with_kernels(runs: [f64; 4], kernels: [&str; 4]) -> Self {
+        Self {
+            same: [kernels[0] == kernels[3], kernels[1] == kernels[2]],
+            ..Self::of(runs)
         }
     }
 
@@ -739,9 +769,14 @@ impl Block {
         apart(self.base).max(apart(self.head))
     }
 
-    /// Whether [`Block::apart`] is more than [`SPOIL_N`].
+    /// Whether the two runs of a side that chose the same kernels differ
+    /// by more than [`SPOIL_N`] of the faster run.  A side whose runs chose
+    /// different kernels does not spoil the block: its difference is the
+    /// choice, not noise.
     pub fn spoiled(&self) -> bool {
-        self.apart() > SPOIL_N + EPSILON
+        let apart = |[a, b]: [f64; 2]| (a - b).abs() / a.min(b);
+        let spoils = |same: bool, runs: [f64; 2]| same && apart(runs) > SPOIL_N + EPSILON;
+        spoils(self.same[0], self.base) || spoils(self.same[1], self.head)
     }
 
     /// A loss when `r > T`, a gain when `r < -T`, else no change.
@@ -798,10 +833,19 @@ pub(super) fn compared(blocks: &[Block], max_blocks: usize) -> Option<Compared> 
 }
 
 /// The verdict when the runs of a side chose different kernels: the class
-/// of the mean `r` of all `blocks`, none spoiled, and whether its size is
-/// [`CLEAR_CHANGE`] or more.
+/// of the mean `r` of the `blocks` that are not spoiled
+/// ([`Block::spoiled`]), and whether its size is [`CLEAR_CHANGE`] or
+/// more.  Undecided when each block is spoiled.
 pub(super) fn mean_verdict(blocks: &[Block]) -> Compared {
-    let mean = blocks.iter().map(Block::change).sum::<f64>() / blocks.len().max(1) as f64;
+    let counted: Vec<f64> = blocks
+        .iter()
+        .filter(|b| !b.spoiled())
+        .map(Block::change)
+        .collect();
+    if counted.is_empty() {
+        return Compared::Undecided;
+    }
+    let mean = counted.iter().sum::<f64>() / counted.len() as f64;
     let class = if mean > CHANGE_T + EPSILON {
         Class::Loss
     } else if mean < -CHANGE_T - EPSILON {
@@ -865,8 +909,9 @@ pub(super) fn run_comparison(
     let differ = |k: &[String]| k.iter().any(|x| *x != k[0]);
     let (verdict, mixed) = loop {
         let mut figures = [0.0; 4];
+        let mut block_kernels: [String; 4] = Default::default();
         for (at, side) in BLOCK_ORDER.into_iter().enumerate() {
-            let s = usize::from(side == Side::Head);
+            let s = side.index();
             counts[s] += 1;
             order += 1;
             let name = compare_run_name(browser, side, counts[s]);
@@ -875,6 +920,9 @@ pub(super) fn run_comparison(
                 return Err(format!(
                     "run {name}: its chunk times have fewer than 2 decimals, so its page is from before 59da862, which logs them with 2; build the base at 59da862 or later"
                 ));
+            }
+            if let Some(reason) = adapter_refusal(&result) {
+                return Err(format!("run {name}: {reason}"));
             }
             say(format!(
                 "perf: compare run {order} (block {}, {name}): chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, kernels {}",
@@ -887,19 +935,19 @@ pub(super) fn run_comparison(
             if !versions.contains(&result.version) {
                 versions.push(result.version.clone());
             }
-            kernels[s].push(result.kernels);
             figures[at] = result.chunk_lower_quartile;
+            block_kernels[at] = result.kernels.clone();
+            kernels[s].push(result.kernels);
         }
-        let block = Block::of(figures);
+        let block = Block::with_kernels(figures, block_kernels.each_ref().map(String::as_str));
         blocks.push(block);
-        let in_block = |k: &[String]| differ(&k[k.len() - 2..]);
-        let note = if in_block(&kernels[0]) || in_block(&kernels[1]) {
-            ", kernels differ"
-        } else if block.spoiled() {
-            ", spoiled"
-        } else {
+        let differs = if block.same == [true, true] {
             ""
+        } else {
+            ", kernels differ"
         };
+        let spoiled = if block.spoiled() { ", spoiled" } else { "" };
+        let note = format!("{differs}{spoiled}");
         say(format!(
             "perf: compare block {}: r {:+.2} %, runs of a side apart by up to {:.2} %, {}{note}",
             blocks.len(),
@@ -974,7 +1022,18 @@ pub(super) fn run_comparison(
 /// The reason to refuse a same-session comparison (`--base-dist`) before
 /// any run, or `None`: with `--gate` or `--update-baselines`, or with a
 /// `--runs` that is odd or under 4.  `--runs` is the count of each side.
-pub(super) fn compare_refusal(runs: usize, gate: bool, update: bool) -> Option<String> {
+pub(super) fn compare_refusal(
+    runs: usize,
+    gate: bool,
+    update: bool,
+    swiftshader: bool,
+) -> Option<String> {
+    if swiftshader {
+        return Some(
+            "--base-dist with --swiftshader: a software adapter is no evidence of speed (GPU-3)"
+                .into(),
+        );
+    }
     if gate {
         return Some("--base-dist with --gate: a comparison is never gated".into());
     }
@@ -1836,12 +1895,15 @@ mod tests {
     }
 
     /// A result of a comparison's run: its chunk lower quartile, kernels
-    /// and browser version, with 2 decimals.
+    /// and browser version, with 2 decimals, on a GPU that is not a
+    /// fallback adapter.
     fn compare_result(chunk_lower_quartile: f64, kernels: &str, version: &str) -> PerfResult {
         PerfResult {
             chunk_lower_quartile,
             kernels: kernels.into(),
             version: version.into(),
+            adapter: "apple metal-3".into(),
+            fallback: "no".into(),
             two_decimals: true,
             ..PerfResult::default()
         }
@@ -2035,6 +2097,165 @@ mod tests {
             }
         }
         assert!(no_change < 0.05, "{no_change}");
+        assert!((no_change - 0.6_f64.powi(8)).abs() < 1e-12, "{no_change}");
+    }
+
+    /// Asserts that one slow head run (+10 %, H1 of block 1) on the head's
+    /// one kernel choice, with a base run (B2 of block 1) on other kernels
+    /// and each other run at 5.0 s, gives no change: the slow run spoils
+    /// its block, since the two head runs of that block chose the same
+    /// kernels.  The comparison still runs 4 blocks, since the base's
+    /// kernels differ.
+    #[test]
+    fn a_slow_run_on_one_kernel_choice_still_spoils_its_block() {
+        let mut order = 0;
+        let (_, lines, result) = comparison_with(4, |side, _n| {
+            order += 1;
+            let base = "matmul v64,v64, attention fused";
+            match (side, order) {
+                (Side::Base, 4) => compare_result(5.0, "matmul v64,i64, attention fused", "27.2"),
+                (Side::Base, _) => compare_result(5.0, base, "27.2"),
+                (Side::Head, 2) => compare_result(5.5, base, "27.2"),
+                (Side::Head, _) => compare_result(5.0, base, "27.2"),
+            }
+        });
+        let c = result.expect("a comparison");
+        assert!(c.mixed);
+        assert_eq!(c.blocks.len(), MAX_BLOCKS);
+        assert_eq!(
+            c.verdict,
+            Compared::Decided(Class::NoChange, false),
+            "{lines:#?}"
+        );
+    }
+
+    /// Asserts that a comparison whose base chose other kernels in one run
+    /// (B2 of block 1), and whose head has one choice, all at 5.0 s:
+    /// * is `mixed`, and runs 4 blocks;
+    /// * prints "kernels differ, base: matmul v64,v64, attention fused x7;
+    ///   matmul v64,i64, attention fused x1";
+    /// * gives no change.
+    #[test]
+    fn a_base_with_two_kernel_choices_makes_the_comparison_mixed() {
+        let mut order = 0;
+        let (_, lines, result) = comparison_with(4, |side, _n| {
+            order += 1;
+            let kernels = match (side, order) {
+                (Side::Base, 4) => "matmul v64,i64, attention fused",
+                _ => "matmul v64,v64, attention fused",
+            };
+            compare_result(5.0, kernels, "27.2")
+        });
+        let c = result.expect("a comparison");
+        assert!(c.mixed);
+        assert_eq!(c.blocks.len(), MAX_BLOCKS);
+        assert_eq!(c.verdict, Compared::Decided(Class::NoChange, false));
+        assert!(
+            lines.iter().any(|l| l.ends_with(
+                "kernels differ, base: matmul v64,v64, attention fused x7; matmul v64,i64, attention fused x1"
+            )),
+            "{lines:#?}"
+        );
+    }
+
+    /// Asserts:
+    /// * the line of block 1 ends with ", kernels differ" when only its
+    ///   head runs chose different kernels, and when only its base runs
+    ///   did;
+    /// * the first run line says "compare run 1 (", and the eighth says
+    ///   "compare run 8 (".
+    #[test]
+    fn a_block_line_says_when_its_kernels_differ() {
+        for other in [Side::Head, Side::Base] {
+            let (_, lines, _) = comparison_with(4, |side, n| {
+                let kernels = if side == other && n == 2 {
+                    "slow"
+                } else {
+                    "fast"
+                };
+                compare_result(5.0, kernels, "157.0")
+            });
+            let block = lines
+                .iter()
+                .find(|l| l.contains("compare block 1:"))
+                .cloned()
+                .unwrap_or_default();
+            assert!(block.ends_with(", kernels differ"), "{other:?}: {block}");
+            let runs: Vec<&String> = lines
+                .iter()
+                .filter(|l| l.contains("compare run "))
+                .collect();
+            assert!(runs[0].contains("compare run 1 ("), "{runs:?}");
+            assert!(runs[7].contains("compare run 8 ("), "{runs:?}");
+        }
+    }
+
+    /// Asserts, for `mean_verdict` of blocks of one `r` each:
+    /// * -5 % is a gain, 3 % or more; +5 % a loss, 3 % or more;
+    /// * about +1 % and -1 % (`CHANGE_T`, `-CHANGE_T`) are no change;
+    /// * `CLEAR_CHANGE` is a loss, 3 % or more;
+    /// * a mean of exactly `CHANGE_T + EPSILON`, and of exactly
+    ///   `-CHANGE_T - EPSILON`, is no change.
+    #[test]
+    fn the_mean_verdict_holds_at_its_edges() {
+        let at = |r: f64| Block::of([1.0, 1.0 + r, 1.0 + r, 1.0]);
+        let with_x = |xs: &[f64]| -> Vec<Block> {
+            xs.iter().map(|&x| Block::of([1.0, x, x, 1.0])).collect()
+        };
+        let mean = |b: &[Block]| b.iter().map(Block::change).sum::<f64>() / b.len() as f64;
+        assert_eq!(
+            mean_verdict(&[at(-0.05)]),
+            Compared::Decided(Class::Gain, true)
+        );
+        assert_eq!(
+            mean_verdict(&[at(0.05)]),
+            Compared::Decided(Class::Loss, true)
+        );
+        assert_eq!(
+            mean_verdict(&[at(CHANGE_T)]),
+            Compared::Decided(Class::NoChange, false)
+        );
+        assert_eq!(
+            mean_verdict(&[at(-CHANGE_T)]),
+            Compared::Decided(Class::NoChange, false)
+        );
+        assert_eq!(
+            mean_verdict(&[at(CLEAR_CHANGE)]),
+            Compared::Decided(Class::Loss, true)
+        );
+        let mut up = vec![1.010_000_000_931_311_5; 127];
+        up.push(1.010_000_000_932_731_5);
+        let up = with_x(&up);
+        assert_eq!(mean(&up), CHANGE_T + EPSILON);
+        assert_eq!(mean_verdict(&up), Compared::Decided(Class::NoChange, false));
+        let mut down = vec![0.989_999_999_068_677_4; 63];
+        down.push(0.989_999_999_068_678);
+        let down = with_x(&down);
+        assert_eq!(mean(&down), -CHANGE_T - EPSILON);
+        assert_eq!(
+            mean_verdict(&down),
+            Compared::Decided(Class::NoChange, false)
+        );
+    }
+
+    /// Asserts that a comparison refuses a run whose adapter is
+    /// SwiftShader, and a run whose fallback adapter value is "yes", each
+    /// with a reason that names GPU-3, and that `compare_refusal` refuses
+    /// `--swiftshader`.
+    #[test]
+    fn a_comparison_refuses_a_software_or_fallback_adapter() {
+        let software = |adapter: &str, fallback: &str| PerfResult {
+            adapter: adapter.into(),
+            fallback: fallback.into(),
+            ..compare_result(5.0, "matmul v64,v64, attention freq", "157.0")
+        };
+        for (adapter, fallback) in [("Google SwiftShader", "no"), ("apple metal-3", "yes")] {
+            let (_, _, result) = comparison_with(4, |_, _| software(adapter, fallback));
+            let reason = result.expect_err("a refusal");
+            assert!(reason.contains("GPU-3"), "{reason}");
+        }
+        let refusal = compare_refusal(4, false, false, true).unwrap_or_default();
+        assert!(refusal.contains("--swiftshader"), "{refusal}");
     }
 
     /// Asserts the edges of the rule:
@@ -2085,12 +2306,12 @@ mod tests {
             let r = r.unwrap_or_default();
             assert!(r.contains(want), "{want:?} in {r:?}");
         };
-        names(compare_refusal(4, true, false), "--gate");
-        names(compare_refusal(4, false, true), "--update-baselines");
-        names(compare_refusal(5, false, false), "--runs 5");
-        names(compare_refusal(2, false, false), "--runs 2");
-        assert_eq!(compare_refusal(4, false, false), None);
-        assert_eq!(compare_refusal(8, false, false), None);
+        names(compare_refusal(4, true, false, false), "--gate");
+        names(compare_refusal(4, false, true, false), "--update-baselines");
+        names(compare_refusal(5, false, false, false), "--runs 5");
+        names(compare_refusal(2, false, false, false), "--runs 2");
+        assert_eq!(compare_refusal(4, false, false, false), None);
+        assert_eq!(compare_refusal(8, false, false, false), None);
     }
 
     /// Asserts, with an old baseline of 5.0 s and a tolerance of 10 % (a

@@ -69,6 +69,23 @@ fn old_session_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("old-session", "old-session", false);
 }
 
+/// Asserts that `e2e perf --base-dist <a folder with no index.html> --runs
+/// 4` fails, with "has no index.html", before a browser starts.
+#[test]
+fn a_comparison_with_no_base_page_fails() {
+    let dir = test_dir("perf-base-dist");
+    let empty = dir.join("no-base-page");
+    std::fs::create_dir_all(&empty).unwrap();
+    let empty = empty.to_str().unwrap().to_string();
+    let out = run_without_a_driver(&dir, "perf", &["--base-dist", &empty, "--runs", "4"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "perf --base-dist fails: {stderr}");
+    assert!(
+        stderr.contains("no-base-page has no index.html"),
+        "{stderr}"
+    );
+}
+
 /// Asserts that `e2e perf`, given a model file and no driver, reads the
 /// committed baselines and fails on the driver, not before it.
 #[test]

@@ -118,7 +118,7 @@ Every change to a kernel is checked against the CPU (`STEMYLA_REQUIRE=gpu,f16 ca
 A new kernel is never made the default on the strength of SwiftShader (or any software adapter) alone; it needs a pass on a real GPU, named in the PR.
 
 * Why: SwiftShader's compiler and timing differ from real GPUs; correctness there says little about speed or about other compilers.
-* Enforced by: `e2e perf` refuses a run as a pass or a baseline when its fallback adapter value is not `no`.  It also refuses a software adapter: SwiftShader, llvmpipe, lavapipe or the Basic Render Driver.  `never_a_pass_names_each_reason` checks both (`xtask/src/e2e/perf.rs`).  The worker's `model loaded`, `selftest: GPU` and `bench: GPU` lines name the adapter and its `isFallbackAdapter` value.  Nothing ties a new default kernel to a pass on a named real GPU.
+* Enforced by: `e2e perf` refuses a run as a pass or a baseline when its fallback adapter value is not `no`.  It also refuses a software adapter: SwiftShader, llvmpipe, lavapipe or the Basic Render Driver.  `never_a_pass_names_each_reason` checks both (`xtask/src/e2e/perf.rs`).  The same-session comparison (`e2e perf --base-dist`) refuses such a run, and `--swiftshader`: `a_comparison_refuses_a_software_or_fallback_adapter`.  The worker's `model loaded`, `selftest: GPU` and `bench: GPU` lines name the adapter and its `isFallbackAdapter` value.  Nothing ties a new default kernel to a pass on a named real GPU.
 * Gaps: TD-10.
 
 ## Messages
