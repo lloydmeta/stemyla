@@ -367,13 +367,11 @@ async fn gpu_text(gpu: &Gpu) -> String {
         .collect();
     let policy = gpu.policy.get().name();
     let attn = gpu.attention.get().name();
-    let fused = if gpu.fused_ok.get() {
-        "checked OK"
-    } else {
-        "not used"
-    };
+    let checked = |ok: bool| if ok { "checked OK" } else { "not used" };
+    let fused = checked(gpu.fused_ok.get());
+    let vfused = checked(gpu.fused_ok.get() && gpu.vfused_ok.get());
     format!(
-        "{name}, fallback adapter {fallback}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused attention {fused}",
+        "{name}, fallback adapter {fallback}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused attention {fused}, vfused {vfused}",
         l.max_compute_invocations_per_workgroup,
         l.max_compute_workgroup_storage_size / 1024,
         l.max_storage_buffer_binding_size >> 20,
@@ -1793,8 +1791,9 @@ fn apply_policy(gpu: &Gpu, s: &Settings) {
 }
 
 /// `?attn=` in the page URL: `auto` (this GPU's choice), `split`,
-/// `fused`, or `time` / `freq` for fused attention on that axis only.
-/// Fused attention is used only if it passed the start-up check.
+/// `fused`, `time` / `freq` for fused attention on that axis only, or
+/// `vfused`.  A policy is used only if its kernels passed the start-up
+/// check (`AttentionPolicy::usable`).
 fn apply_attention(gpu: &Gpu, s: &Settings) {
     let Some(name) = s.attn.as_deref() else {
         return;
@@ -1803,14 +1802,13 @@ fn apply_attention(gpu: &Gpu, s: &Settings) {
         return;
     }
     match roformer_gpu::AttentionPolicy::parse(name) {
-        Some(p) if p == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get() => {
-            gpu.attention.set(p)
-        }
-        Some(_) => {
-            log("fused attention failed the start-up check on this GPU; using split attention")
-        }
+        Some(p) if p.usable(gpu.fused_ok.get(), gpu.vfused_ok.get()) => gpu.attention.set(p),
+        Some(_) => log(&format!(
+            "attention {name}: its fused kernel failed the start-up check on this GPU; using {}",
+            gpu.attention.get().name()
+        )),
         None => log(&format!(
-            "unknown attention setting {name} (auto, split, fused, time or freq)"
+            "unknown attention setting {name} (auto, split, fused, time, freq or vfused)"
         )),
     }
 }
@@ -1848,7 +1846,17 @@ async fn bench(s: &Settings) -> Result<(), String> {
     if loaded.is_none() {
         ensure_kernels(&g, s, format).await;
     }
-    roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
+    roformer_gpu::bench::measure_attention(
+        &g,
+        format,
+        budget(s),
+        warm,
+        round,
+        rounds,
+        now_s,
+        |l| log(&l),
+    )
+    .await;
     let text = format!(
         "bench finished in {:.0} s; results in the browser console",
         now_s() - t0
@@ -2046,7 +2054,7 @@ async fn choose_kernels(gpu: &Gpu, format: WeightFormat, budget: usize) -> Chose
         if let Some(c) = roformer_gpu::bench::Choice::parse(v)
             && gpu.usable.get()[c.matmul.pick(1000, 1000)]
             && gpu.usable.get()[c.matmul.pick(10, 10)]
-            && (c.attention == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get())
+            && c.attention.usable(gpu.fused_ok.get(), gpu.vfused_ok.get())
         {
             gpu.policy.set(c.matmul);
             gpu.attention.set(c.attention);

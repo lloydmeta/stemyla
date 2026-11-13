@@ -357,6 +357,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * `the_worker_takes_a_policy_only_when_its_kernels_passed` (a source test), on the worker's source at `1c232b6`: `Some(p) if p.usable(...) => gpu.attention.set(p), in worker/src/web.rs`.  `choice_keys_name_the_format`, with `CALIBRATION` 5: `left: 5`, `right: 6`.
   * Then `cargo test -p roformer-gpu --lib` (58) and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` pass on the M2 Pro (Metal), `vfused` equal to the tiled kernel bit for bit.
   * `e2e stored-stems` in Chrome gives the same hashes at `1c232b6` and with the candidate, with `attn=fused` and with `attn=freq`.  With `attn=vfused` it gives the hashes of `attn=fused`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step8-stored-<side>-<policy>/`.
+* [x] Step 9 (2026-11-14): the gain rule for `vfused`.  A gain in each browser, in both pages, against each reference: `R` 0.66 to 0.70, with `S` 2.3 % or less.  So `vfused` lands.
+* [x] Step 10 (2026-11-14): with the candidate page, before the commit, `e2e selftest` passes in Safari and in Chrome, each with `--query attn=vfused` and with `--query selftest=stages` (the kernels that each browser chooses), worst stage 69.4 dB.  Safari chose `v64k8,v64` and `vfused`; Chrome `v64,v64` and `vfused`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step10-selftest-<browser>-<attn or selftest>/`.  Then the commit of `vfused`, with `vfused` moved from `NEW_KERNELS` to `PINNED_WGSL` (`0xed9b_5bcb_7b74_65a1`).
 
 ## Surprises and discoveries
 
@@ -470,6 +472,20 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * The verdict: C1 is built, by the rule of Step 7: `i64` over `v64` on `time scores` is an effect in Chrome.
   * In Safari, the effect on `time scores` goes the other way: `v64` takes 1.19 times `i64`'s time at K 64, though it takes 0.80 times at K 256.  So vec4 reads are predicted to help C1 in Chrome and to slow it in Safari.  C1's loops have K 16 for each slice, nearer K 64 than K 256.
   * The attention-only figures of `measure_attention` (time axis, seconds for each chunk): Safari split 3.06 to 3.09, fused 3.24 to 3.30; Chrome split 1.82 to 1.84, fused 2.17 to 2.19.
+
+* 2026-11-14, Step 9: the gain rule for `vfused`.  One set of `e2e bench --query "bench=v64&bench_rounds=5&mm=<pins>&attn=fused"` with the candidate page (the working tree on `d244d57`), in the order Safari, Chrome, Safari, Chrome; pins as in Step 7.  `R` is `vfused`'s time for each chunk over the reference's, in Step 5's form (whole time-transformer steps with a wait after each, as calibration times them).  `S` is the largest spread of the figures in `R`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step9-<browser>-<n>/`.
+
+  | Page | Whole steps, seconds for each chunk: split, `fused`, `vfused` | `R` against `fused` | `R` against `freq` (split) | `S` | Verdict |
+  | - | - | - | - | - | - |
+  | Safari 1 | 4.96, 4.72, 3.29 | 0.697 | 0.663 | 2.3 % | gain |
+  | Chrome 2 | 3.05, 3.14, 2.04 | (0.650) | 0.669 | 1.7 % | gain |
+  | Safari 3 | 4.96, 4.72, 3.28 | 0.695 | 0.661 | 2.3 % | gain |
+  | Chrome 4 | 3.08, 3.11, 2.02 | (0.650) | 0.656 | 1.9 % | gain |
+
+  * The references are each policy that calibration chose at M5's base: `fused` and `freq` in Safari, `freq` in Chrome.  The figure against `fused` in Chrome is evidence only.
+  * The attention-only figures (`measure_attention`), seconds for each chunk: Safari `fused` 3.30 and 3.29, `vfused` 1.88 and 1.84 (0.57 and 0.56); Chrome `fused` 2.17 and 2.17, `vfused` 1.07 and 1.07 (0.49 and 0.49).
+  * Step 7 predicted a loss in Safari, from `v64` against `i64` on `time scores`.  The predictor was wrong for this kernel: `vfused` takes 0.56 times the tiled kernel's attention time in Safari.  `vfused` also has 10 KiB of workgroup memory, not 12.25 KiB, and Safari sets it to zero at each dispatch (M3, M4).  M5 did not split the gain between the two causes.
+  * The predicted upper bound of C1 was 20 % to 37 % of the attention time in Safari and 31 % to 33 % in Chrome.  The gain is 43 % to 44 % in Safari and 51 % in Chrome: more than the bound.  So the predictor's premise does not hold for this kernel.  M5 did not measure why.
 
 * 2026-11-14, Step 8: the first `vfused` gave wrong results on Metal (relative error 11).  Its P, its row maxima and its row sums were written as scalars into the components of a vec4 of `buf`, 4 threads to each vec4, as the plan's layout of P (`[64 queries][16 keys]`) needs.  With those writes serialised by barriers, each test passed, bit for bit too.  So threads that write different components of one vec4 in workgroup memory race on Metal, through naga's MSL.  M5 did not find whether naga or Metal makes the write a read-modify-write of the whole vec4.  The kernel now writes each vec4 whole, from one thread (Decision log).
 

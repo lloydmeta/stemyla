@@ -51,13 +51,14 @@ The rule for a new matmul kernel (M4 of `plans/active/gpu-speed.md`, Step 7).  M
 * For each page, weight format and kind (large, small): `R` is the candidate's calibration total over the reference kernel's.  The reference kernel is the kernel that calibration chooses for that kind at the base, in that browser.  A calibration total is the sum over calibration's shapes of that kind of `per_chunk x flops / rate`.  `S` is the largest spread of the bench lines that go into `R`.  Give the ratio of each shape too.
 * A gain on a kind in a browser: `R < 1` and `1 - R > S`, in both pages.  A loss: `R > 1 + S` in both pages.  Else no effect is seen.
 * The candidate lands only with a gain on a kind, with f16 weights, in at least one browser.  Then each browser's same-session comparison must show no loss, and each browser that chose it must have a gain for it.
+* An attention kernel (M5): run `e2e bench --query "bench=v64&bench_rounds=5&mm=<pins>&attn=fused"` in the same order.  `R` is the candidate's time for each chunk over the reference policy's, from the line `bench: time axis, whole steps with a wait after each`, as calibration times them.  The reference policies are each policy that calibration chooses at the base in that browser.  `S` is the largest spread of the figures in `R`.  The attention-only lines are evidence only.  The rule of a gain and a loss is the same as for a matmul kernel.
 
 ## Each calibration choice is not slower
 
 The check of the goal "Each calibration choice is not slower", for one page and one browser (M5 of `plans/active/gpu-speed.md`).  M6 uses it too.
 
-* A policy is a time-axis attention policy, by the name in the `kernels:` line: `fused` or `freq`.  The check never forces `split` or `time`, which split the frequency axis.
-* The ratio at the flip point of a calibration is its fused time over its split time, from its `kernels for this GPU` line.
+* A policy is a time-axis attention policy, by the name in the `kernels:` line: `fused`, `freq` or `vfused`.  The check never forces `split` or `time`, which split the frequency axis.
+* The ratio at the flip point of a calibration is the faster fused kernel's time over its split time, from its `kernels for this GPU` line.  For the two fused kernels, it is `vfused`'s time over `fused`'s, and the flip point is 1.
 * A policy is choosable when 12 or more calibrations of the page in that browser show either of these:
   * calibration chose it at least once;
   * the mean ratio at the flip point, plus or minus 2 standard deviations, crosses `FUSED_MARGIN`.

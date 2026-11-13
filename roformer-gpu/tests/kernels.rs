@@ -6,7 +6,7 @@
 //! instead under `STEMYLA_REQUIRE=gpu` (or `timestamps`, for the profile
 //! tests, or `f16`, for the f16 weight tests).
 
-use roformer_gpu::{Act, Gpu, MatMul, TILES, View, WeightFormat, bit_differences};
+use roformer_gpu::{Act, FusedKernel, Gpu, MatMul, TILES, View, WeightFormat, bit_differences};
 use test_support::{Need, skip};
 
 #[track_caller]
@@ -1235,8 +1235,9 @@ fn profile_labels_dispatches() {
 }
 
 /// Asserts, on a profiling device, for one fused attention of 3
-/// sequences of 62 tokens:
-/// * the profile has the label `attention seq 62 x3`, with 1 dispatch;
+/// sequences of 62 tokens with each fused kernel (tiled and `vfused`):
+/// * the profile has the label `attention seq 62 x3`, with 2 dispatches,
+///   so `profile_groups` counts both kernels as attention;
 /// * no WebGPU error.
 ///
 /// Skips when the adapter has no `timestamp-query`.
@@ -1254,7 +1255,8 @@ fn profile_labels_attention_by_its_shape() {
     let qkv = g.upload("qkv", &rand(tokens * 1536, 7));
     let o = g.buffer("o", tokens * 512);
     let mut r = g.rec();
-    r.attention(&qkv, None, &o, seq, nseq, 0.125);
+    r.attention(FusedKernel::Tiled, &qkv, None, &o, seq, nseq, 0.125);
+    r.attention(FusedKernel::Vec4, &qkv, None, &o, seq, nseq, 0.125);
     r.submit();
     pollster::block_on(g.done());
     pollster::block_on(g.collect_profile()).unwrap();
@@ -1263,7 +1265,7 @@ fn profile_labels_attention_by_its_shape() {
     let totals = g.take_profile();
     assert_eq!(
         totals.get("attention seq 62 x3").map(|v| v.0),
-        Some(1),
+        Some(2),
         "{totals:?}"
     );
 }
@@ -1328,18 +1330,11 @@ fn compile_each() {
     assert!(errors.is_empty(), "{errors:?}");
 }
 
-/// The fused attention kernel against `attention_cpu` on the network's
-/// sequence lengths (1,151 frames on the time axis, 62 bands on the
-/// frequency axis) and a ragged one, with and without the gate.
-#[test]
-fn attention_matches_cpu() {
+/// Each fused attention kernel (tiled and `vfused`) against
+/// `attention_cpu` on `cases`: (tokens, sequences, gated).
+fn fused_matches_cpu(kernel: FusedKernel, cases: &[(usize, usize, bool)]) {
     let Some(g) = gpu() else { return };
-    for (seq, nseq, gated) in [
-        (133, 2, true),
-        (62, 3, true),
-        (62, 1, false),
-        (1151, 1, true),
-    ] {
+    for &(seq, nseq, gated) in cases {
         let tokens = seq * nseq;
         let qkv = rand(tokens * 1536, 7);
         let gates = rand(tokens * 8, 8);
@@ -1348,12 +1343,81 @@ fn attention_matches_cpu() {
         let (qb, gb) = (g.upload("qkv", &qkv), g.upload("gates", &gates));
         let ob = g.buffer("o", tokens * 512);
         let mut r = g.rec();
-        r.attention(&qb, gated.then_some(&gb), &ob, seq, nseq, alpha);
+        r.attention(kernel, &qb, gated.then_some(&gb), &ob, seq, nseq, alpha);
         r.submit();
         let got = read(&g, &ob, tokens * 512);
         let errors = g.take_errors();
         assert!(errors.is_empty(), "{errors:?}");
-        assert_close(&got, &want, 2e-5, &format!("attention seq {seq} x{nseq}"));
+        assert_close(
+            &got,
+            &want,
+            2e-5,
+            &format!("{kernel:?} attention seq {seq} x{nseq}"),
+        );
+    }
+}
+
+/// The tiled fused attention kernel against `attention_cpu` on the
+/// network's sequence lengths (1,151 frames on the time axis, 62 bands on
+/// the frequency axis) and a ragged one, with and without the gate.
+#[test]
+fn attention_matches_cpu() {
+    fused_matches_cpu(
+        FusedKernel::Tiled,
+        &[
+            (133, 2, true),
+            (62, 3, true),
+            (62, 1, false),
+            (1151, 1, true),
+        ],
+    );
+}
+
+/// Asserts that `vfused` matches `attention_cpu` on the time axis's shape
+/// (4 bands of 1,151 frames), and on ragged sequences: lengths that are
+/// not a multiple of 64 or of 4 (133, 37, 1), with and without the gate.
+#[test]
+fn vfused_matches_cpu() {
+    fused_matches_cpu(
+        FusedKernel::Vec4,
+        &[
+            (1151, 4, true),
+            (133, 2, true),
+            (62, 3, true),
+            (37, 2, false),
+            (1, 3, true),
+        ],
+    );
+}
+
+/// Asserts that `vfused` gives the tiled kernel's output bit for bit on
+/// the same inputs: the time axis's shape and ragged sequences.  Both sum
+/// each score and each output in one order, one fma at a time.  The claim
+/// holds for this native test: Safari compiles with
+/// `MTLMathModeRelaxed`, which lets Metal reorder the sums.
+#[test]
+fn vfused_equals_the_tiled_kernel_bit_for_bit() {
+    let Some(g) = gpu() else { return };
+    for (seq, nseq) in [(1151, 4), (133, 2), (37, 2)] {
+        let tokens = seq * nseq;
+        let qkv = g.upload("qkv", &rand(tokens * 1536, 11));
+        let gates = g.upload("gates", &rand(tokens * 8, 12));
+        let out = |kernel| {
+            let o = g.buffer("o", tokens * 512);
+            let mut r = g.rec();
+            r.attention(kernel, &qkv, Some(&gates), &o, seq, nseq, 0.125);
+            r.submit();
+            read(&g, &o, tokens * 512)
+        };
+        let (tiled, vec4) = (out(FusedKernel::Tiled), out(FusedKernel::Vec4));
+        let errors = g.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
+        let differ = tiled
+            .iter()
+            .zip(&vec4)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(differ, 0, "seq {seq} x{nseq}: {differ} outputs differ");
     }
 }
 
@@ -1454,7 +1518,15 @@ fn attention_matches_split_path() {
     let want = read(&g, &split, tokens * 512);
     let fused = g.buffer("o fused", tokens * 512);
     let mut r = g.rec();
-    r.attention(&qkv, Some(&gates), &fused, seq, nseq, alpha);
+    r.attention(
+        FusedKernel::Tiled,
+        &qkv,
+        Some(&gates),
+        &fused,
+        seq,
+        nseq,
+        alpha,
+    );
     r.submit();
     let got = read(&g, &fused, tokens * 512);
     assert!(g.take_errors().is_empty());
@@ -1467,6 +1539,7 @@ fn check_attention_accepts_all() {
     let problem = pollster::block_on(g.check_attention());
     assert_eq!(problem, None);
     assert!(g.fused_ok.get());
+    assert!(g.vfused_ok.get());
 }
 
 /// With recording off (benchmarks, calibration) a profiling device keeps

@@ -17,7 +17,9 @@ use roformer::{
     widest_band,
 };
 
-use crate::{Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, Rec, View, Weight, WeightFormat};
+use crate::{
+    Act, AttentionPolicy, FusedKernel, Gpu, GpuBuffer, MatMul, Rec, View, Weight, WeightFormat,
+};
 
 const INNER: usize = HEADS * DIM_HEAD;
 const BANDS: usize = FREQS_PER_BANDS.len();
@@ -508,16 +510,16 @@ impl<'a> Job<'a> {
     pub fn new(gpu: &'a Gpu, net: &'a Net, frames: usize) -> Self {
         let (t, f) = (frames, BANDS);
         let attention = gpu.attention.get();
-        let nt = net.sub_batch(f, t, attention.time);
-        let nf = net.sub_batch(t, f, attention.freq);
+        let nt = net.sub_batch(f, t, attention.time().is_some());
+        let nf = net.sub_batch(t, f, attention.freq());
         let tokens = (nt * t).max(nf * f);
         // Scores only for an axis that runs split attention.
-        let scores_t = if attention.time {
+        let scores_t = if attention.time().is_some() {
             0
         } else {
             nt * HEADS * t * t
         };
-        let scores_f = if attention.freq {
+        let scores_f = if attention.freq() {
             0
         } else {
             nf * HEADS * f * f
@@ -623,12 +625,12 @@ impl<'a> Job<'a> {
         let (t, f) = (self.frames, BANDS);
         let mut out = Vec::new();
         let mut first = 0;
-        for n in time_steps(t, self.net.budget, self.attention.time) {
+        for n in time_steps(t, self.net.budget, self.attention.time().is_some()) {
             out.push(Step::Time { layer, first, n });
             first += n;
         }
         out.push(Step::ToFreq);
-        let n = self.net.sub_batch(t, f, self.attention.freq);
+        let n = self.net.sub_batch(t, f, self.attention.freq());
         let mut first = 0;
         while first < t {
             out.push(Step::Freq {
@@ -700,7 +702,7 @@ impl<'a> Job<'a> {
                 first,
                 n,
                 &self.rope_time,
-                self.attention.time,
+                self.attention.time(),
             ),
             Step::ToFreq => r.transpose(&self.x, &self.xt, f, t),
             Step::Freq { layer, first, n } => transformer(
@@ -712,7 +714,7 @@ impl<'a> Job<'a> {
                 first,
                 n,
                 &self.rope_freq,
-                self.attention.freq,
+                self.attention.freq().then_some(FusedKernel::Tiled),
             ),
             Step::ToTime => r.transpose(&self.xt, &self.x, t, f),
             Step::FinalNorm => r.rmsnorm(&self.x, 0, &self.net.final_norm, &self.xt, 0, f * t),
@@ -840,7 +842,7 @@ fn transformer<'s>(
     first: usize,
     nb: usize,
     rope: &'s wgpu::Buffer,
-    fused: bool,
+    fused: Option<FusedKernel>,
 ) {
     let tok0 = first * seq;
     let ntok = nb * seq;
@@ -867,12 +869,11 @@ fn transformer<'s>(
     r.matmul(&g);
 
     let alpha = (DIM_HEAD as f32).powf(-0.5);
-    if fused {
+    match fused {
         // Scores, softmax, p.v and gate in one dispatch; the scores
         // never reach memory.
-        r.attention(s.qkv, Some(s.gates), s.o, seq, nb, alpha);
-    } else {
-        split_attention(r, s, seq, nb, alpha);
+        Some(kernel) => r.attention(kernel, s.qkv, Some(s.gates), s.o, seq, nb, alpha),
+        None => split_attention(r, s, seq, nb, alpha),
     }
     let mut out = MatMul::new(
         (s.o, View::rows(0, INNER)),
@@ -1064,9 +1065,10 @@ impl TimeStep {
         }
     }
 
-    /// Records one time-transformer step of `bands` bands, with fused
-    /// attention or without, as [`Job::run`] records [`Step::Time`].
-    pub(crate) fn record<'s>(&'s self, r: &mut Rec<'s>, bands: usize, fused: bool) {
+    /// Records one time-transformer step of `bands` bands, with the fused
+    /// kernel `fused` or split attention, as [`Job::run`] records
+    /// [`Step::Time`].
+    pub(crate) fn record<'s>(&'s self, r: &mut Rec<'s>, bands: usize, fused: Option<FusedKernel>) {
         let bufs = StepBufs {
             xn: &self.xn,
             qkv: &self.qkv,

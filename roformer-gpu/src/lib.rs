@@ -558,55 +558,89 @@ pub const TILES: [Tile; 5] = [
     },
 ];
 
-/// Where [`net::Job`] runs fused attention (`attention_tiled.wgsl`:
-/// scores, softmax, values and gate in one dispatch, the scores never in
-/// memory) instead of the scores matmul, softmax, p.v matmul and gate.
-/// The frequency axis (sequences of 62 bands) gains on every GPU measured,
-/// 2.2 to 3.6 times; the time axis (1,151 frames) gained 11 to 22% on
-/// Apple GPUs and lost 20% on an Intel UHD 630, so [`bench::calibrate`]
-/// decides it per GPU.
+/// A fused attention kernel: scores, softmax, values and gate in one
+/// dispatch, the scores never in memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AttentionPolicy {
-    pub time: bool,
-    pub freq: bool,
+pub enum FusedKernel {
+    /// `attention_tiled.wgsl`, scalar reads of workgroup memory.
+    Tiled,
+    /// `vfused`, `attention_vec4.wgsl`: vec4 reads of workgroup memory,
+    /// for the time axis only (M5 of `plans/active/gpu-speed.md`).
+    Vec4,
+}
+
+/// Where [`net::Job`] runs fused attention instead of the scores matmul,
+/// softmax, p.v matmul and gate, and with which kernel.  The frequency
+/// axis (sequences of 62 bands) gains on every GPU measured, 2.2 to 3.6
+/// times; the time axis (1,151 frames) gained 11 to 22% on Apple GPUs and
+/// lost 20% on an Intel UHD 630, so [`bench::calibrate`] decides it per
+/// GPU.  `vfused` runs only on the time axis, with the tiled kernel on the
+/// frequency axis; no policy pairs it with split attention there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttentionPolicy {
+    /// Split attention on both axes.
+    Split,
+    /// The tiled fused kernel on both axes.
+    Fused,
+    /// The tiled fused kernel on the time axis only.
+    Time,
+    /// The tiled fused kernel on the frequency axis only.
+    Freq,
+    /// `vfused` on the time axis, the tiled fused kernel on the frequency
+    /// axis.
+    VFused,
 }
 
 impl AttentionPolicy {
-    pub const SPLIT: Self = Self {
-        time: false,
-        freq: false,
-    };
-    pub const FUSED: Self = Self {
-        time: true,
-        freq: true,
-    };
+    pub const ALL: [Self; 5] = [
+        Self::Split,
+        Self::Fused,
+        Self::Time,
+        Self::Freq,
+        Self::VFused,
+    ];
 
-    /// `split`, `fused`, or `time` / `freq` for fused on that axis only.
+    /// `split`, `fused`, `time` / `freq` for the tiled fused kernel on that
+    /// axis only, or `vfused`.
     pub fn name(self) -> &'static str {
-        match (self.time, self.freq) {
-            (false, false) => "split",
-            (true, true) => "fused",
-            (true, false) => "time",
-            (false, true) => "freq",
+        match self {
+            Self::Split => "split",
+            Self::Fused => "fused",
+            Self::Time => "time",
+            Self::Freq => "freq",
+            Self::VFused => "vfused",
         }
     }
 
     /// The inverse of [`AttentionPolicy::name`].
     pub fn parse(s: &str) -> Option<Self> {
-        [
-            Self::SPLIT,
-            Self::FUSED,
-            Self {
-                time: true,
-                freq: false,
-            },
-            Self {
-                time: false,
-                freq: true,
-            },
-        ]
-        .into_iter()
-        .find(|p| p.name() == s)
+        Self::ALL.into_iter().find(|p| p.name() == s)
+    }
+
+    /// The fused kernel on the time axis, or `None` for split attention.
+    pub fn time(self) -> Option<FusedKernel> {
+        match self {
+            Self::Split | Self::Freq => None,
+            Self::Fused | Self::Time => Some(FusedKernel::Tiled),
+            Self::VFused => Some(FusedKernel::Vec4),
+        }
+    }
+
+    /// Whether the frequency axis runs the tiled fused kernel.
+    pub fn freq(self) -> bool {
+        matches!(self, Self::Fused | Self::Freq | Self::VFused)
+    }
+
+    /// Whether this GPU can run the policy, by its start-up checks: split
+    /// always; `vfused` when both fused kernels passed ([`Gpu::fused_ok`],
+    /// [`Gpu::vfused_ok`]), since it keeps the tiled kernel on the
+    /// frequency axis; the others when the tiled kernel passed.
+    pub fn usable(self, fused_ok: bool, vfused_ok: bool) -> bool {
+        match self {
+            Self::Split => true,
+            Self::VFused => fused_ok && vfused_ok,
+            Self::Fused | Self::Time | Self::Freq => fused_ok,
+        }
     }
 }
 
@@ -702,6 +736,109 @@ fn attention_source() -> String {
         finish += "  }\n";
     }
     include_str!("shaders/attention_tiled.wgsl")
+        .replace("{DECLS}", decls.trim_end())
+        .replace("{S_ZERO}", s_zero.trim_end())
+        .replace("{S_STEP}", s_step.trim_end())
+        .replace("{SOFTMAX_1}", soft1.trim_end())
+        .replace("{SOFTMAX_2}", soft2.trim_end())
+        .replace("{VALUES}", values.trim_end())
+        .replace("{FINISH}", finish.trim_end())
+}
+
+/// The WGSL of `vfused`, fused attention with vec4 reads of workgroup
+/// memory: per-thread code with constant indices, generated into
+/// `attention_vec4.wgsl`.  Each score and each output keeps the sum order
+/// of [`attention_source`].  Each write to workgroup memory is a whole
+/// vec4 from one thread.
+fn attention_vec4_source() -> String {
+    let (r4, c4) = (0..4, 0..4);
+    let comps = ["x", "y", "z", "w"];
+    let mut decls = String::new();
+    let mut s_zero = String::new();
+    let mut s_step = String::new();
+    let mut soft1 = String::new();
+    let mut soft2 = String::new();
+    let mut values = String::new();
+    let mut finish = String::new();
+    for i in r4.clone() {
+        decls += &format!("  var m{i} = NEG;\n  var l{i} = 0.0;\n");
+        for j in c4.clone() {
+            decls += &format!("  var o{i}_{j} = 0.0;\n  var s{i}_{j} = 0.0;\n");
+            s_zero += &format!("    s{i}_{j} = 0.0;\n");
+        }
+    }
+    for i in r4.clone() {
+        s_step += &format!("        let a{i} = buf[(ty + {}u) * R + dd];\n", 16 * i);
+    }
+    for j in c4.clone() {
+        s_step += &format!(
+            "        let b{j} = buf[B2 + (tx + {}u) * R + dd];\n",
+            16 * j
+        );
+    }
+    for c in comps {
+        for i in r4.clone() {
+            for j in c4.clone() {
+                s_step += &format!("        s{i}_{j} = fma(a{i}.{c}, b{j}.{c}, s{i}_{j});\n");
+            }
+        }
+    }
+    let rows = |f: &dyn Fn(usize) -> String| (0..4).map(f).collect::<Vec<_>>().join(", ");
+    for i in r4.clone() {
+        for j in c4.clone() {
+            soft1 += &format!(
+                "    s{i}_{j} = select(NEG, s{i}_{j} * p.alpha, j0 + tx + {}u < p.seq);\n",
+                16 * j
+            );
+        }
+    }
+    soft1 += &format!(
+        "    buf[ty * 16u + tx] = vec4<f32>({});\n",
+        rows(&|i| format!("max(max(s{i}_0, s{i}_1), max(s{i}_2, s{i}_3))"))
+    );
+    soft2 += "    var tm = buf[ty * 16u];\n    for (var k = 1u; k < 16u; k++) { tm = max(tm, buf[ty * 16u + k]); }\n";
+    for (i, c) in r4.clone().zip(comps) {
+        soft2 += &format!(
+            "    let mn{i} = max(m{i}, tm.{c});\n    let sc{i} = exp(m{i} - mn{i});\n    m{i} = mn{i};\n"
+        );
+        for j in c4.clone() {
+            soft2 += &format!(
+                "    s{i}_{j} = exp(s{i}_{j} - mn{i});\n    o{i}_{j} = o{i}_{j} * sc{i};\n"
+            );
+        }
+        soft2 += &format!("    l{i} = l{i} * sc{i} + s{i}_0 + s{i}_1 + s{i}_2 + s{i}_3;\n");
+    }
+    for c in c4.clone() {
+        if c > 0 {
+            values += "    workgroupBarrier();\n";
+        }
+        values += &format!(
+            "    buf[tx * 16u + ty] = vec4<f32>({});\n    stage_v(t, tok0, j0 + {}u, vc);\n    workgroupBarrier();\n    for (var k = 0u; k < 16u; k++) {{\n      let pv = buf[k * 16u + ty];\n      let vv = buf[B2 + k * 16u + tx];\n",
+            rows(&|i| format!("s{i}_{c}")),
+            16 * c
+        );
+        for (i, ci) in r4.clone().zip(comps) {
+            for (j, cj) in c4.clone().zip(comps) {
+                values += &format!("      o{i}_{j} = fma(pv.{ci}, vv.{cj}, o{i}_{j});\n");
+            }
+        }
+        values += "    }\n";
+    }
+    finish += &format!(
+        "  buf[ty * 16u + tx] = vec4<f32>({});\n  workgroupBarrier();\n  var lt = vec4<f32>(0.0);\n  for (var k = 0u; k < 16u; k++) {{ lt += buf[ty * 16u + k]; }}\n",
+        rows(&|i| format!("l{i}"))
+    );
+    for (i, c) in r4.zip(comps) {
+        finish += &format!(
+            "  let qi{i} = q0 + ty + {r}u;\n  if (qi{i} < p.seq) {{\n    let tok = tok0 + qi{i};\n    var g = 1.0;\n    if ((p.flags & 1u) != 0u) {{ g = 1.0 / (1.0 + exp(-gates[tok * p.gate_row + h])); }}\n    let f = g / lt.{c};\n    let ob = tok * p.o_row + h * D + tx;\n",
+            r = 16 * i
+        );
+        for j in c4.clone() {
+            finish += &format!("    o[ob + {}u] = o{i}_{j} * f;\n", 16 * j);
+        }
+        finish += "  }\n";
+    }
+    include_str!("shaders/attention_vec4.wgsl")
         .replace("{DECLS}", decls.trim_end())
         .replace("{S_ZERO}", s_zero.trim_end())
         .replace("{S_STEP}", s_step.trim_end())
@@ -908,11 +1045,14 @@ pub struct Gpu {
     /// (all, until it runs).  The policy never picks one that failed.
     pub usable: std::cell::Cell<[bool; TILES.len()]>,
     /// Where [`net::Job`] runs fused attention; split until set.  Set it
-    /// to anything but split only when [`Gpu::fused_ok`] is true.
+    /// only to a policy that is [`AttentionPolicy::usable`] here.
     pub attention: std::cell::Cell<AttentionPolicy>,
-    /// Whether the fused attention kernel passed [`Gpu::check_attention`]
-    /// (false until it runs).
+    /// Whether the tiled fused attention kernel passed
+    /// [`Gpu::check_attention`] (false until it runs).
     pub fused_ok: std::cell::Cell<bool>,
+    /// Whether `vfused` passed [`Gpu::check_attention`] (false until it
+    /// runs).
+    pub vfused_ok: std::cell::Cell<bool>,
     /// Whether the f16 variant of every kernel that passed
     /// [`Gpu::check_kernels`] gave its f32 kernel's output bit for bit
     /// there (false until it runs, and on a GPU without
@@ -972,9 +1112,10 @@ struct Kernels {
     transpose: wgpu::ComputePipeline,
     glu: wgpu::ComputePipeline,
     elementwise: wgpu::BindGroupLayout,
-    /// The fused attention kernel, compiled on first use; bound like the
-    /// element-wise kernels (read, read, read-write, uniform).
-    attention: std::cell::OnceCell<wgpu::ComputePipeline>,
+    /// The fused attention kernels, tiled and vec4, each compiled on first
+    /// use; bound like the element-wise kernels (read, read, read-write,
+    /// uniform).
+    attention: [std::cell::OnceCell<wgpu::ComputePipeline>; 2],
     /// For tests: compile the f16 variants from WGSL that does not parse
     /// ([`Gpu::break_f16_variants`]).
     broken_f16: std::cell::Cell<bool>,
@@ -1080,17 +1221,25 @@ impl Kernels {
             transpose: pipeline(device, &e, "transpose3", &ew),
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
-            attention: std::cell::OnceCell::new(),
+            attention: [std::cell::OnceCell::new(), std::cell::OnceCell::new()],
             broken_f16: std::cell::Cell::new(false),
             defective_f16: std::cell::Cell::new(None),
         }
     }
 
-    fn attention_pipeline(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
-        self.attention.get_or_init(|| {
+    fn attention_pipeline(
+        &self,
+        device: &wgpu::Device,
+        kernel: FusedKernel,
+    ) -> &wgpu::ComputePipeline {
+        let (cell, label, source): (_, _, fn() -> String) = match kernel {
+            FusedKernel::Tiled => (&self.attention[0], "attention", attention_source),
+            FusedKernel::Vec4 => (&self.attention[1], "vfused", attention_vec4_source),
+        };
+        cell.get_or_init(|| {
             pipeline(
                 device,
-                &shader(device, "attention", &attention_source()),
+                &shader(device, label, &source()),
                 "main",
                 &self.elementwise,
             )
@@ -1285,8 +1434,9 @@ impl Gpu {
             info,
             policy: std::cell::Cell::new(MatMulPolicy::Fixed(0)),
             usable: std::cell::Cell::new([true; TILES.len()]),
-            attention: std::cell::Cell::new(AttentionPolicy::SPLIT),
+            attention: std::cell::Cell::new(AttentionPolicy::Split),
             fused_ok: std::cell::Cell::new(false),
+            vfused_ok: std::cell::Cell::new(false),
             f16_ok: std::cell::Cell::new(false),
             downlevel,
             kernels,
@@ -1839,11 +1989,38 @@ impl Gpu {
         })
     }
 
-    /// Runs the fused attention kernel on a small ragged case (two
+    /// Runs each fused attention kernel on a small ragged case (two
     /// sequences of 37 tokens, with gates) and compares it with
-    /// [`attention_cpu`].  Sets [`Gpu::fused_ok`]; returns why it failed,
-    /// if it did, and then the split path is the only one used.
+    /// [`attention_cpu`].  Sets [`Gpu::fused_ok`] for the tiled kernel and
+    /// [`Gpu::vfused_ok`] for `vfused`, and sets the attention policy to
+    /// split if it is no longer usable.  Returns why a kernel failed, if
+    /// one did: with the tiled kernel, only the split path is used, and
+    /// without `vfused`, calibration does not choose it.
     pub async fn check_attention(&self) -> Option<String> {
+        let tiled = self.check_fused(FusedKernel::Tiled).await;
+        let vec4 = self.check_fused(FusedKernel::Vec4).await;
+        self.fused_ok.set(tiled.is_none());
+        self.vfused_ok.set(vec4.is_none());
+        if !self.attention.get().usable(tiled.is_none(), vec4.is_none()) {
+            self.attention.set(AttentionPolicy::Split);
+        }
+        let problems: Vec<String> = [
+            tiled.map(|why| {
+                format!(
+                    "fused attention gives wrong results on this GPU ({why}); using split attention"
+                )
+            }),
+            vec4.map(|why| format!("vfused gives wrong results on this GPU ({why}); not used")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!problems.is_empty()).then(|| problems.join("; "))
+    }
+
+    /// Why `kernel` fails the check of [`Gpu::check_attention`], or `None`
+    /// when it passes.
+    async fn check_fused(&self, kernel: FusedKernel) -> Option<String> {
         let (seq, nseq) = (37, 2);
         let tokens = seq * nseq;
         let mut st = 0x9e37_79b9u32;
@@ -1866,10 +2043,10 @@ impl Gpu {
         );
         let ob = self.buffer("check o", tokens * 512);
         let mut r = self.rec();
-        r.attention(&qb, Some(&gb), &ob, seq, nseq, alpha);
+        r.attention(kernel, &qb, Some(&gb), &ob, seq, nseq, alpha);
         r.submit();
-        let problem = match self.read(&ob, 0, tokens * 512).await {
-            Err(e) => Some(format!("fused attention: {e}; using split attention")),
+        match self.read(&ob, 0, tokens * 512).await {
+            Err(e) => Some(e),
             Ok(got) => {
                 let worst = got
                     .iter()
@@ -1883,24 +2060,14 @@ impl Gpu {
                     })
                     .fold(0.0f32, f32::max);
                 let errors = self.take_errors();
-                if worst > 1e-4 || !errors.is_empty() {
-                    let why = errors
+                (worst > 1e-4 || !errors.is_empty()).then(|| {
+                    errors
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| format!("relative error {worst:.1e}"));
-                    Some(format!(
-                        "fused attention gives wrong results on this GPU ({why}); using split attention"
-                    ))
-                } else {
-                    None
-                }
+                        .unwrap_or_else(|| format!("relative error {worst:.1e}"))
+                })
             }
-        };
-        self.fused_ok.set(problem.is_none());
-        if problem.is_some() {
-            self.attention.set(AttentionPolicy::SPLIT);
         }
-        problem
     }
 
     pub fn rec(&self) -> Rec<'_> {
@@ -2185,7 +2352,7 @@ fn grid(groups: usize) -> (u32, u32) {
 enum Kernel {
     /// An entry of [`TILES`], and the format of its B.
     MatMul(usize, WeightFormat),
-    Attention,
+    Attention(FusedKernel),
     Softmax,
     RmsNorm,
     Rope,
@@ -2255,7 +2422,8 @@ impl<'g> Rec<'g> {
         if self.gpu.prof.is_some() {
             let label = match &kernel {
                 Kernel::MatMul(t, _) => format!("matmul {}", TILES[*t].name),
-                Kernel::Attention => "attention".into(),
+                Kernel::Attention(FusedKernel::Tiled) => "attention".into(),
+                Kernel::Attention(FusedKernel::Vec4) => "vfused".into(),
                 Kernel::Softmax => "softmax".into(),
                 Kernel::RmsNorm => "rmsnorm".into(),
                 Kernel::Rope => "rope".into(),
@@ -2325,7 +2493,7 @@ impl<'g> Rec<'g> {
         let k = &gpu.kernels;
         let pipeline = |kernel: &Kernel| match kernel {
             Kernel::MatMul(t, format) => k.matmul_pipeline(&gpu.device, *t, *format),
-            Kernel::Attention => k.attention_pipeline(&gpu.device),
+            Kernel::Attention(kernel) => k.attention_pipeline(&gpu.device, *kernel),
             Kernel::Softmax => &k.softmax.0,
             Kernel::RmsNorm => &k.rmsnorm.0,
             Kernel::Rope => &k.rope,
@@ -2491,9 +2659,12 @@ impl<'g> Rec<'g> {
     /// `[tokens, 1536]` qkv buffer at column offsets 0, 512 and 1024, `o`
     /// `[tokens, 512]` and `gates` `[tokens, 8]` (no gate when `None`).
     /// The same result as the scores matmul, softmax, p.v matmul and gate
-    /// in [`net::Job`], in one dispatch.
+    /// in [`net::Job`], in one dispatch of `kernel`.  Each kernel's dispatch
+    /// has the label of [`attention_label`].
+    #[allow(clippy::too_many_arguments)]
     pub fn attention(
         &mut self,
+        kernel: FusedKernel,
         qkv: &'g wgpu::Buffer,
         gates: Option<&'g wgpu::Buffer>,
         o: &'g wgpu::Buffer,
@@ -2514,7 +2685,7 @@ impl<'g> Rec<'g> {
         let groups = [u(seq.div_ceil(64)), 8, u(nseq)];
         let g = gates.unwrap_or(&self.gpu.dummy);
         self.push(
-            Kernel::Attention,
+            Kernel::Attention(kernel),
             &[qkv, g, o],
             bytemuck::bytes_of(&p),
             groups,
@@ -2558,13 +2729,13 @@ impl<'g> Rec<'g> {
 }
 
 /// The WGSL of every kernel that calibration chooses between: each matmul
-/// kernel, its f16 variant, and fused attention.
+/// kernel, its f16 variant, and the two fused attention kernels.
 fn kernel_sources() -> Vec<String> {
     let f32_kernels = TILES.iter().map(Tile::source);
     let f16_variants = TILES.iter().map(Tile::f16_source);
     f32_kernels
         .chain(f16_variants)
-        .chain(std::iter::once(attention_source()))
+        .chain([attention_source(), attention_vec4_source()])
         .collect()
 }
 
@@ -2795,7 +2966,9 @@ mod tests {
     ///   its formula, in its f32 kernel and its f16 variant, and at most
     ///   16 KiB;
     /// * `v64k8` declares 6,144 bytes;
-    /// * fused attention declares 12 to 16 KiB.
+    /// * fused attention declares 12 to 16 KiB;
+    /// * `vfused` declares 2 x 64 x (16 + 4) floats, 10,240 bytes, less
+    ///   than the tiled kernel, by its name in [`generated_sources`].
     #[test]
     fn workgroup_memory_within_defaults() {
         let bytes_of = |name: &str| {
@@ -2816,6 +2989,10 @@ mod tests {
         }
         let attention = workgroup_bytes(&attention_source());
         assert!((12 * 1024..=16 * 1024).contains(&attention), "{attention}");
+        let vfused = generated_sources()
+            .find(|(name, _)| name == "vfused")
+            .map(|(_, src)| workgroup_bytes(&src));
+        assert_eq!(vfused, Some(2 * 64 * (16 + 4) * 4));
     }
 
     /// Every template placeholder in `src`: an upper-case name in braces,
@@ -2845,16 +3022,16 @@ mod tests {
 
     /// Every generated source, by name: each entry of [`TILES`] (`s64` is
     /// `matmul.wgsl`), the f16 variant of each (`i64-f16` and so on), and
-    /// fused attention.
+    /// the two fused attention kernels (`attention`, `vfused`).
     fn generated_sources() -> impl Iterator<Item = (String, String)> {
         let f32_kernels = TILES.iter().map(|t| (t.name.to_string(), t.source()));
         let f16_variants = TILES
             .iter()
             .map(|t| (format!("{}-f16", t.name), t.f16_source()));
-        f32_kernels.chain(f16_variants).chain(std::iter::once((
-            "attention".to_string(),
-            attention_source(),
-        )))
+        f32_kernels.chain(f16_variants).chain([
+            ("attention".to_string(), attention_source()),
+            ("vfused".to_string(), attention_vec4_source()),
+        ])
     }
 
     /// The generated sources have every placeholder filled.
@@ -3049,12 +3226,13 @@ mod tests {
         ("elementwise.wgsl", include_str!("shaders/elementwise.wgsl")),
     ];
 
-    /// The shader files that [`generated_sources`] covers: three
+    /// The shader files that [`generated_sources`] covers: four
     /// templates, and `matmul.wgsl`, which is `s64`'s source.
-    const GENERATED_FROM: [&str; 4] = [
+    const GENERATED_FROM: [&str; 5] = [
         "matmul_interleaved.wgsl",
         "matmul_vec4.wgsl",
         "attention_tiled.wgsl",
+        "attention_vec4.wgsl",
         "matmul.wgsl",
     ];
 
@@ -3083,7 +3261,7 @@ mod tests {
 
     /// The FNV-1a hash ([`fnv1a`]) of the WGSL of each current kernel, by
     /// the name of [`generated_sources`] or [`SHADER_FILES`].
-    const PINNED_WGSL: [(&str, u64); 14] = [
+    const PINNED_WGSL: [(&str, u64); 15] = [
         ("i64", 0x6735_eed0_8cca_09cc),
         ("i128x64", 0xf9e3_a175_acf0_66cf),
         ("s64", 0x1553_8389_9726_7e72),
@@ -3095,6 +3273,7 @@ mod tests {
         ("v64-f16", 0xbb95_7752_6ab4_50c6),
         ("v64k8-f16", 0xc324_6da6_933d_ea43),
         ("attention", 0xa091_9877_a004_c08c),
+        ("vfused", 0xed9b_5bcb_7b74_65a1),
         ("softmax.wgsl", 0x88a8_02c9_98a6_ac21),
         ("rmsnorm.wgsl", 0x051c_929e_5b3b_f568),
         ("elementwise.wgsl", 0x2df7_4f02_9bc1_b129),
@@ -3164,6 +3343,7 @@ mod tests {
             "v64-f16",
             "v64k8-f16",
             "attention",
+            "vfused",
             "softmax.wgsl",
             "rmsnorm.wgsl",
             "elementwise.wgsl",
@@ -3869,18 +4049,54 @@ mod tests {
         assert_eq!(bit_differences(&[f32::NAN], &[f32::NAN]).count, 0);
     }
 
+    /// Asserts that each policy's name parses back to it (`vfused` too),
+    /// that the names are `split`, `fused`, `time`, `freq` and `vfused`,
+    /// and that an unknown name gives `None`.  Asserts each policy's kernels
+    /// on the two axes: `vfused` runs `vfused` on the time axis and the
+    /// tiled kernel on the frequency axis.
     #[test]
     fn attention_policy_names() {
-        for p in [
-            AttentionPolicy::SPLIT,
-            AttentionPolicy::FUSED,
-            AttentionPolicy {
-                time: false,
-                freq: true,
-            },
-        ] {
+        for p in AttentionPolicy::ALL {
             assert_eq!(AttentionPolicy::parse(p.name()), Some(p));
         }
+        let names: Vec<&str> = AttentionPolicy::ALL.iter().map(|p| p.name()).collect();
+        assert_eq!(names, ["split", "fused", "time", "freq", "vfused"]);
         assert_eq!(AttentionPolicy::parse("a4"), None);
+        let axes: Vec<(Option<FusedKernel>, bool)> = AttentionPolicy::ALL
+            .iter()
+            .map(|p| (p.time(), p.freq()))
+            .collect();
+        let tiled = Some(FusedKernel::Tiled);
+        assert_eq!(
+            axes,
+            [
+                (None, false),
+                (tiled, true),
+                (tiled, false),
+                (None, true),
+                (Some(FusedKernel::Vec4), true),
+            ]
+        );
+    }
+
+    /// Asserts which policies a GPU can run, by its start-up checks: split
+    /// always; `vfused` only when both fused kernels passed; the others
+    /// when the tiled kernel passed, whatever `vfused` gave.
+    #[test]
+    fn a_policy_is_usable_only_with_its_kernels() {
+        let usable = |fused_ok, vfused_ok| -> Vec<&str> {
+            AttentionPolicy::ALL
+                .into_iter()
+                .filter(|p| p.usable(fused_ok, vfused_ok))
+                .map(AttentionPolicy::name)
+                .collect()
+        };
+        assert_eq!(
+            usable(true, true),
+            ["split", "fused", "time", "freq", "vfused"]
+        );
+        assert_eq!(usable(true, false), ["split", "fused", "time", "freq"]);
+        assert_eq!(usable(false, true), ["split"]);
+        assert_eq!(usable(false, false), ["split"]);
     }
 }

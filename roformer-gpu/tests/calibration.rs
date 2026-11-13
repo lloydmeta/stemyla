@@ -6,7 +6,9 @@
 //! budget, with a wait after each.  `attention_per_chunk` times the
 //! attention dispatches alone, as `?bench` does.
 
-use roformer_gpu::bench::{ATTENTION_ROUND, ATTENTION_ROUNDS, ATTENTION_WARM, time_axis_per_chunk};
+use roformer_gpu::bench::{
+    ATTENTION_ROUND, ATTENTION_ROUNDS, ATTENTION_WARM, TimeSecs, decide, time_axis_per_chunk,
+};
 use roformer_gpu::{Gpu, WeightFormat};
 use std::time::Instant;
 
@@ -33,7 +35,7 @@ fn time_axis_attention_choice_on_a_cold_gpu() {
         pollster::block_on(g.check_attention());
         eprintln!("open {open}: {} ({:?})", g.info.name, g.info.backend);
         for (name, warm, round, rounds) in settings {
-            let (split, fused) = pollster::block_on(time_axis_per_chunk(
+            let t = pollster::block_on(time_axis_per_chunk(
                 &g,
                 WeightFormat::F32,
                 roformer_gpu::net::BUDGET,
@@ -42,17 +44,16 @@ fn time_axis_attention_choice_on_a_cold_gpu() {
                 rounds,
                 &now,
             ));
+            let choice = decide(&[1.0], &[1.0], TimeSecs::of(&t), true, g.vfused_ok.get());
             eprintln!(
-                "  {name:8}: split {:6.2} s (spread {:5.1}%), fused {:6.2} s (spread {:5.1}%) -> {}",
-                split.median(),
-                100.0 * split.spread(),
-                fused.median(),
-                100.0 * fused.spread(),
-                if fused.median() < split.median() {
-                    "fused"
-                } else {
-                    "split"
-                }
+                "  {name:8}: split {:6.2} s (spread {:5.1}%), fused {:6.2} s (spread {:5.1}%), vfused {:6.2} s (spread {:5.1}%) -> {}",
+                t.split.median(),
+                100.0 * t.split.spread(),
+                t.fused.median(),
+                100.0 * t.fused.spread(),
+                t.vfused.median(),
+                100.0 * t.vfused.spread(),
+                choice.attention.name()
             );
         }
     }
