@@ -307,6 +307,12 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Review round 4 fixes (2026-11-13).  `CompareSites` starts the site of each side from the options and gives the site of a side; `perf_compare` uses it.  `each_side_of_a_comparison_runs_its_own_page` failed first on its assert (`left: "/tmp/base/dist", right: "/tmp/head/dist"`, with a stub lookup).  It fails with the folders swapped at either start, and with the lookup swapped.  The new assert of `a_selftest_query_always_asks_for_the_self_test` (`step_limit=abc`) fails with `!value.is_empty()` in place of the number check.
 * [x] Step 13 (2026-11-13): the checks before review round 1, at `01e6953`.  `check --tier push` with `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` passed its 15 lines, with the GPU test line and both perf gates run (log `m4/check-push.log`).  Chrome's gate passed: 4.69 s against a bound of 5.17 s (`v64,v64`, split).  Safari's gate passed: 7.46 s against a bound of 8.12 s, margin 0.66 s (`v64k8,v64`, split attention).  `cargo build -p xtask` passed.  For the orchestrator: `m4/parent-m4.diff` (the parent plan) and `m4/claude-rules-gpu.diff` (`.claude/rules/gpu.md`: the pin of Step 3, and the rules of Steps 5 and 7).  Each passes `git apply --check` on HEAD, and `docs-check` passes with both applied.
 
+* [x] Review round 1 (2026-11-13, `/review-rounds 9769916`): 8 should-fix (1 pre-existing), 11 nits and 30 missed mutants (24 confirmed, 4 refuted, 2 pre-existing).  Fixed in `9304b85`, with the parent and rule diffs in `331eb08`.
+* [x] Review round 2 (2026-11-13): 5 should-fix (1 pre-existing, GPU-3), 7 nits and 14 missed mutants, all confirmed.  Fixed in `5066444`, with the parent diff in `9444649`.
+* [x] Review round 3 (2026-11-13): 1 blocker (Step 5 gave the round 1 rule), 3 should-fix and 3 nits; the one missed mutant repeats the refuted 1-33.  Two validators stopped on an API error and ran again.  Fixed in `5a7319c`.
+* [x] Review round 4 (2026-11-13, late rule): 2 should-fix on VERIFY-1 (the site of each side in `perf_compare`, pre-existing; a `step_limit` that is not a number), fixed in `ab40862`.  3 nits reported, not fixed.
+* [x] Review round 5 (2026-11-13): 4 nits, reported, not fixed, and no missed mutant.  No fix, so it is the last round by decision 0024.  The log is `docs/reviews/gpu-speed-2026-11-12-m4.md`.
+
 ## Surprises and discoveries
 
 * 2026-11-13, Step 4: the `wg` controls, one set of `?bench=v64&bench_rounds=5` (Safari 27.2, Chrome 157.0.8103.51, the same in each page; logs `m4/runs/s4-{safari,chrome}-{1,2}.log`).  Each control has almost no work, at `v64`'s grid on `freq qkv` (24 x 86 workgroups, 2,064).  Times in us for each dispatch, medians of 5, at the start and the end of each page.  Ratio: `(wg6k - wg0) / (wg10k - wg0)`.
@@ -442,3 +448,17 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 ## Outcomes and retrospective
 
 2026-11-13, before the review rounds.  `v64k8` (BK 8, 6 KiB of workgroup memory) lands as a calibration candidate.  Safari chooses it, and its in-page gain is 5.4 % to 5.6 % of the large products; Chrome keeps `v64`.  In Safari the separation is 2.4 % faster when calibration keeps fused attention on the time axis (7.20 to 7.22 s for each chunk, against 7.37 to 7.42 s at the base).  `v64k8` also lowers calibration's time for split attention, so Safari now puts the time axis on split in about 6 of 16 calibrations (Steps 9 to 11), and those runs are about 1 % slower than the base.  Calibration's split time in Safari was about 0.5 s for each chunk too low before M4 too; M5 is the place for its cause.  `r64`, with no workgroup memory, is slower than `v64` on the large products in both browsers, and does not land.  The zero-init cost is not linear in the bytes: in Safari, 6 KiB costs about a quarter of 10 KiB.  M4 also leaves three tools for M5 and M6: `--raise` for each raise of a bound, the pin of each current kernel's WGSL, and `e2e perf --base-dist` with `T` 1 % and `N` 1.1 % from two A/A sessions.
+
+Done on 2026-11-13, after 5 review rounds (43 agents, 2,668,176 tokens, 106.6 wall minutes, 0 interventions; rounds 4 and 5 fixed 2 findings, both in the tests of `perf_compare` and `selftest_query`).
+
+What M4 did not do:
+
+* It did not find why Safari's calibration times split attention about 0.5 s for each chunk too low.  TD-101 records it, and M5 finds the cause before it adds a third attention candidate (the orchestrator's decision).
+* `r64`, a kernel with no workgroup memory, does not land.  Its code is in the session scratchpad only.
+* The nits of rounds 4 and 5 are reported, not fixed: a repeated `step_limit` key, two wording points, a Progress quote, one value read from two sources in `perf_compare`, and no test of the call `sites.of(side)` in `perf_compare`, which only a real `--base-dist` run covers.
+
+What to do differently:
+
+* Write the edge cases of a verdict rule into the plan before the code: kernels that differ on either side, blocks that are spoiled, and a minimum count.  Rounds 1 to 4 each found one more case in the same-session comparison.
+* Put each choice that an I/O function makes, such as the page of each side, in a pure function with a test when it is first written.  Three rounds found the same gap at three places.
+* A fix that changes a rule changes the plan's design text in the same commit.  Round 3 found Step 5 still giving the round 1 rule.

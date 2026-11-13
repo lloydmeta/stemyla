@@ -549,7 +549,7 @@ This entry concerns no rule.  It concerns the time limit of each browser e2e sce
 This entry concerns no rule.  It concerns the speed of a separation in Safari (M4 of `plans/active/gpu-speed.md`).
 
 * On the M2 Pro, with `v64k8`, Safari's calibration times split attention at 3.11 to 3.16 s and fused at 3.42 to 3.51 s for each chunk.  That is at `FUSED_MARGIN` (1.1).
-* So it chooses split in about 6 of 16 calibrations (Steps 9 to 11 of `plans/active/gpu-speed-m4.md`).  Those runs are 3.4 % slower than fused, and about 1 % slower than the base.
+* So it chooses split in about 6 of 16 calibrations (Steps 9 to 11 of `plans/completed/gpu-speed-m4.md`).  Those runs are 3.4 % slower than fused, and about 1 % slower than the base.
 * Calibration times split about 0.5 s for each chunk too low in Safari, before `v64k8` too.  The cause is not known.
 * Fix: M5 of `plans/active/gpu-speed.md` finds the cause, then times split as the separation runs it.
 

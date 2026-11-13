@@ -291,7 +291,7 @@ fn matmul_vec4_variants() {
     ));
 }
 
-/// The kernels of M4 (`plans/active/gpu-speed-m4.md`) that must give
+/// The kernels of M4 (`plans/completed/gpu-speed-m4.md`) that must give
 /// `v64`'s output bit for bit.
 const CANDIDATES: [&str; 1] = ["v64k8"];
 
