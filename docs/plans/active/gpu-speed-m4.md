@@ -287,7 +287,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Step 1 (2026-11-13): the quirk entry, commit "Quirks: fewer bytes for each workgroup, not more work for each byte".  `docs-check` passed.
 * [x] Step 2 (2026-11-13): every raise of a bound needs `--raise`.  The changed test `a_raise_over_the_tolerance_needs_a_reason` failed first on its assert (`"157.0.7000.0" in ""`, perf.rs:1306), then passed.  `cargo test -p xtask` and `docs-check` passed.  The orchestrator applied the change of `.claude/rules/gpu.md`; this step's commit adds it.
 * [x] Step 3 (2026-11-13): the WGSL of each current kernel, pinned by `current_kernels_keep_their_wgsl` (12 sources; `NEW_KERNELS` empty).  `fnv1a` and `FNV_OFFSET` serve the test and `kernels_id`, whose value stays `0xd4f493a491195bc8` (printed before and after).  With one changed byte in the first comment of `matmul_vec4.wgsl`, the test failed on its assert: `v64: hash 0xb6bd57ba6e7f0898, pinned 0x2bf06de948042584` and `v64-f16: hash 0xe871347a10b57f98, pinned 0xbb9577526ab450c6`.  Without the byte, `cargo test -p roformer-gpu --lib` passed (51 tests).
-* [ ] Step 4: the `wg` controls.
+* [x] Step 4 (2026-11-13): the `wg` controls, on the scratch branch `scratch/m4-controls` (removed), patch in `m4/controls.patch`.  One set, `runs/s4-{safari,chrome}-{1,2}.log`.  The quirk entry gives the figures.
 * [ ] Step 5: the chunk line in 2 decimals, the same-session comparison, and its A/A sessions.
 * [ ] Step 6: the candidates.
 * [ ] Step 7: the gain rule, and the candidates that land.
@@ -300,7 +300,20 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 ## Surprises and discoveries
 
-None yet.
+* 2026-11-13, Step 4: the `wg` controls, one set of `?bench=v64&bench_rounds=5` (Safari 27.2, Chrome 157.0.8103.51, the same in each page; logs `m4/runs/s4-{safari,chrome}-{1,2}.log`).  Each control has almost no work, at `v64`'s grid on `freq qkv` (24 x 86 workgroups, 2,064).  Times in us for each dispatch, medians of 5, at the start and the end of each page.  Ratio: `(wg6k - wg0) / (wg10k - wg0)`.
+
+  | Page | `wg10k` | `wg6k` | `wg0` | Ratio |
+  | - | - | - | - | - |
+  | Safari 1, start | 414.1 (8.9 %) | 114.5 (0.9 %) | 10.7 (10.0 %) | 0.257 |
+  | Safari 1, end | 408.2 (6.8 %) | 113.0 (1.8 %) | 10.8 (8.7 %) | 0.257 |
+  | Safari 2, start | 410.2 (5.2 %) | 114.0 (1.8 %) | 11.3 (3.7 %) | 0.257 |
+  | Safari 2, end | 409.7 (1.7 %) | 113.5 (1.3 %) | 11.1 (4.1 %) | 0.257 |
+  | Chrome 1, start | 17.8 (14.7 %) | 14.0 (0.7 %) | 6.3 (6.3 %) | 0.670 |
+  | Chrome 1, end | 17.9 (1.3 %) | 14.2 (1.9 %) | 6.3 (2.9 %) | 0.681 |
+  | Chrome 2, start | 18.2 (26.1 %) | 14.2 (1.9 %) | 6.3 (4.8 %) | 0.664 |
+  | Chrome 2, end | 17.9 (3.0 %) | 14.3 (8.6 %) | 6.3 (0.6 %) | 0.690 |
+
+  The cost is not linear in the bytes: a linear cost gives 0.6.  In Safari, 6 KiB costs about a quarter of what 10 KiB costs.  The prediction for `v64k8` on `freq qkv` in Safari: `wg10k - wg6k` is 296 to 299 us of `v64`'s 3.53 to 3.57 ms (f16, 1,216 and 1,202 GFLOP/s), a gain of about 8.3 % to 8.4 %.  In Chrome: 3.6 to 4.0 us of 1.99 ms, about 0.2 %.  The cause of the curve is not known.  One guess, not checked: a core holds fewer workgroups at once with 10 KiB than with 6 KiB, and each waits for its own zero-init.
 
 ## Decision log
 

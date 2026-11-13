@@ -85,7 +85,8 @@ Seen in Safari 27.2 on macOS 27.2.1, on an Apple M2 Pro, on 2026-11-13.  The sou
   * 55 %: Step 3's fit of the time for each workgroup.
   * about 34 %: `v64-g4` against `v64` in both browsers at K 256 (Step 4b).  `v64-g4` sets its memory to zero once for 4 tiles.  The estimate assumes that `v64-g4`'s own extra cost is the same in both browsers.  At K 1,024 it is not: Safari 1.34 to 1.35 times `v64`, Chrome 1.25 to 1.27.  At K 256, Safari's time with `v64-g4` did not go down (1.014 to 1.033 times `v64`).  The browser ratio fell because Chrome got about 1.20 times slower.
   * about 26 %: the `wg10k` control (Step 4).  It has almost no work, so it can give less than a real kernel.
-* The code here: none yet.  By WebKit's source, the cost grows with the bytes of workgroup memory and the number of workgroups.  M3 measured it only at 10 KiB and at 0 KiB.
+* The code here: none yet.  By WebKit's source, the cost grows with the bytes of workgroup memory and the number of workgroups.
+* The cost is not linear in the bytes (M4 Step 4, 2026-11-13, Safari 27.2, Chrome 157).  Three controls with almost no work ran at `v64`'s grid of 2,064 workgroups.  Safari took 408 to 414 us with 10 KiB, 113 to 115 us with 6 KiB and 10.7 to 11.3 us with none.  Chrome took 17.8 to 18.2 us, 14.0 to 14.3 us and 6.3 us.  So in Safari, 6 KiB costs 0.257 of the cost of 10 KiB over none, in each of 4 readings.  A linear cost gives 0.6.  In Chrome it is 0.66 to 0.69.  The cause of the curve is not known.
 * More work for each byte did not help in Safari.  `v64-g4` took 1.014 to 1.033 times `v64` at K 256, and `v128` took 1.30 to 1.59 times.
 * M4 of `plans/active/gpu-speed.md` tries fewer bytes for each workgroup on the same grid.
 * Rule: GPU-1 (the default limits stay).  The WebKit bug text for the maintainer is [webkit-bug-workgroup-zero-init.md](webkit-bug-workgroup-zero-init.md).
