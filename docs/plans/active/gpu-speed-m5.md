@@ -362,6 +362,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] Step 11 (2026-11-14): the comparison of `vfused` (`9d6d447`) against `d244d57`, `--runs 8`: a gain of 3 % or more in each browser, Chrome -22.4 % and Safari -20.3 % (the mean `r` of 4 blocks).  Each head run chose `vfused`.
 * [x] Step 12 (2026-11-14): at the head, `vfused` is the one choosable policy in each browser (12 of 12 calibrations), and the check passes: a gain of 20 % to 23 % against `fused` and against `freq`.  No two choices are near, so no flip cost is measured.
 * [x] Step 13 (2026-11-14): both browsers chose `vfused`, so both baselines are measured again with `e2e perf --runs 5 --update-baselines` at `9d6d447`.  Each bound is lower, so no `--raise`: Chrome 157 4.70 s to 3.59 s, Safari 27.2 7.38 s to 5.57 s.
+* [x] Step 14 (2026-11-14): `memory-budget` passed 3 times in each browser at `50d3ff6`.  Each growth is 57 MB, so check 3's margin is 6.16 MB, and `WORKER_HEADROOM_MB` stays.  `roformer/` does not change.
 
 ## Surprises and discoveries
 
@@ -475,6 +476,16 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * The verdict: C1 is built, by the rule of Step 7: `i64` over `v64` on `time scores` is an effect in Chrome.
   * In Safari, the effect on `time scores` goes the other way: `v64` takes 1.19 times `i64`'s time at K 64, though it takes 0.80 times at K 256.  So vec4 reads are predicted to help C1 in Chrome and to slow it in Safari.  C1's loops have K 16 for each slice, nearer K 64 than K 256.
   * The attention-only figures of `measure_attention` (time axis, seconds for each chunk): Safari split 3.06 to 3.09, fused 3.24 to 3.30; Chrome split 1.82 to 1.84, fused 2.17 to 2.19.
+
+* 2026-11-14, Step 14: `memory-budget` at `50d3ff6`, 3 runs in Chrome 157 and 3 in Safari 27.2.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step14-<browser>-<n>/output.log`.
+
+  | Browser | Runs passed | Worker growth in each separation | Check 3: budget, margin | Tab total (page, worker, decoder, GPU live) | Kernels |
+  | - | - | - | - | - | - |
+  | Chrome 157 | 3 of 3 | 57 MB | 63.16 MB, 6.16 MB | 756 MB (33, 87, 6, 630) | `v64,v64` or `v64,v64k8`, `vfused` |
+  | Safari 27.2 | 3 of 3 | 57 MB | 63.16 MB, 6.16 MB | 758 MB (35, 87, 6, 630) | `v64k8,v64k8` or `v64k8,v64`, `vfused` |
+
+  * Each growth is as at M1 and M4, so the parent's case 1 holds and `WORKER_HEADROOM_MB` stays.  Calibration's new peak (about 113 MB, freed before the separation) does not move the worker's heap.
+  * Chrome's tab total fell from 799 MB with `freq` to 756 MB with `vfused`: `vfused` holds no scores buffer, as `fused` does not.  Both are under `TAB_BUDGET_MB` (943 MB, MEM-4).
 
 * 2026-11-14, Step 13: the baselines, from 5 runs in each browser at `9d6d447`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step13-<browser>/output.log`.
 
