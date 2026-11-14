@@ -1739,12 +1739,20 @@ struct MemoryPeak {
 }
 
 impl MemoryPeak {
-    /// The sum of the parts' peaks: at least the peak of their sum, so a
+    /// The sum of the parts' peaks, and the write worker's
+    /// [`WRITE_WORKER_WASM_MB`]: at least the peak of their sum, so a
     /// budget on it is safe.
     fn total(&self) -> f64 {
-        self.page_wasm + self.worker_wasm + self.decoder_wasm + self.gpu_live
+        self.page_wasm + self.worker_wasm + self.decoder_wasm + self.gpu_live + WRITE_WORKER_WASM_MB
     }
 }
+
+/// The write worker's WebAssembly memory, in MB, which no log line gives
+/// (M5.1 of `plans/active/gpu-speed.md`).  Its module starts with 17 pages
+/// of 64 KiB (1.11 MB, the memory section of `write-worker_bg.wasm` on
+/// 2026-11-14).  It holds only each request's paths in Rust; the bytes
+/// stay in JS.  So 2 pages more than its start bound it: 1.25 MB.
+const WRITE_WORKER_WASM_MB: f64 = 1.25;
 
 /// The largest value of each part in the `memory: ...` lines of `log`, or
 /// `None` if a part never appears.
@@ -1980,7 +1988,8 @@ fn working_set_check(growth: Option<f64>, query: &str, log: &[String]) -> (Optio
 }
 
 /// Check 4 of M1: a tab total for the iPhone (MEM-4).  The sum of the
-/// four peaks ([`MemoryPeak::total`]) is at most [`TAB_BUDGET_MB`].  It
+/// four peaks and the write worker's memory ([`MemoryPeak::total`]) is at
+/// most [`TAB_BUDGET_MB`].  It
 /// gives `None`, not checked, for a log with f32 weights, since the
 /// budget assumes f16 weights (TD-63).
 fn tab_total_check(peak: Option<MemoryPeak>, log: &[String]) -> (Option<bool>, String) {
@@ -1997,7 +2006,7 @@ fn tab_total_check(peak: Option<MemoryPeak>, log: &[String]) -> (Option<bool>, S
         Some(p) => (
             Some(p.total() <= TAB_BUDGET_MB),
             format!(
-                "the tab total is {:.0} MB (page wasm {:.0}, worker wasm {:.0}, decoder wasm {:.0}, GPU live {:.0}), at most {TAB_BUDGET_MB} MB (margin {:.0} MB)",
+                "the tab total is {:.0} MB (page wasm {:.0}, worker wasm {:.0}, decoder wasm {:.0}, write worker wasm {WRITE_WORKER_WASM_MB}, GPU live {:.0}), at most {TAB_BUDGET_MB} MB (margin {:.0} MB)",
                 p.total(),
                 p.page_wasm,
                 p.worker_wasm,
@@ -2156,7 +2165,8 @@ fn shown_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
 /// * if the worker grows by more than the working set's peak plus the
 ///   headroom ([`working_set_check`]), at the default chunk with f16
 ///   weights;
-/// * if the sum of the four peaks is over [`TAB_BUDGET_MB`]
+/// * if the sum of the four peaks and the write worker's memory is over
+///   [`TAB_BUDGET_MB`]
 ///   ([`tab_total_check`]), with f16 weights;
 /// * if the page or the decode worker grows by more than [`MAX_GROWTH_MB`]
 ///   during the open ([`open_growth_check`]);
@@ -4054,7 +4064,9 @@ mod tests {
         assert_eq!(ok, None, "f32 weights are not checked: {what}");
     }
 
-    /// Check 4 of M1: the tab total under the iPhone's budget.
+    /// Check 4 of M1: the tab total under the iPhone's budget.  Since
+    /// M5.1, it also counts the write worker's WebAssembly memory, which
+    /// no log line gives ([`WRITE_WORKER_WASM_MB`]).
     #[test]
     fn the_tab_total_must_fit_the_budget() {
         let log = chunk_log(&[92.0, 125.0], 125.0);
@@ -4064,10 +4076,11 @@ mod tests {
             decoder_wasm: 6.0,
             gpu_live,
         };
-        let (ok, what) = tab_total_check(Some(peak(779.0)), &log);
+        let (ok, what) = tab_total_check(Some(peak(777.75)), &log);
         assert_eq!(ok, Some(true), "943 passes: {what}");
-        let (ok, what) = tab_total_check(Some(peak(779.1)), &log);
+        let (ok, what) = tab_total_check(Some(peak(777.85)), &log);
         assert_eq!(ok, Some(false), "943.1 fails: {what}");
+        assert!(what.contains("write worker wasm 1.25"), "{what}");
         assert_eq!(
             tab_total_check(None, &log).0,
             Some(false),
@@ -4107,7 +4120,7 @@ mod tests {
                 gpu_live: 979.0
             }
         );
-        assert_eq!(peak.total(), 1559.0);
+        assert_eq!(peak.total(), 1559.0 + WRITE_WORKER_WASM_MB);
         assert_eq!(memory_peak(&log[..5]), None, "no decode worker line");
         assert_eq!(memory_peak(&log[..3]), None, "no page line yet");
     }

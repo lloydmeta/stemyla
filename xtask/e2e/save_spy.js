@@ -56,19 +56,34 @@
     return 0;
   };
   window.__e2e_writes = 0;
+  // A write of the page: a write of one of its write streams (its small
+  // files), or a post to a worker with a transfer list, which is a block
+  // or a file that the write worker writes (M5.1 of
+  // plans/active/gpu-speed.md).  The page posts no other array during a
+  // save.
+  const page_wrote = () => {
+    window.__e2e_writes++;
+    // A heap reading that starts at each write of the page while a save
+    // is measured, so the measure sees the whole save (findings 4-10 and
+    // 5-1 of review rounds speed 4 and 5 of M8).  It waits for
+    // wasm-bindgen's finalizers as every reading does, so it counts no
+    // garbage; the save goes on meanwhile.
+    if (window.__e2e_heap_on) {
+      window.__e2e_heap_pending.push(window.__e2e_heap().then(window.__e2e_keep));
+    }
+  };
   if (window.FileSystemWritableFileStream) {
     const real_write = FileSystemWritableFileStream.prototype.write;
     FileSystemWritableFileStream.prototype.write = function (data) {
-      window.__e2e_writes++;
-      // A heap reading that starts at each write of the page while a save
-      // is measured, so the measure sees the whole save (findings 4-10 and
-      // 5-1 of review rounds speed 4 and 5 of M8).  It waits for
-      // wasm-bindgen's finalizers as every reading does, so it counts no
-      // garbage; the save goes on meanwhile.
-      if (window.__e2e_heap_on) {
-        window.__e2e_heap_pending.push(window.__e2e_heap().then(window.__e2e_keep));
-      }
+      page_wrote();
       return real_write.call(this, data);
+    };
+  }
+  if (window.Worker) {
+    const real_post = Worker.prototype.postMessage;
+    Worker.prototype.postMessage = function (msg, transfer) {
+      if (Array.isArray(transfer) && transfer.length > 0) page_wrote();
+      return real_post.call(this, msg, transfer);
     };
   }
   // A number that grows while a save goes on: the page's OPFS writes, and

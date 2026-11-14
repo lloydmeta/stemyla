@@ -48,4 +48,4 @@ Counted runs on 2026-11-14 (the folder was listed before and after each run):
 
 ## Workaround
 
-In a dedicated worker, `createSyncAccessHandle()` writes the file in place, with no temporary file.  The main thread of a page has no such handle.
+In a dedicated worker, `createSyncAccessHandle()` writes the file in place, with no temporary file.  The main thread of a page has no such handle, so a page sends its large writes to a dedicated worker.  This app does that for the model, the songs, the mix, the stems and the save files (M5.1).  Its small files stay on write streams, since `close()` replaces such a file in one step, and they still leave a few hundred bytes for each song.
