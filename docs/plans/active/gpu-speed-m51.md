@@ -310,7 +310,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * [x] 2026-11-14: Step 3a: not needed.  Step 3 ties no leak to a path of the app.
 * [x] 2026-11-14: Step 4: the model saves use a sync access handle.  `write_file` in `worker/src/web.rs` writes through `createSyncAccessHandle`, for `opfs_write`, `cache_put` and `download_to_opfs`; no other production `createWritable` was in `worker/` or `decoder/`.  `the_model_writes_open_no_write_stream` and the two moved MEM-5 tests failed first on an assert (`m51/step4-fail-first-*.log`).  Counted Safari runs s9 and s10 left no swap file (Surprises).  `check --tier push` passed at `6199418`, 15 lines, with both perf gates: Chrome 3.65 s against a bound of 3.95 s, Safari 5.64 s against 6.13 s (`m51/check-push-1.log`).
 * [x] 2026-11-14: Step 5: the page's writes (decision point): decided: c), a write worker on the page for the song-sized writes (Decisions for the maintainer, item 1).  The team leader adds its steps.
-* [ ] Step 5a: the facts before the code.
+* [x] 2026-11-14: Step 5a: the facts before the code (Surprises).  No reader overlaps a routed write.  The per-block form costs 3.7 % (Chrome) and 1.4 % (Safari) of a 4-minute mix write, so Step 5b takes it.
 * [ ] Step 5b: the write worker crate.
 * [ ] Step 5c: the page uses the write worker.
 * [ ] Step 5d: the acceptance runs.
@@ -369,6 +369,31 @@ Each step is one or more signed commits.  A session that stops reads Progress an
   * `$TMPDIR` held 0 `org.chromium.Chromium.scoped_dir.*` from s9 on.  The two orphan Chromes' folders went; this milestone's runs did not remove them.
 * 2026-11-14, Step 6: the Step 2 commit (`2cb5de4`) had dropped the heading "## Legibility for agents" of `docs/tech-debt.md`, so TD-18, TD-19 and TD-20 were under "Known breaches".  `docs-check` did not see it.  Step 6 puts the heading back.
 
+* 2026-11-14, Step 5a, the facts before the code (from the code at `48faa1d`, with file and line).
+  * The callers, and what each does after a failed write:
+    * `save_sources` (`app/src/store.rs:418`) removes its own session folder on a failure (`:422`).  Its one caller, `open_chosen_now` (`app/src/lib.rs:761`), logs and opens the song on the page from the chosen files; during a reset it gives the error.
+    * `write_mix` removes `mix.f32.part` after a failed open, put, close or move, and `mix.f32` after a failed last `meta` write (`app/src/store.rs:543-569`).  Its one caller, `write_mix_first` (`app/src/lib.rs:3583`), gives the result to `mix_written`, which separates on the memory path with no storage, or refuses with a status line.
+    * `save_stems` does no clean-up: `meta` names no stems from its first write to its last, so a failure leaves stray `stems/*.wav` and no `stem` lines.  Its one caller, `apply_separated` (`app/src/lib.rs:2267`), sets a status line.  This call is not reached in production: it needs `job.session` and `keeps_stems`, and each memory-path post of a song with a session clears both (`app/src/lib.rs:3536-3556`, `3821-3824`).  Only the tests call `save_stems` (`app/tests/web.rs`, `app/tests/web_close.rs`, `app/src/decode_tests.rs`, `app/src/store.rs`).  Step 5b routes it all the same, as the plan says.
+    * `save_open` to `save_abort` serve only `StoredWav` (`app/src/export.rs:701-923`).  A failed open or close removes the file, and a failed put aborts and removes it.  The save then ends `Finish::Failed`, and the page saves again on the memory path (`app/src/lib.rs:4783-4789`).
+  * The readers: no reader of the page, the decode worker or the stem worker can read a routed file while it is written.
+    * `src/<i>.<ext>`: the decode worker (`getFile`, `decoder/src/web.rs:43-55`) and the page's `rebuild` and `head_of` read it only after `save_sources` returns.  Each save has a new session ID, and the session is not listed before its `meta`.
+    * `mix.f32.part`: no reader.  `mix.f32` is read (the stem worker, `worker/src/web/mix.rs:24-31`; the playback and the decode worker when it is usable) only after the move and the `mix` line.  `MIX_WRITING` defers `forget_mix` and `keep_decoded`, and Separate is off while a separation runs, so two mix writes of one session cannot run at once.
+    * `stems/<name>.wav` (only from tests, above): the playback reader, `OpfsStore`, `head_of`, `read_stem` and the decode worker read the `.wav` with `getFile`.  An old stored lane of the same session can read the old `.wav` while a new save of the same name runs.  With `.wav.page.part` and a move (Step 5b), that read sees the old file, as with `createWritable` today.
+    * `saves/*.wav`: the download offer (`st_file`, `getFile`) and the stem worker's encodes read it only after `save_close` succeeds (`Finish::Done`).  `clean_saves` at the page's start reads `getFile` of each file in `saves/`, and keeps a file whose read fails (`st_remove_older` catches it), so another tab's open handle loses nothing.
+  * The arrays: no routed call site passes a view into WebAssembly memory.  `save_sources` passes the dropped `Blob`.  `put_mix_blocks` copies each 1 MiB block into a new array (`Uint8Array::from`, `app/src/store.rs:607`).  `save_stems` passes `Uint8Array::from` of a whole 16-bit WAV (17.64 MB for a stem of 100 s).  `StoredWav`'s `self.array` is the one reused array: 2 MiB, made once, each full block copied in with `copy_from` (`app/src/export.rs:46`, `785-791`); the last block is a new array (`:770`).
+  * The writes that stay on `createWritable` (a 4-minute song): `meta`, about 0.3 to 0.4 KB a write, written about 11 places in `app/src/store.rs`; `sessions/current`, 13 bytes; the `?streamtest` scratch files, a diagnostic only (36 bytes a frame).  The overviews, `classic.wav`, `decoded/<i>.f32` and the stems of the storage path are written by the decode worker and the stem worker through sync access handles already.
+  * The cost of a sync access handle for each block (a worker of the M2 Pro; logs `m51/step5a-measure-chrome.log`, `m51/s11-safari-measure.log`, `m51/step5a-mixwrite-chrome.log`, `m51/s12-safari-mixwrite.log`):
+
+    | | Chrome 157 | Safari 27.2 |
+    | - | - | - |
+    | 84,672,000 bytes (a 4-minute mix) in 81 blocks of 1 MiB, one handle | 15 to 19 ms | 13 to 22 ms |
+    | the same, a handle opened, flushed and closed for each block | 77 to 88 ms | 36 to 42 ms |
+    | the same, one `createWritable` stream | 81 ms | 40 ms |
+    | the page's `write_mix` of a 4-minute song of 2 stored lanes (3 runs) | 1,710 to 1,732 ms | 1,772 to 1,839 ms |
+    | the cost of the handle for each block, over the mix write | 63 ms, 3.7 % | 25 ms, 1.4 % |
+
+    Under 5 % in both browsers, so Step 5b takes the per-block form (Decision log).  The measures were temporary tests, not committed.  s11's stream run left one swap file of 84,672,000 bytes, and s12 left 5 of 84,672,000 (its 2 planted lanes and its 3 mix writes) and 7 small ones (`meta`).
+
 ## Decision log
 
 * 2026-11-14, agent (team leader): Chrome's temporary files go to a folder that `xtask` makes and removes, through `MAC_CHROMIUM_TMPDIR`, not `--user-data-dir`.  Why: `web-test`'s one capabilities file serves each test binary of a crate run, so one `--user-data-dir` would share browser storage between them.
@@ -384,6 +409,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * 2026-11-14, maintainer (through the orchestrator, parent `00668a1`): the write worker is a Rust crate built by Trunk, as `decode-worker` is, not a JavaScript inline script.  So its messages go in `stem-protocol`, and PROTO-1's text does not change.
 * 2026-11-14, orchestrator: the acceptance of Step 5d is "no new swap file from a routed write; each new swap file is a small write that stays on `createWritable`, under 1 MiB in all".  Why: `close()` replaces a small file in one step, and the page reads `meta` with no lock; a sync access handle writes in place and is exclusive.
 * 2026-11-14, agent (team leader), plan reviews of Steps 5 to 5e (4 rounds over the two forms): the worker sends a ready message, and the client holds requests until it comes; the reused array of a save comes back by transfer; `save_stems` writes through `.wav.page.part`; a failed worker is ended and its requests fail; the app's tests use a fake write worker behind the non-default feature `fake-writer`, which `xtask web-test` turns on, since the integration tests link the library without `cfg(test)`.
+* 2026-11-14, agent (implementer), Step 5a: the block writes take the per-block form (a `write` with an offset, which opens, writes, flushes and closes a handle for each block, with no stream ID).  Why: the cost of a handle for each block was 3.7 % of the mix write in Chrome and 1.4 % in Safari, under the plan's 5 % (Surprises).  No fact of Step 5a breaks the design: no reader overlaps a routed write.  `save_stems` is reached only by tests; it is routed all the same.
 
 ## Outcomes and retrospective
 
