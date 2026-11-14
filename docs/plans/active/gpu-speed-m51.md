@@ -156,15 +156,115 @@ The cheapest workaround for the largest leak, if Step 3 confirms that `close()` 
 * The tests of MEM-5 for these writes move with them.  `opfs_write_writes_more_than_one_slice` and `a_download_holds_only_the_bytes_of_its_chunks` (`worker/src/web/tests.rs`) spy on `FileSystemWritableFileStream.prototype.write` (`start_spy`).  They spy on `FileSystemSyncAccessHandle.prototype.write` instead, as the tests of a refused `createSyncAccessHandle` do.  A `Blob` source then expects only whole arrays.  MEM-5's "Enforced by" line in `docs/invariants.md` names the changed tests.  The other tests of `opfs_write` and `cache_put` still pass, with a read-back of the written bytes.
 * Acceptance: a counted `e2e weights --weights` run (`opfs_write`) and a counted `e2e worker-check --download` run (`download_to_opfs`; `e2e weights` does not read `--download`) in Safari leave no swap file of 349,521,256 bytes.  Both scenarios run in Chrome and Safari.  On this Mac, `e2e weights` fails one check, "part 1: the f32 stems have M3's six hashes", also before Step 4 (Surprises, c2 and s3).  Each of its other checks passes.  `check --tier push` passes, with both perf gates (the worker's paths change).
 
-### Step 5: the page's writes (decision point)
+### Step 5: the page's writes (decided: c))
 
-The page's writes run on the main thread, where a sync access handle is not available.  If Step 3 shows that they leave swap files, the team leader gives the orchestrator Step 3's bytes for each use and these options:
+The maintainer chose option c) on 2026-11-14 ("Decisions for the maintainer", item 1): a write worker on the page, for this one purpose, writes the page's song-sized files with sync access handles.  The maintainer then chose its form: a Rust crate built by Trunk (parent Decision log, `00668a1`).  The decode worker keeps its duties (decision 0019).  Steps 5a to 5e do it.  The small writes stay on `createWritable`, with TD-103: `createWritable` replaces a file in one step on `close()`, and the page reads `meta` with no lock.
 
-1. A WebKit bug and a TD only.  The page's writes keep leaking in Safari until WebKit fixes it.  Cost: Step 6 only.
-2. The page's song-sized writes (the source files, the mix, the stems of the memory path, the save files) go through the decode worker, which writes with sync access handles.  That is a change of the messages (PROTO-1) and of the page's storage code.
-3. A small dedicated write worker on the page, from an inline script (as `app/src/streamtest.rs` makes its worker).  It is a new module.
+The routed writes (the "song-sized writes"):
 
-The team leader recommends from Step 3's figures, and waits for the answer.  The answer goes in "Decisions for the maintainer".  If the answer is 2 or 3, the implementer designs it in this plan before the code, as a new step after Step 5.
+| Call site | What it writes | Through today |
+| - | - | - |
+| `save_sources` (`app/src/store.rs`) | each source file of a song (a dropped `File` or `Blob`) | `write_within`, `st_write` |
+| `write_mix` (`app/src/store.rs`) | the session's 32-bit float mix, in blocks, to `mix.f32.part`, then a move | `st_open`, `st_put`, `st_close` |
+| `save_stems` (`app/src/store.rs`) | the stems of the memory path, to `stems/<name>.wav` | `write_within`, `st_write` |
+| `save_open`, `save_put`, `save_close`, `save_abort` (`app/src/store.rs`), through `StoredWav` (`app/src/export.rs`) | a save file, in blocks of 2 MiB | `st_open`, `st_put`, `st_close`, `st_abort` |
+
+Each other write of the page stays on `createWritable`: `meta`, `current`, overviews, and each other `st_write`.
+
+### Step 5a: the facts before the code
+
+The implementer writes these in Surprises before any code of Step 5b:
+
+* For each call site of the table: its callers, and what each caller does after a failed write.  Known: `save_sources` removes the session folder, `write_mix` removes its `.part` file, and `save_open` and `save_abort` remove the save file.
+* The readers of each routed file, and whether one can read the file while it is written.  A sync access handle is exclusive, and a read during a write can fail: the `?streamtest` "concurrent" run accepts failed reads, and Chrome failed 2 of 29 reads with `NotReadableError` (`plans/completed/stream-from-storage.md`).  If a reader can overlap a write, the plan gets a fix before Step 5c.
+* The arrays: no routed call site passes a view into WebAssembly memory today (`Uint8Array::from` copies).  The one reused array is `StoredWav`'s `self.array`, which carries each 2 MiB block of a save (`a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array`, D3 of M8).  The implementer confirms both.
+* The writes that stay, with their sizes for a 4-minute song.
+* The cost of opening and closing a sync access handle for each block, measured on the mix write of a 4-minute song in Chrome and Safari.  It chooses the form of `put` in Step 5b.
+
+### Step 5b: the write worker crate
+
+The maintainer chose the form on 2026-11-14 (parent Decision log, `00668a1`): a Rust crate built by Trunk, as `decode-worker` is.  So the messages go in `stem-protocol`, and PROTO-1's text does not change.  No decision record is needed beyond the parent's Decision log.
+
+The crate:
+
+* `write-worker`, in a new folder `writer/`, a page-side Web Worker.  Its normal dependencies: `stem-protocol`, and `wasm-bindgen`, `js-sys`, `web-sys` and `wasm-bindgen-futures` at the versions that `decode-worker` takes (DEPS-1: no new crate from a registry, so `THIRD-PARTY.md` gets only the new package in its `cargo tree` commands).  The calls to browser storage are inline JavaScript in Rust strings, as in `worker/src/web.rs`.
+* Its layout is that of `decoder/`: a thin `lib.rs` and `main.rs`, and all browser code in `writer/src/web.rs` and `writer/src/web/**` behind `#[cfg(target_arch = "wasm32")]` (`decoder/src/lib.rs`).
+* `writer/clippy.toml` holds the MEM-1 lints, as `decoder/clippy.toml` does.  The crate goes in `each_shipped_crate_lints_mem1_copies` if that test lists the crates.
+* `app/index.html` gets a Trunk link for it, as for `decode-worker`.  The page starts the worker at the first routed write (lazily), not at load: `Worker::new` with the loader's URL, as `app/src/decoder.rs` does.  If that is not simple, the implementer measures the start-up cost and records it.
+* After it starts, the worker sends a ready message, as the decode worker sends `DecodeReply::Alive` (`decoder/src/web.rs`).  The client holds each request until that message comes, as `app/src/decoder/client.rs` does (`post`).  Else a request posted before the worker's handler is set is lost, and `WRITES` never goes back to 0.
+* An explicit queue in the worker runs one request at a time, in the order of arrival.  It catches the error of each operation and sends its reply, so no request waits for ever.
+
+The operations, each with one reply (`ok`, the error's name, or `gone`):
+
+* `write`: `within`, `rel` and a body.  It keeps `st_write`'s rule: if the folder `within` is gone, the reply is `gone`, and no folder is made again.  It makes the file, opens a sync access handle, truncates the file to 0, writes the body, flushes and closes.  A `Blob` body is read in slices of 8 MiB (`slice` and `arrayBuffer`), so the worker holds at most one slice of it.  A typed array body arrives by transfer, whole.
+* The block writes of the mix and the save files.  The simpler form comes first: a `write` with an offset `at`, which opens the handle, truncates the file to 0 when `at` is 0, writes, flushes and closes, for each block.  It needs no stream ID, and leaves no handle open.  If Step 5a's cost is more than 5 % of the mix write's time in either browser, the form is `open` (which truncates to 0), `put`, `close` and `abort`, with a stream ID.  Record the choice in the Decision log.
+* The reply of each block write, `ok` or an error, gives its array back, by transfer.  The array moves from `StoredWav` into its `Shared` state, so the task of `send` (`app/src/export.rs`) can keep the array that comes back.  If the worker fails, the detached array is dropped, and the save fails.  D3 of M8 becomes: "one buffer for all full blocks; the page makes no new one".  A transfer makes a new JavaScript object on each side, so the tests assert this with a count of new arrays or the buffer's `byteLength`, not with object identity.
+* On a failed write, the worker closes the handle.  The visible state after a failure is the same as with `createWritable` today for each call site, as the callers clean up (Step 5a).
+* `save_stems` writes each stem to `stems/<name>.wav.page.part`, then moves it to `stems/<name>.wav` (as `keep_stored_now` does), since a sync access handle truncates the old file first.  Not `.wav.part`: the module doc of `app/src/store.rs` gives that name to the stem worker's storage path, and a second separation can overlap the first one's save (`SAVING`).  The module doc names the new suffix, as it names `.decode.part`.
+* Each array that the worker writes is whole (MEM-5): a transferred whole array, or a slice that `arrayBuffer` gives.
+
+The messages (PROTO-1, MEM-2): a module `stem_protocol::write`, as `stem_protocol::decode`, with one encoder and one decoder for each request and reply (the ready message included), and the transfer list of each.  Each kind starts with `write-`, so the test that keeps the workers' messages apart can tell them from the others.  Each typed array body goes in the transfer list.  `xtask e2e` writes no message of the write worker.
+
+The client on the page: `app/src/writer.rs` (and a `client` module if it grows, as `app/src/decoder/client.rs`).
+
+* If the worker fails (`onerror`, `onmessageerror`), the client ends it (`terminate()`), so it holds no sync access handle, and fails each request that waits, with an error.  So `WRITES` goes down, a reset does not wait for ever, and a caller's `st_remove` and `wipe_opfs` can remove the file.  The next routed write starts a new worker.
+* The app's web tests run with no build of the workers (the test runner serves only the test module).  Both the unit tests and the integration tests make routed writes: `app/tests/web.rs` and `app/tests/web_close.rs` call `store::save_sources` and `store::save_stems`, and an integration test links the library built without `cfg(test)`.  So the app's tests use a fake write worker, behind a new non-default feature of `app`, `fake-writer`:
+  * The client is one per thread (a `thread_local`), which the routed functions of `app/src/store.rs` use.  It posts to a port: a `web_sys::Worker` in the shipped page, or any JavaScript object with `postMessage` and `onmessage`.
+  * With `cfg(any(test, feature = "fake-writer"))`, the default port is the fake.  `xtask web-test` turns the feature on for the crate run of `app` (`xtask/src/web_test.rs`, with a test).  The shipped build (Trunk, `xtask publish`) does not turn it on, and a test pins that.
+  * The fake is a page-side object.  It sends the ready message, takes each request through a structured clone with its transfers, serves it with `createWritable` as the page does today, and replies the same way, with the block's array given back.  For a whole `write` it calls `st_write`.  For the per-block form it calls, for each block, `createWritable({ keepExistingData: at > 0 })`, `seek(at)`, `write` and `close`; for the stream form, `st_open`, `st_put`, `st_close` and `st_abort`.  So the app's existing tests, their spies (`start_spy`) and their refusals (`refuse_next_writable`) keep their meaning.  The tests whose count of writable streams or whose refusal timing changes with the per-block form are named in the commit, with their new expected records.
+  * The fake's JavaScript, and the functions that only it calls after Step 5c, are compiled only with `cfg(any(test, feature = "fake-writer"))`, so the shipped page carries no dead JavaScript.
+  * A test that swaps the port (the routing tests below use a real `Worker` with no script, and turn off its error handler, as `Fake` in `app/src/decode_tests.rs` does) holds a guard that puts the fake back on drop.  So a later test in the same thread does not wait for a ready message that never comes.
+
+Tests, each failing first on an assert:
+
+* `protocol/tests/web.rs`: each write request and reply arrives intact through a structured clone, with its typed array in the transfer list.  `a_message_for_one_worker_is_not_read_as_one_for_the_other` covers the three workers.
+* `write-worker`'s own web tests, in a dedicated worker (`run_in_dedicated_worker`, as `decoder/src/web/tests.rs`):
+  * a read-back of a `write`, from a typed array and from a `Blob` of more than 8 MiB;
+  * a spy on `FileSystemSyncAccessHandle.prototype.write` shows that each written array is whole (MEM-5), also for the `Blob` slices;
+  * a block write at an offset, and a first block that truncates an old, longer file;
+  * `write` into a gone folder gives `gone` and makes no folder;
+  * a refused `createSyncAccessHandle` (as `worker/src/web/tests.rs` plants one) gives an error reply and leaves no open handle;
+  * two requests to one file sent at once are done in order.  It runs first with a plain `async` handler, where the second fails with `NoModificationAllowedError`.
+* `protocol/tests/web.rs` also: the ready message arrives intact.
+* `app` web tests:
+  * a request posted before the ready message is held, then sent after it;
+  * a client with a worker that has no script and a spy on its posts (as `Fake` in `app/src/decode_tests.rs`): each routed call site posts a write request, and calls no `createWritable`; a small write still calls `createWritable`;
+  * each posted typed array is detached after the post, and a block write's reply gives the array back whole;
+  * a worker that fails (a planted `onerror`) fails each waiting request, `WRITES` goes back to 0, and the next write starts a new worker;
+  * D3: a save of several blocks makes one buffer.
+* The tests that change are named in the commit, with why: `a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array`, `sources_are_saved_from_their_files`, and each other.
+
+The docs and the harness that the new crate touches, in the commit that makes each one wrong (DOC-1):
+
+* `CLAUDE.md`: the layout gets `writer/`; `protocol/` holds the messages between the page and its three workers; the clippy line of the web code gets `-p write-worker`.  `.claude/rules/memory.md` and `.claude/rules/protocol.md`: their `paths:` get `writer/**`, `writer/src/**` and `app/src/writer*`, and their lists of crates that clippy checks get `write-worker` (also `.claude/rules/gpu.md`).  The team leader gives these to the orchestrator as a step checkpoint diff before that commit, and the commit adds them by name.
+* The root `Cargo.toml` (`members`) and `Cargo.lock`.
+* `README.md`: the layout table and the clippy lines.  `THIRD-PARTY.md`: the `cargo tree` commands.  `.github/workflows/ci.yml`: the clippy line of the web code, and the comment on the build ("and the decode-worker, the same build xtask publish").  `app/Trunk.toml`: the comment that lists the loader files.
+* MEM-1: `mem1_lint_problems` (`xtask/src/rules.rs`) checks each workspace member for `slice::to_vec` with no change.  The lints on JavaScript arrays apply only to the crates of `MEM1_JS_CRATES`: add `writer`, and the canary function `mem1_lint_is_on_for_js_arrays` to the new crate.  Update the two crate lists of MEM-1's "Enforced by" text in `docs/invariants.md`, TD-26 in `docs/tech-debt.md`, and "the first four" in `.claude/rules/memory.md`, `.claude/rules/protocol.md` and `.claude/rules/gpu.md` (in the step checkpoint diff).
+* `xtask/src/rules.rs`: `WEB_APP`, `PAGE_SIDE` and `manifest_of`, with their tests `the_two_sides_are_the_web_app` and `each_package_names_its_manifest`; `third_party_args` and its test, since `third_party_lists_what_ships` compares it with `THIRD-PARTY.md`.
+* `.cargo/mutants.toml`: `exclude_globs` gets `writer/src/web.rs` and `writer/src/web/**`, and each wasm32-only file of the client in `app/src/`, each by its whole name, as for the decode worker's files.
+* `docs/ARCHITECTURE.md`: the first section (the page's parts), the crate list, the layers table (a Shells row: `write-worker` takes `stem-protocol`), the web app's crates, the diagram of the page's parts, and the description of `web-test`.
+* `docs/invariants.md`: DEPS-1's "the wasm dependency tree of `app`, `stem-worker` and `decode-worker`" gets `write-worker`.  The first line of `THIRD-PARTY.md` names the four WebAssembly modules.
+* `docs/invariants.md`: LAYER-1 names the page side (`app`, `decode-worker` and `write-worker`) and the web app (`app`, `decode-worker`, `write-worker` and `stem-worker`), in its text and its "Enforced by" sentence, and `the_page_and_the_worker_meet_only_through_stem_protocol` follows the new crate too.  This names a new crate in a rule's text, and does not change its meaning; the team leader names it at the checkpoint.  The new tests go on the "Enforced by" lines of PROTO-1, MEM-2 and MEM-5.
+* `xtask`: the crate lists and the path routes of `xtask/src/check.rs`, the routes of `xtask/src/review.rs`, the crate runs of `xtask/src/web_test.rs`, the files of `xtask/src/publish.rs`, and the worker files of `app/src/reset.rs`.  The tests of each change with them.
+
+### Step 5c: the page uses the write worker
+
+* The call sites of the table use the write worker.  The others do not change.
+* `write_within`, `write_mix` and `save_open` to `save_close` keep their counts in `WRITES`, so a storage reset waits for a routed write as today, and `CLOSED` refuses a new one.  A test: a reset during a routed write waits for it, and a routed write after the reset starts is refused.
+* The existing web tests of `app` pass in Chrome and Safari, with the fake write worker.
+* `docs/ARCHITECTURE.md` says "The page writes its files through write streams, on the main thread".  The commit of Step 5c changes it: which writes go through the write worker, and which stay on `createWritable`, and why (TD-103).
+
+### Step 5d: the acceptance runs
+
+* A counted Safari `e2e save` (it opens a song and saves it) leaves no new swap file from a routed write.  Each new swap file is a small write that stays on `createWritable` (`meta`, `current` and the like), and their bytes are under 1 MiB.  Also a counted `e2e smoke`: no swap file of a source file.  This is narrower than "no new swap file", since the small writes stay.  The orchestrator accepted this wording on 2026-11-14 (Decision log).
+* These pass in Chrome and Safari: `web-test`, `e2e storage`, `smoke`, `decode`, `playback`, `old-session`, `save`, `separate`.
+* `e2e stored-stems`: the hashes do not change, in Chrome and Safari.
+* `e2e memory-budget` passes in Chrome and Safari.  It reads the WebAssembly memory and the GPU bytes (MEM-4), not a worker's JavaScript heap.  The write worker has a WebAssembly memory of its own.  The implementer checks whether the tab total counts it.  If not, a run records its size, and the total counts it if it is more than 1 MB.  The write worker's JavaScript bound is the largest body that it holds times the depth of its queue: an 8 MiB slice of a `Blob`, a 2 MiB block, or a whole memory-path stem (about 17.6 MB for 100 s), for each waiting request.  The transferred arrays move from the page, so they do not add to the tab.  The implementer records the bound and how it was checked, or that it was not.
+* `check --tier push` passes, with both perf gates where the paths need them.
+
+### Step 5e: the docs
+
+* TD-103, the quirk entry and the draft WebKit bug: what still leaks after Step 5c (the small writes, the blob folders, the test helpers).
 
 ### Step 6: the record (case 4)
 
@@ -189,6 +289,7 @@ If the cause is in WebKit:
 * Case 3, if Step 3 ties a leak to the app: Step 3a's test fails first and passes after.  A counted Safari run (`e2e weights` or `perf`) leaves no new swap file and no new blob folder from that path.
 * Case 4, if the cause is WebKit: Step 4's tests fail first and pass after.  Counted Safari runs of `e2e weights --weights` and `e2e worker-check --download` leave no model-sized swap file.  The quirk entry, the draft bug and the new TD exist.
 * Case 6: each Safari `e2e` and `web-test` run prints the line of Step 2, and its tests pass.  Chrome meets case 6 by Step 1: each run removes its own folder, and a failed removal prints its path.
+* The page's writes (option c), Steps 5a to 5e): each new test fails first and passes after.  A counted Safari `e2e save` leaves no new swap file from a routed write, and each new swap file is a small write, under 1 MiB in all.  The scenarios of Step 5d pass in Chrome and Safari, `stored-stems` hashes do not change, and `memory-budget` passes.
 * `check --tier push` passes, with both perf gates where the paths need them.
 
 ## Idempotence and recovery
@@ -198,6 +299,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 ## Decisions for the maintainer
 
 1. The page's writes in Safari (Step 5).  Options and recommendation: from Step 3's figures.  Answer (2026-11-14, the maintainer, through the orchestrator): c), a write worker for this one purpose, which keeps the decode worker's duties clean (decision 0019).  The maintainer first said b), then changed to c).
+2. The form of the write worker.  Options: a JavaScript inline script in `app`, or a Rust crate built by Trunk, as `decode-worker` is.  Recommendation: either; JavaScript is less code and fewer docs, and a Rust crate keeps PROTO-1's text and the Rust tooling.  Answer (2026-11-14, the maintainer, through the orchestrator, parent `00668a1`): a Rust crate.
 
 ## Progress
 
@@ -208,6 +310,11 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * [x] 2026-11-14: Step 3a: not needed.  Step 3 ties no leak to a path of the app.
 * [x] 2026-11-14: Step 4: the model saves use a sync access handle.  `write_file` in `worker/src/web.rs` writes through `createSyncAccessHandle`, for `opfs_write`, `cache_put` and `download_to_opfs`; no other production `createWritable` was in `worker/` or `decoder/`.  `the_model_writes_open_no_write_stream` and the two moved MEM-5 tests failed first on an assert (`m51/step4-fail-first-*.log`).  Counted Safari runs s9 and s10 left no swap file (Surprises).  `check --tier push` passed at `6199418`, 15 lines, with both perf gates: Chrome 3.65 s against a bound of 3.95 s, Safari 5.64 s against 6.13 s (`m51/check-push-1.log`).
 * [x] 2026-11-14: Step 5: the page's writes (decision point): decided: c), a write worker on the page for the song-sized writes (Decisions for the maintainer, item 1).  The team leader adds its steps.
+* [ ] Step 5a: the facts before the code.
+* [ ] Step 5b: the write worker crate.
+* [ ] Step 5c: the page uses the write worker.
+* [ ] Step 5d: the acceptance runs.
+* [ ] Step 5e: the docs.
 * [x] 2026-11-14: Step 6: the record: the quirk entry in `references/browser-quirks.md`, the draft bug `references/webkit-bug-writable-swap-file.md` with its line in `docs/README.md`, TD-103 for the state after Step 4, and the notes and the known local failure in `references/local-browser-testing.md`.
 * [ ] Step 7: the checks before review round 1.
 
@@ -273,6 +380,10 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 
 * 2026-11-14, agent (team leader), after Step 3: Step 3a is not needed; the cause is WebKit (Surprises, s1 to s7).  The download path is checked with `e2e worker-check --download`, since `e2e weights` does not read `--download`.  The failed hash check of `e2e weights` on this Mac is not a check of Step 4.  The implementer records it under "Known local failures" in `references/local-browser-testing.md`, with the evidence.
 * 2026-11-14, orchestrator: a quit of Safari does not remove the swap files.  The orchestrator saw it at about 13:30 on 2026-11-14: Safari quit, its network process ended, and the 35,841 swap files (176 GB) were still there.  No agent quits Safari or deletes a swap file, a blob folder or another file; the deletes go to the orchestrator.
+
+* 2026-11-14, maintainer (through the orchestrator, parent `00668a1`): the write worker is a Rust crate built by Trunk, as `decode-worker` is, not a JavaScript inline script.  So its messages go in `stem-protocol`, and PROTO-1's text does not change.
+* 2026-11-14, orchestrator: the acceptance of Step 5d is "no new swap file from a routed write; each new swap file is a small write that stays on `createWritable`, under 1 MiB in all".  Why: `close()` replaces a small file in one step, and the page reads `meta` with no lock; a sync access handle writes in place and is exclusive.
+* 2026-11-14, agent (team leader), plan reviews of Steps 5 to 5e (4 rounds over the two forms): the worker sends a ready message, and the client holds requests until it comes; the reused array of a save comes back by transfer; `save_stems` writes through `.wav.page.part`; a failed worker is ended and its requests fail; the app's tests use a fake write worker behind the non-default feature `fake-writer`, which `xtask web-test` turns on, since the integration tests link the library without `cfg(test)`.
 
 ## Outcomes and retrospective
 
