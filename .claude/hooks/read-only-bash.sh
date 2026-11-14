@@ -5,6 +5,12 @@
 # It refuses `xtask publish`, `xtask review`, which changes the state of a
 # review round, and `xtask clean`, which removes worktrees, branches and
 # folders.  It refuses them through `cargo run` of xtask too.
+# It also refuses a wide search, which can run for hours and read private
+# files.  That is `find` or `du` from `/`, `~`, `~<name>`, `$HOME`, `/Users`,
+# `/Users/<name>`, `/Volumes` or `/System/Volumes/Data` (with its `Users`
+# folders), also with a final `/.` or `/*`.  It is also `mdfind` without
+# `-onlyin`, or with `-onlyin` on one of those folders.  It reads only the
+# paths in the command, so `cd / && find .` still passes.
 # It matches text, so it stops mistakes, not an agent that tries to escape.
 # Redirections and `sed -i` still pass.  Known gaps: TD-34 in docs/tech-debt.md.
 # For bash 3.2 (macOS): no `declare -A`, no `${x,,}`, no `mapfile`.
@@ -16,6 +22,7 @@
 export LC_ALL=C
 
 READ_ONLY_ADVICE="This agent is read only.  Do not try another form of the command."
+SEARCH_ADVICE="Search in the repo, or in the absolute folder that the brief names."
 PARSE_ADVICE="This is a limit of the guard's parse.  Write the command again without a backtick or an unmatched quote, for example with \`sed\`."
 NL=$'\n'
 TAB=$'\t'
@@ -27,6 +34,7 @@ refuse() {
   local advice=$READ_ONLY_ADVICE
   case $1 in
     backtick | "unclosed quote") advice=$PARSE_ADVICE ;;
+    "wide search") advice=$SEARCH_ADVICE ;;
   esac
   if [ $# -ge 2 ]; then
     printf 'read-only guard: %s: %s.  %s\n' "$1" "$(one_line "$2")" "$advice" >&2
@@ -268,6 +276,81 @@ check_git() {
   esac
 }
 
+# True if the path $1 is the whole disk, a home folder, the folder of all
+# users, the folder of all volumes or a volume: `/`, `~`, `~<name>`, `$HOME`,
+# `${HOME}`, `/Users`, `/Users/<name>`, `/Volumes` or `/Volumes/<name>`.
+# `/Volumes/Macintosh HD` is `/`.  The data volume of macOS,
+# `/System/Volumes/Data`, with its `Users` and `Volumes` folders, is the
+# same.  Each can have a final `/`, `/.` or `/*`.
+is_wide_path() {
+  local path=$1 shorter
+  while :; do
+    shorter=${path%/}
+    shorter=${shorter%/.}
+    shorter=${shorter%/\*}
+    if [ "$shorter" = "$path" ]; then break; fi
+    path=$shorter
+  done
+  case $path in
+    '$HOME' | '${HOME}') return 0 ;;
+  esac
+  lower "$path"
+  case $LOWERED in
+    '' | '~' | /users | /volumes | /system/volumes/data | /system/volumes/data/users | /system/volumes/data/volumes) return 0 ;;
+    /users/*/* | /volumes/*/* | /system/volumes/data/users/*/* | /system/volumes/data/volumes/*/* | '~'*/*) return 1 ;;
+    /users/* | /volumes/* | /system/volumes/data/users/* | /system/volumes/data/volumes/* | '~'*) return 0 ;;
+  esac
+  return 1
+}
+
+# Refuses a `find` with a wide start path.  The start paths are the words
+# after the options and before the expression, and the word after `-f`.
+check_find() {
+  local j=$((k + 1))
+  while [ $j -lt $end ]; do
+    case ${WORDS[j]} in
+      -f)
+        if [ $((j + 1)) -lt $end ] && is_wide_path "${WORDS[j + 1]}"; then refuse "wide search" "$text"; fi
+        j=$((j + 2))
+        ;;
+      -*) j=$((j + 1)) ;;
+      *) break ;;
+    esac
+  done
+  while [ $j -lt $end ]; do
+    case ${WORDS[j]} in
+      -*) return 0 ;;
+    esac
+    if is_wide_path "${WORDS[j]}"; then refuse "wide search" "$text"; fi
+    j=$((j + 1))
+  done
+}
+
+# Refuses a `du` with a wide path in a word that is not an option.
+check_du() {
+  local j=$((k + 1))
+  while [ $j -lt $end ]; do
+    if is_wide_path "${WORDS[j]}"; then refuse "wide search" "$text"; fi
+    j=$((j + 1))
+  done
+}
+
+# Refuses an `mdfind` without `-onlyin <folder>`, which searches the whole
+# disk, or with a wide folder after an `-onlyin`.
+check_mdfind() {
+  local j=$((k + 1)) only=0
+  while [ $j -lt $end ]; do
+    if [ "${WORDS[j]}" = -onlyin ]; then
+      if [ $((j + 1)) -ge $end ] || is_wide_path "${WORDS[j + 1]}"; then refuse "wide search" "$text"; fi
+      only=1
+      j=$((j + 2))
+      continue
+    fi
+    j=$((j + 1))
+  done
+  if [ $only -eq 0 ]; then refuse "wide search" "$text"; fi
+}
+
 # Moves k past the words from k that start with `-`.
 skip_options() {
   while [ $k -lt $end ]; do
@@ -304,6 +387,28 @@ check_part() {
         k=$((k + 1))
         continue
         ;;
+      nice)
+        k=$((k + 1))
+        while [ $k -lt $end ]; do
+          case ${WORDS[k]} in
+            -n) k=$((k + 2)) ;;
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        continue
+        ;;
+      sudo)
+        k=$((k + 1))
+        while [ $k -lt $end ]; do
+          case ${WORDS[k]} in
+            -C | -D | -g | -h | -p | -R | -r | -T | -t | -U | -u) k=$((k + 2)) ;;
+            -*) k=$((k + 1)) ;;
+            *) break ;;
+          esac
+        done
+        continue
+        ;;
       env | command | exec | time | nohup | export | declare | typeset | readonly | local)
         k=$((k + 1))
         while [ $k -lt $end ]; do
@@ -335,6 +440,9 @@ check_part() {
     xtask) check_xtask_words $((k + 1)) $end ;;
     cargo) check_cargo ;;
     git) check_git ;;
+    find) check_find ;;
+    du) check_du ;;
+    mdfind) check_mdfind ;;
   esac
 }
 

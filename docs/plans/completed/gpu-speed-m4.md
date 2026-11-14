@@ -1,0 +1,464 @@
+# GPU speed, M4: a matmul with less workgroup memory for each unit of work
+
+## Purpose
+
+This is the milestone plan for M4 of `plans/active/gpu-speed.md`.  The parent's M4 section and its "Validation and acceptance" stay the criteria.
+
+Safari sets workgroup memory to zero with one thread, byte by byte (`references/browser-quirks.md`).  So in Safari, a kernel with fewer bytes of workgroup memory for each workgroup can be faster on the same grid.  M4 adds such matmul kernels as calibration candidates.  Each GPU keeps a candidate only if it measures it faster, so the Radeon and the iPhone keep their kernels.
+
+M4 also lands three tools that M5 and M6 use:
+
+* the rule "A change lands only with a shown gain" (Step 7), with the in-page `?bench` ratio for a kernel;
+* the same-session comparison of a base page and a head page (`e2e perf --base-dist`, Step 5), with its noise measured;
+* `--raise` for every raise of a baseline's bound, a new browser version included (Step 2).
+
+Readers: the implementer, the team leader, the orchestrator, and the team leaders of M5 and M6.
+
+## Context and orientation
+
+The state at the start, on 2026-11-13, at commit `9769916` on branch `gpu-speed/2026-11-12`.  The review base is `9769916`.  The machine is the maintainer's Apple M2 Pro (19-core GPU), with Safari 27.2 and Chrome 157.
+
+### The decisions that M4 follows
+
+* The maintainer, 2026-11-12: kernels stay within WebGPU's default limits (GPU-1: 16 KiB of workgroup memory, 256 invocations).  No `subgroups`.  The perf gate runs on this M2 Pro only, with tolerances that are not too tight.  Never wait for a run on the Radeon or the iPhone.  Decision 0031 is accepted.
+* The maintainer, 2026-11-13: never run a search of the whole disk or of the home folder.  Give every agent absolute paths.  Before a report, check that no agent or command still runs.
+* The parent plan: before M4 changes a baseline, every raise of a bound needs `--raise`, a new browser version included.  A test of it fails first.  No baseline changes before that change lands.
+* The parent plan: the WGSL of each current kernel stays the same byte for byte, checked by a test that fails first on a change.
+* The parent plan: M4's first commit fixes the entry of `references/browser-quirks.md` that says that more work for each byte loses less.
+* The parent plan: not a 128 x 128 tile with 8 x 8 outputs, not an unrolled inner loop, and no loop-indexed private array.  Each output keeps its sum order, so the f16 variant gives the f32 kernel's output bit for bit (decision 0022).
+* The parent plan: the drift between sessions is up to about 5.7 %.
+* Lessons of M3: a build in a worktree uses its own `--target-dir` (or `CARGO_TARGET_DIR`) inside that worktree.  One browser run or perf gate at a time on this Mac.  Late review rounds fix only blockers, significant should-fix and confirmed findings on a strict rule.
+
+### What is known (parent plan, M3)
+
+* Safari's loss on `v64` at K 256 has two parts.  A fixed cost for each workgroup, from the zero-init with its clamps: 26 % to 64 % of the loss, by the estimate.  And a K loop about 1.35 times slower, with no cause found.
+* The `wg10k` control (10 KiB of workgroup memory, almost no work, 2,064 workgroups): 408 us in Safari, 17.9 us in Chrome.  `wg0` (no workgroup memory): 11.0 us and 6.3 us.  M3 measured the zero-init only at 10 KiB and at 0 KiB.  That its cost grows with the bytes comes from WebKit's source.
+* M3 Step 5.2: WebKit's zero-init with its clamps adds 0.96 ms to `v64` on `freq qkv` (2,064 workgroups), of 3.52 ms in Safari.  BK 8 (6 KiB) can save about 40 % of the zero-init's part: 6 % to 11 % of a K 256 product, and 1 % to 5 % of a separation.  A kernel with no workgroup memory can save up to 27 % of a K 256 product.
+* `v64-g4` and `v128` did more work for each byte of workgroup memory, and neither was faster in Safari.  So the rule is fewer bytes for each workgroup on the same grid, not more work for each byte.
+* The baselines (`xtask/perf-baselines.json`): Chrome 157 4.70 s, Safari 27.2 7.40 s, each with a tolerance of 10 %.  Both chose `v64` for the large and the small products.  A Safari run of M2 chose `i64` for the small products once.
+* The cost of a forced flip (M2 Step 5.3): Chrome `attn=fused` 2.1 %, `mm=v64,i64` 0 %; Safari `attn=freq` 9.5 %, `mm=v64,i64` 0 %.  Safari's calibration gave fused / split 0.975 to 0.992 in 26 calibrations.
+
+### The code today
+
+* `roformer-gpu/src/lib.rs`: `Tile` and `TILES` (`i64`, `i128x64`, `s64`, `v64`).  `Tile::vec4_source` fills `shaders/matmul_vec4.wgsl`.  It asserts that each tile load fills the 256 threads: `(bm * bk / 4) % 256 == 0`.  So BK 8 on a 64 x 64 tile (128 vec4s for each tile) needs a change there.  `Tile::f16_source` makes the f16 variant with `replace_once` on the B declaration and on the one B read line of `b_get`.  `kernel_sources` and `kernels_id` (FNV-1a) cover each matmul kernel, its f16 variant and fused attention.
+* The tests of the tiles in `lib.rs`: `bank_conflicts` wants `[2, 2, 1, 1]` for each vec4 tile; `workgroup_memory_within_defaults` checks the formula `4 * (bm + bn) * (bk + pad)` for a vec4 tile; `generated_sources` and its `want` list name each source; `every_kernel_fits_the_default_limits` checks each one with naga; `every_shader_file_is_checked` wants each shader file in `SHADER_FILES` or `GENERATED_FROM`.  `.claude/rules/gpu.md` lists these.
+* `roformer-gpu/src/bench.rs`: `shapes()`, `measure` (`?bench`), `calibrate`, `decide`, `still_in`, and `CALIBRATION` (3).  Calibration times the large products on `time qkv`, `time ff down` and `freq ff up`, and the small products on `time gates` and `time p·v`.  It weights each shape by `per_chunk`.  `decide` takes the plain fastest kernel of each kind.  The `time p·v` product is not vec4-whole, so a vec4 kernel runs it as `i64` under its own name.
+* `?bench=<names>&bench_rounds=<n>` (`worker/src/web.rs`) times only those kernels.  Each bench line is `bench: <shape> (<m>x<n>x<k>, x<batch>) <tile>, <format> weights: <rate> GFLOP/s (median of <n>, spread <s>%)`.  `cargo run -p xtask -- e2e bench --browser <b> --query <q> --dist <dir> --out <dir>` opens the page and waits for `bench finished`.
+* `worker/src/web.rs` logs each chunk as `chunk <done>/<total>: <s> s; ...` with one decimal (`{:.1}`).  `chunk_times` in `perf.rs` reads it with `number_after`, which reads any decimals.
+* `xtask/src/e2e/perf.rs`: `PerfResult` (the chunk times, `chunk_median`, `chunk_lower_quartile`, `whole_secs` from the line `separator: 6 stems in <s> s`, the kernels), `gate`, `tolerance_pct`, `new_entry` and `update_refusal`.  `update_refusal` lets a raise of the bound through without `--raise` when the browser version differs.  The test `a_raise_over_the_tolerance_needs_a_reason` asserts that.  `e2e perf --dist <dir>` runs a page from another folder.  Each run writes `<out>/perf-<browser>-<n>.json`.
+* The text on `--raise` today: `.claude/rules/gpu.md` ("Speed"), `README.md` (the `perf` paragraph), `docs/references/local-browser-testing.md` (the perf lines), the module doc of `xtask/src/e2e.rs`, and the doc of `update_refusal`.
+* The M3 harness for the controls is not on the branch.  It is in patches 0001 and 0003 of `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/variants/`.  Patch 0001 adds `roformer-gpu/src/m3.rs` (`EXTRAS`, `extra_source`, `controls`), `Kernel::Extra`, `Kernels::extra_pipeline`, `Rec::extra`, a `pub(crate)` `bench::time_rec`, and the two `controls` calls in `bench` of `worker/src/web.rs`.  Patch 0003 adds `wg_source` and the `wg10k` and `wg0` controls.  Port only these parts.
+* `xtask/src/e2e.rs`, `WORKER_HEADROOM_MB` (-17 MB) and its doc: the proof of M1.  The parent's "Validation and acceptance" gives the cases of its measurement.
+
+### Terms
+
+* Page, set, ratio and effect: as in Terms of `plans/completed/gpu-speed-m3.md`.  A page is one browser session that runs `?bench` once.  A set is the pages of one experiment, in the order Safari, Chrome, Safari, Chrome.  A ratio is a time over the time of its reference kernel in the same page.  An effect is a ratio whose distance from 1 is larger than the larger spread of the two figures, in both pages of a browser.
+* Candidate: a new `TILES` entry with its f16 variant.  M4 has two: `v64k8` and `r64` (Step 6).
+* The reference kernel: the kernel that calibration chose at the base for that kind of product, in that browser.  At `9769916` it is `v64` for both kinds in both browsers.
+* Calibration total: for one kind of product (large or small), the sum over calibration's shapes of that kind of `per_chunk x flops / rate`.  It is what `calibrate` compares.
+* Base page and head page: the page built from the commit before a change, and the page built from the commit with it.
+* A run: one separation of `e2e perf`, in a new browser profile.
+
+### The paths of this run
+
+* The scratchpad of M4: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/`.  It belongs to one session, and is not kept.  So each figure also goes into this plan's Surprises at the end of its step.
+* The logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/runs/<step>-<browser>-<n>/`.  Each figure in a table names its log.
+* The scratch worktree of Step 4: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/wt`, on the local branch `scratch/m4-controls`.  Never push it (GIT-1).  Its target folder: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/wt/target`.
+* The base worktree of each same-session comparison: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/base-wt`, detached at the base commit.  Build its page with `CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/base-wt/target`, then `trunk build --release` in its `app/`.  Its page is `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/base-wt/app/dist`.  Remove it after each comparison with `git worktree remove`.
+* The head page: `/Users/lloyd/Documents/rustt/stemyla/app/dist`, from `(cd /Users/lloyd/Documents/rustt/stemyla/app && trunk build --release)`.
+* Weights: `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors`, also given as `--weights`.  Git ignores it.  Never commit it (ASSET-1).
+* Chrome: `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.  Safari: through `safaridriver`, which `xtask` drives.  Never quit the maintainer's Safari.  Read `docs/references/local-browser-testing.md` first.
+* Run one browser run or perf gate at a time.  `caffeinate -dimsu` runs; never stop it.  Before each browser run, check with `ps -A -o pid,etime,command` that no other `e2e` or `check --tier push` runs.
+
+## Plan of work
+
+The simplest steps first.  Each step that changes behaviour starts with a test that fails on an assert.  A step whose result makes a later step pointless records that in Surprises and skips it.
+
+Not done, and why:
+
+* No `?bench` harness for the controls on the branch.  The controls only predict BK 8's gain; the candidates' own `?bench` ratios decide.  So the controls run on a scratch branch, as in M3.
+* No dump of Safari's own MSL: it changes the maintainer's Safari settings (parent, Decision log, i1-4).
+* No `subgroups` (the maintainer's decision 1).
+
+### Step 1: the quirk entry (the first commit)
+
+In `docs/references/browser-quirks.md`, entry "Safari sets workgroup memory to zero with one thread", the bullet "The code here" says that a kernel that does more work for each byte of workgroup memory loses less in Safari.  M3 measured against it: `v64-g4` and `v128` did more work for each byte, and neither was faster in Safari.  Write it again:
+
+* The cost grows with the bytes of workgroup memory and the number of workgroups, by WebKit's source.  M3 measured it only at 10 KiB and at 0 KiB.
+* More work for each byte did not help in Safari: `v64-g4` (1.014 to 1.033 times `v64` at K 256) and `v128` (1.30 to 1.59).
+* M4 of `plans/active/gpu-speed.md` tries fewer bytes for each workgroup on the same grid.
+
+Acceptance: `cargo run -p xtask -- docs-check` passes.  The commit holds only this file.
+
+### Step 2: every raise of a bound needs `--raise`
+
+1. In `xtask/src/e2e/perf.rs`, change the test `a_raise_over_the_tolerance_needs_a_reason` first.  A raise with a new browser version and no reason is refused.  The refusal text names the old and the new version, and asks for a reason that names the browser update.  Run it, and see it fail on its assert.
+2. Change `update_refusal`: a new bound over the old bound needs a reason that is not blank, for any browser version.  A bound that is not higher needs none.
+3. Fix each text of "The code today" that says that a new browser version needs no reason: the doc of `update_refusal`, its refusal message ("with the same browser version"), the doc bullet of `a_raise_over_the_tolerance_needs_a_reason` ("passes with a new browser version"), the module doc of `xtask/src/e2e.rs`, `README.md` and `docs/references/local-browser-testing.md`.  After a browser update, the reason names it, for example `--raise "Safari 27.2 to 27.3"`.
+4. `.claude/rules/gpu.md`, "Speed", says "With the same browser version, a raise of the bound also needs `--raise`".  Its new text: "A raise of the bound also needs `--raise`, with any browser version."  Give the orchestrator a step checkpoint with this diff in `m4/`.  Wait until it applies the diff.  Then the commit of this step adds `.claude/rules/gpu.md` by name.
+
+Acceptance: the changed test fails before the change and passes after it.  `cargo test -p xtask` passes.  `cargo run -p xtask -- docs-check` passes.
+
+### Step 3: the WGSL of each current kernel, pinned
+
+1. Add a test in the tests of `roformer-gpu/src/lib.rs`, for example `current_kernels_keep_their_wgsl`.  It takes each named source of `generated_sources()` (the matmul kernels and their f16 variants, fused attention) and of `SHADER_FILES` (`softmax.wgsl`, `rmsnorm.wgsl`, `elementwise.wgsl`).  It computes the FNV-1a hash of each, and compares it with a pinned value, by name.  A name with no pinned value is allowed only if it is on a list of the new candidates' names, which starts empty.  So each current kernel is pinned, and a new kernel must be named.  Step 7's commit moves each candidate that lands from that list to a pinned value, its f16 variant included.  At the end of M4 the list is empty.  Use the FNV-1a of `kernels_id`; move it to a function that both use, with no change of `kernels_id`'s value.
+2. The test fails first: put one changed byte in a comment of `shaders/matmul_vec4.wgsl`.  Run the test, and see it fail on its assert for `v64` and `v64-f16`.  Remove the change.  Record the failed run in Progress.
+3. Its doc says what it asserts, as a list.  It also says why: calibration protects the Radeon and the iPhone from a new candidate, not from a changed old kernel.
+
+So a candidate must not change `matmul_vec4.wgsl`, `matmul_interleaved.wgsl` or `matmul.wgsl`, or the code that fills them for the current tiles.
+
+Acceptance: the test fails on the planted byte and passes without it.  `cargo test -p roformer-gpu --lib` passes.
+
+### Step 4: the `wg` controls (scratch only)
+
+Does the zero-init cost go down with the bytes, at the same grid?  M3 measured only 10 KiB and 0 KiB.  The parent asks for this control first.  It is evidence for the quirk entry and a prediction of `v64k8`'s gain.  It is not a gate: Step 6 builds `v64k8` in any case, and Step 7's own ratios decide.
+
+1. `git worktree add /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/wt -b scratch/m4-controls HEAD`.
+2. On that branch only, port by hand from patches 0001 and 0003 the parts that "The code today" names.  Patch 0003 does not apply on 0001 alone: its context holds patch 0002's `attention-u`, and its indices (`WG10K = 4`, `WG0 = 5`) count it.  Leave out `attention-u`, the variants and the FMA and copy controls.  Give `wg_source` the count of vec4s as an argument, not a fixed 640.  `EXTRAS` holds three controls, each with almost no work, at `v64`'s grid on `freq qkv` (24 x 86 workgroups, 2,064):
+   * `wg10k`: 640 vec4s (10 KiB), as M3's;
+   * `wg6k`: 384 vec4s (6 KiB), as `v64k8` has;
+   * `wg0`: no workgroup memory.
+3. Build with the worktree's own target folder.  Run one set (Safari, Chrome, Safari, Chrome) of `e2e bench --query "bench=v64&bench_rounds=5" --dist <the worktree's app/dist>`.
+4. Record, for each browser and page: the time of each control, and `(wg6k - wg0) / (wg10k - wg0)`.  If the zero-init cost is linear in the bytes, this is about 0.6 in Safari.
+
+The reading: `(wg10k - wg6k)` for each dispatch, against `v64`'s time on `freq qkv`, is the predicted gain of `v64k8` there.  Add the figures, and whether the cost is linear in the bytes, to the quirk entry of Step 1, in a commit of this step.
+
+Then `git worktree remove` the worktree, and `git branch -D scratch/m4-controls`.  Keep its patch in `m4/controls.patch` (`git format-patch`).
+
+Acceptance: the table in Surprises, each figure with its log.  The quirk entry gives the measured cost at 6 KiB.
+
+### Step 5: the same-session comparison
+
+The tool that shows "no loss" and a gain of 3 % or more, for M4, M5 and M6.  The goal and the cases are in the parent's "Validation and acceptance".  The design:
+
+* `cargo run -p xtask -- e2e perf --browser <b> --weights <w> --base-dist <dir> --runs <n>`.  The base runs use the page in `<dir>`, and the head runs use `--dist` (default `app/dist`).  Both use HEAD's `xtask`.  `--runs` is the count of each side: even, and 4 or more.  `--base-dist` refuses `--gate`, `--update-baselines` and `--swiftshader`.  It refuses a run on a fallback or a software adapter (GPU-3), and a run whose chunk times have 1 decimal (a page from before `59da862`).  `--query` applies to both sides.
+* The base worktree: `git -C /Users/lloyd/Documents/rustt/stemyla worktree add --detach /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/base-wt <base commit>`.  Build its page as "The paths of this run" says.
+* The order: blocks of 4 runs, B H H B.  Each run writes `<out>/perf-<browser>-<base or head>-<n>.json`.  The output gives each run in its order, with the kernels that it chose.
+* The figure of each run is its chunk lower quartile, as the gate reads it.  The groups of slow chunks go into the whole time, but not into the lower quartile.  In M2's runs, groups of slow chunks added about 9 % to a Chrome run's whole time, and the lower quartile stayed at 4.70 s (`plans/completed/gpu-speed-m2.md`, Surprises, Step 5.1).  The output also gives the chunk median and the whole time of each run.
+* The chunk times are logged to 0.1 s today: steps of 1.4 % to 2.1 %, too coarse for 3 %.  So the first change of this step logs them to 0.01 s (`{:.2}` in the chunk line of `worker/src/web.rs`), with a parse test of a line with 2 decimals.  It lands before the A/A session, so each later base page has it.
+* The change of a block: `r = (H1 + H2) / (B1 + B2) - 1`.  In B H H B, a drift that multiplies each run's time by `1 + d i` (run `i`) cancels.  A drift of 1 % for each run and a true loss of 3 % give `r` = 3 %.
+* A spoiled block: the two runs of a side chose the same kernels and differ by more than `N` (the parent's case 4: the runs of one side differ by more than the noise).  A spoiled block does not count.  A side whose two runs chose different kernels does not spoil its block (review round 2).
+* When the runs of a side chose different kernels anywhere, a slow choice is part of what the head does, not noise (review rounds 1 to 3).  Then the comparison runs each block up to the most: 4, or `--runs` / 2 when that is more.  The verdict is the class of the mean `r` of the blocks that are not spoiled.  Fewer than 2 such blocks give undecided.  The output gives each kernel choice with its count, under "kernels differ".
+* The class of a block: a loss when `r > T`, a gain when `r < -T`, else no change.  `T` and `N` are constants (below).  Each compare uses `EPSILON` of `perf.rs`.
+* The verdict:
+  * Start with 2 blocks (`--runs 4`).  If the 2 blocks are not spoiled and have the same class, that class is the verdict.
+  * Else the tool runs one more block, up to 4 blocks (`--runs 8`).  The verdict is the class of 2 blocks that are not spoiled, when no other block that is not spoiled has another class.
+  * Else the verdict is undecided.
+  * "3 % or more" is printed when the mean `|r|` of the blocks of the verdict's class is 0.03 or more.  When the kernels differ, it uses the size of the mean `r`.  The constant's doc says that a true change of exactly 3 % gets it about half of the time.
+* So one slow run, or one change of the GPU's state, spoils only its block, and the other blocks decide.  A verdict never rests on one block.
+* Undecided is not "no loss" and not a gain.  Run the comparison again in a later session.  If it is undecided again, the change does not land, unless the Decision log records an explicit reason.
+
+Order of the work:
+
+1. The chunk line with 2 decimals, and its parse test (above).  Commit it.
+2. Pure functions in `xtask/src/e2e/perf.rs`, with tests that fail first: the order of the runs, the change of a block, a spoiled block, and the verdict from the runs of both sides.  The tests use `T` and `N` by name and a fixed synthetic noise, so they run again after the constants are set.  The cases:
+   * a uniform loss of 3.5 % of the head gives a loss and "3 % or more"; one of 2.5 % gives a loss with no "3 % or more" (if `T` is under 2.5 %);
+   * a uniform loss of 3 % with a drift of 1 % for each run gives a loss;
+   * a uniform gain of 3.5 % gives a gain and "3 % or more";
+   * one slow head run of +10 %, the other runs the same as the base, spoils its block, and gives no change after one more block;
+   * a slow H1 in block 1 and a slow H2 in block 2, each +6 %, spoil both blocks, and do not give a loss;
+   * one block that is a loss and one that is no change give one more block; a third block of no change gives no change;
+   * blocks of three classes, or fewer than 2 blocks that are not spoiled after 4 blocks, give undecided;
+   * a uniform change of 1.5 x `T` gives that class, and one of 0.5 x `T` gives no change.
+3. The option `--base-dist` in `xtask/src/e2e.rs`, with a test of its refusals (`--gate`, `--update-baselines`, an odd `--runs` or one under 4).
+4. The A/A session, to set `T` and `N`.  Build a base worktree at HEAD (the same commit, with the chunk line of item 1).  Run `--runs 6` in Chrome, then in Safari: 3 blocks in each browser.  Record `r` of each block, and the difference of the two runs of each side in each block.  Then:
+   * `N` = the larger of 1 % and twice the largest measured difference of the two runs of a side in a block.
+   * `T` = the larger of 1 % and twice the largest measured `|r|`, rounded up to 0.5 %.
+   * `T` must be 2 % or less, so that a uniform 3 % loss is a loss with a margin.  If it is more, decide in the Decision log.  The options are blocks of more runs, or another figure.
+   * Each constant's doc gives this proof, as the doc of `WORKER_HEADROOM_MB` does.
+5. The check of the constants: a second A/A comparison, as the tool runs it (`--runs 4`), in each browser, after they are set.  It must give "no change".  This is not the session that set them.  If it gives a loss, a gain or undecided: set `T` and `N` again by the rule from both sessions' figures, or decide in the Decision log.  Do not use the tool until a new A/A comparison gives "no change".
+6. Write how to run it in `docs/references/local-browser-testing.md`, beside the perf lines, and in the `perf` paragraph of `README.md` and the module doc of `xtask/src/e2e.rs`.
+
+Acceptance: each new test fails first, then passes.  The second A/A comparison gives "no change" in both browsers.  The figures of both A/A sessions are in Surprises.
+
+### Step 6: the candidates
+
+Two candidates, each a new `TILES` entry with its f16 variant.
+
+* `v64k8`: `v64` with BK 8.  64 x 64 outputs, 4 x 4 for each thread, vec4 reads, a pad of one vec4: `SV = 3`, and (64 + 64) x 12 x 4 B = 6 KiB of workgroup memory.  Two barriers for each K tile, as `v64` has.  Each tile is 128 vec4s, so the 256 threads load both tiles in one step: threads 0 to 127 load A, and threads 128 to 255 load B.  A group of 32 threads is all on one side, so the branch does not diverge in a SIMD group.  `vec4_source` keeps its assert for a tile of 256 vec4s or more, and makes this stage only for a tile of 128.  `v64`'s generated text does not change (Step 3).
+* `r64`: a register-tiled kernel with no workgroup memory.  The same grid and thread map as `v64`: 64 x 64 outputs for each workgroup, thread (tx, ty) owns rows `ty + 16 i` and columns `tx + 16 j`.  For each 4 values of K, each thread reads its 4 A vec4s and 4 B vec4s from storage, and adds the products as `v64` does: component x, then y, z, w, one `fma` at a time.  No barrier.  It has its own template, for example `shaders/matmul_vec4_direct.wgsl`, in `GENERATED_FROM`.  Its `a_get` and `b_get` are the same text as in `matmul_vec4.wgsl`, so `f16_source` changes its B read with `replace_once`.  A field of `Tile`, for example `direct: bool`, selects it.  The code needs these, by `lib.rs` today:
+  * `r64` has `vec4: true`.  So `MatMul::kernel` sends a product that is not vec4-whole to the fallback, and `bench::measure` maps it the same way.
+  * `Tile::source` tests `direct` before `vec4`.  `f16_source` takes the vec4 texts for it.
+  * The new template has `const KV: u32 = 1u;`, so that `a_get(ty + 16u * i, k0, row0, a_base)` reads row `ty + 16 i` at K offset `k0`, and `k0` steps by 4.
+  * `workgroup_memory_within_defaults` has a branch for `direct` (0 bytes).  `bank_conflicts` leaves `direct` tiles out of its vec4 loop.
+
+For each candidate:
+
+1. The tests first, each failing on an assert before the code:
+   * The `want` list of `every_kernel_fits_the_default_limits` names it and its f16 variant (GPU-1).  `generated_sources` takes it from `TILES` with no edit.  The list of new names of Step 3's test names it.
+   * `workgroup_memory_within_defaults`: 6,144 B for `v64k8`; 0 for `r64`.
+   * `bank_conflicts`, by the test's model: `v64k8` with its pad gives `[2, 2, 1, 1]`, as `v64` does.  With no pad (`SV = 2`) it gives `[1, 1, 1, 2]`, not `v64`'s `[1, 1, 1, 4]`.  So the unpadded `want` depends on the tile, and this assert fails first.  The doc says that the pad of one vec4 still gives 2-way stores and reads with no conflict.
+   * The native GPU tests (`roformer-gpu/tests/`) check each `TILES` entry against the CPU.  Add a test that each candidate gives `v64`'s output bit for bit, in f32 and f16.  Use the calibration shapes and the ragged shapes of `matmul_vec4_variants` (`roformer-gpu/tests/kernels.rs`): a K that is a multiple of 4 but not of 16 is where `v64` adds zero terms, and `fma(0, 0, acc)` is `acc`.  The reason, in the test's doc: each output adds an explicit `fma` chain in K order in the three kernels, and no form changes that order.  The claim is for the native test only: Safari compiles with `MTLMathModeRelaxed` (M3, Step 1).  If the native GPU gives a difference, record it in Surprises and decide in the Decision log; decision 0022 needs only the f16 variant to equal its own f32 kernel.
+2. The code.  Bump `CALIBRATION` to 4, with a line in its doc: version 4 adds the candidates of M4.  Change its test.
+3. `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passes on this Mac (Metal).
+4. Do not commit on the branch yet.  Step 7 decides which candidate lands.  Run `git add -N` on each new file, for example `roformer-gpu/src/shaders/matmul_vec4_direct.wgsl`, then write `git diff` to `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/candidates.patch`, so that a new session can go on.  Check it with `git apply --check` in a clean worktree at HEAD.
+
+Acceptance: the tests above fail first and then pass, natively on Metal.
+
+### Step 7: the rule "A change lands only with a shown gain", for a kernel
+
+The goal and the cases are in the parent's "Validation and acceptance".  The rule for a kernel candidate:
+
+1. Build the head page with the candidates in the working tree.  Run one set (Safari, Chrome, Safari, Chrome) of `e2e bench --query "bench=v64,<the candidates>&bench_rounds=5"`.  The bench times f32 and f16 weights.  If the reference kernel (Terms) of a browser is not `v64` (`i64` for the small products, for example), add it.
+2. For each browser, page and weight format, and for each kind (large, small): `R` = the candidate's calibration total over the reference kernel's.  `S` = the largest spread of the bench lines that go into `R`.  Give also the ratio of each shape, so that a total does not hide one slower shape.  The `time p·v` product is not vec4-whole: each vec4 kernel takes the same `i64` timing there (`bench.rs`, `measure`), with no spread on its line.  So that term is the same on both sides of `R`, and `S` comes from the other lines.  `time gates` has 18 workgroups.  So a gain on the small kind is not expected; the large kind decides.
+3. A gain on a kind in a browser: `R < 1` and `1 - R > S`, in both pages.  A loss: `R > 1 + S` in both pages.  Else no effect seen.  This is the rule for an effect of M3's Terms, for a ratio in one page.
+4. A candidate lands only with a gain on a kind, with f16 weights, in at least one browser.  The f32 figures are recorded.  Then each browser's same-session comparison (Step 9) must show no loss.
+5. A candidate with no gain in either browser does not land.  Its figures go in Surprises, and its code goes to `m4/<name>.patch`.  If both candidates gain in the same browser, both land: calibration chooses between them.
+
+Then commit each candidate that passes item 4, with its tests, `CALIBRATION`, its pinned hashes (Step 3), and the docs that name the kernels (`docs/ARCHITECTURE.md`, "Running it on the GPU", and the doc of `TILES`).  Write the rule in `docs/references/local-browser-testing.md`, beside the same-session comparison, for M5 and M6.
+
+Acceptance: a table in Surprises of `R`, `S` and the ratio of each shape, for each candidate, browser, page, format and kind, with the verdict.  If no candidate lands, Steps 8 to 11 are skipped, with the reason in Progress.
+
+### Step 8: the self-tests
+
+For each candidate that landed: `cargo run -p xtask -- e2e selftest --browser <b> --weights /Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors --query mm=<kernel>`, in Safari and in Chrome.  Also with `--query selftest=stages`, the kernels that each browser chooses.
+
+Acceptance: each run passes.  Progress names each run.
+
+### Step 9: the same-session comparison of the kernels
+
+The base is the commit before Step 7's commit.  Run Step 5's tool with `--runs 4`, in Chrome, then in Safari.  A browser chose a candidate when the `kernels:` line of any head run names it.
+
+* No change or a gain in both browsers: the candidate stays.
+* A loss that holds in a browser: a defect.  First look at the kernels that the head runs chose.  A calibration that chose the candidate where it is slower is a defect to fix.  If it is not fixed, the candidate is reverted, with the figures in Surprises (the parent's "Extra stop conditions").
+* Undecided: as Step 5 says.  Undecided is not "no loss".  Twice undecided, the candidate does not land, unless the Decision log records an explicit reason.
+* A browser that chose a candidate must have a gain for it by Step 7's rule in that browser (the parent's case 1).  If it has none, the candidate is reverted, unless the orchestrator accepts it with a reason.  That acceptance goes in the Decision log, and in the PR under "Needs your attention".
+* A candidate that fails this step is reverted with a revert commit, and Progress names it.  Then Steps 10 and 11 use the kernels that are left.
+
+Acceptance: the verdict of each browser, with `r` of each block and the kernels of each run, in Surprises.
+
+### Step 10: the cost of each forced flip between near choices
+
+After the new candidates, as M2 Step 5.3 did.  "Near" is the parent's: a fused / split ratio within 10 % of `FUSED_MARGIN` (0.99 to 1.21), or two matmul kernels whose calibration totals are within 10 % of each other.  Read them from the `kernels for this GPU` lines of Step 9's head runs.
+
+1. For each near choice, run 2 forced runs (`e2e perf --runs 1 --query mm=<large>,<small>` or `--query attn=<policy>`) and 2 unforced runs, in turns: unforced, forced, forced, unforced.  The cost is (the forced median - the unforced median) of the chunk lower quartiles, over the unforced median.
+2. If a cost plus the drift (5.7 %) is over the tolerance (10 %), decide in the Decision log.  The options: a wider tolerance with its proof, given with `--raise` after Step 2; or a gate key that names the kernels.  Safari's `attn=freq` (9.5 % in M2) is near if its fused / split is 0.99 or more.
+
+Acceptance: the cost of each near flip, and the decision if one is needed, in Surprises and the Decision log.
+
+### Step 11: the baselines
+
+Only for a browser whose calibration chose a new candidate (the parent: "The baselines go down if the GPU chooses it"):
+
+* `cargo run -p xtask -- e2e perf --browser <b> --weights <w> --runs 5 --update-baselines`.  A lower bound needs no `--raise`.  A higher bound is refused: do not give `--raise` for it, since Step 9 showed no loss.  Record the figures in Surprises, and keep the old entry.
+* An update in a fast session takes up to about 6 % of the margin (the parent).  Step 10 allows for that drift.
+
+Acceptance: `xtask/perf-baselines.json` changes only for such a browser, with a lower bound, and `entry_problems` passes.  Else it does not change, and Progress says why.
+
+### Step 12: the worker headroom of `memory-budget`
+
+By the parent's cases 1 to 4 of the headroom:
+
+1. Run `cargo run -p xtask -- e2e memory-budget --weights <w>` 3 times in Chrome and 3 times in Safari, at HEAD.  Record the worker's growth of each run, and the margin of check 3.
+2. Compute again the smallest lost-cut rise of cut 3 from the current `roformer::separate::working_set` (9.44 MB at M1).  M4 does not change `working_set`, so it can stay.  Say so with the figure.
+3. Each growth the same as M1's (57 MB, noise 1 MB) and the margin in the band of the doc: the constant stays.  Record the figures in Surprises.
+4. Else follow cases 2 to 4: the wasm test passes, a probe of the live heap at each phase finds no held buffer, and the constant goes midway between the noise and the rise.  If the noise is not less than the rise, decide in the Decision log.  Its doc, the figures in `the_worker_growth_must_fit_the_working_set_budget` and a Decision log line change in the same commit.
+
+Acceptance: `memory-budget` passes 3 times in each browser.  The growths and the margins are in Surprises.
+
+### Step 13: the checks before review round 1
+
+* `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver cargo run -p xtask -- check --tier push` passes, with both perf gates run.  Progress gives both verdicts.  A skip line is not a pass (VERIFY-1).
+* `cargo build -p xtask` passes.
+* `m4/parent-m4.diff` for the orchestrator, with `git apply --check` passing on HEAD.  It holds Surprises entries with the tables of Steps 4, 5, 7, 9, 10 and 12, and Decision log lines for the rules of Steps 5 and 7 and for each candidate.  One line says that the chunk times have 2 decimals, which reverses the parent's "Not taken: chunk times in 2 decimals".  It also makes the M5 and M6 sections and "Validation and acceptance" point to the rules: Step 7 of this plan and `e2e perf --base-dist`.
+* Each change of `.claude/**` or `CLAUDE.md` that no step checkpoint carried, as a diff in `m4/`.
+
+## Validation and acceptance
+
+* The quirk entry no longer says that more work for each byte loses less (Step 1).
+* `update_refusal` refuses each raise of the bound without a reason, a new browser version included.  The changed test failed first (Step 2).
+* The test of Step 3 failed on a planted byte, and passes.  Each candidate that landed has pinned hashes, and the list of new names is empty.
+* The chunk line has 2 decimals, with a parse test.
+* The same-session comparison runs with `e2e perf --base-dist`.  Its pure tests failed first.  `T` is 2 % or less, and the second A/A comparison gives "no change" in both browsers (Step 5).
+* Each candidate that lands has a gain by Step 7's rule, with f16 weights, in each browser that chose it, or the orchestrator's acceptance in the Decision log and the PR.  Each browser's comparison of Step 9 shows no loss.
+* `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passes on this Mac.  `e2e selftest` passes in Safari and Chrome, with `--query mm=<kernel>` for each new kernel and with the kernels that each browser chooses.
+* The perf gate passes in both browsers (Step 13).  The baselines change only for a browser that chose a new kernel, and only down.
+* The flip costs and the headroom are measured again, with the figures in Surprises (Steps 10 and 12).
+* `cargo run -p xtask -- check --tier push` passes, with both gates run.
+* The review rounds (`/review-rounds 9769916`) end by the stop rule of decision 0024.
+
+## Idempotence and recovery
+
+Each step is one commit or none, on the branch.  A session that stops reads Progress and Surprises, and goes on at the next open step.  Steps 4 to 12 measure.  Until Step 7's commit, the candidates are in `m4/candidates.patch`.  A browser run that a locked screen or a time limit stops runs again.  A set or a comparison that a browser update splits runs again in full, and Surprises records both versions.  A candidate is reverted with its commit; `CALIBRATION` and `kernels_id` then make each browser calibrate again.  `git worktree remove` and `git branch -D scratch/m4-controls` undo Step 4.  `git worktree remove` undoes each base worktree.
+
+## Progress
+
+* [x] Plan review round 1 (2026-11-13): 2 blockers, 7 should-fix and 3 nits, each applied.
+* [x] Plan review round 2 (2026-11-13): 1 blocker, 5 should-fix and 5 nits, each applied.
+* [x] Step 1 (2026-11-13): the quirk entry, commit "Quirks: fewer bytes for each workgroup, not more work for each byte".  `docs-check` passed.
+* [x] Step 2 (2026-11-13): every raise of a bound needs `--raise`.  The changed test `a_raise_over_the_tolerance_needs_a_reason` failed first on its assert (`"157.0.7000.0" in ""`, perf.rs:1306), then passed.  `cargo test -p xtask` and `docs-check` passed.  The orchestrator applied the change of `.claude/rules/gpu.md`; this step's commit adds it.
+* [x] Step 3 (2026-11-13): the WGSL of each current kernel, pinned by `current_kernels_keep_their_wgsl` (12 sources; `NEW_KERNELS` empty).  `fnv1a` and `FNV_OFFSET` serve the test and `kernels_id`, whose value stays `0xd4f493a491195bc8` (printed before and after).  With one changed byte in the first comment of `matmul_vec4.wgsl`, the test failed on its assert: `v64: hash 0xb6bd57ba6e7f0898, pinned 0x2bf06de948042584` and `v64-f16: hash 0xe871347a10b57f98, pinned 0xbb9577526ab450c6`.  Without the byte, `cargo test -p roformer-gpu --lib` passed (51 tests).
+* [x] Step 4 (2026-11-13): the `wg` controls, on the scratch branch `scratch/m4-controls` (removed), patch in `m4/controls.patch`.  One set, `runs/s4-{safari,chrome}-{1,2}.log`.  The quirk entry gives the figures.
+* [x] Step 5: the chunk line in 2 decimals, the same-session comparison, and its A/A sessions.
+  * [x] 5.1 (2026-11-13): the worker logs each chunk time with 2 decimals.  The test `chunk_times_have_two_decimals` failed first on its assert (`"chunk {done}/{total}: {:.2} s; {}", in worker/src/web.rs`), then passed with `cargo test -p xtask --lib` (779 tests).
+  * [x] 5.2 and 5.3 (2026-11-13): the pure functions of the comparison in `xtask/src/e2e/perf.rs` (`BLOCK_ORDER`, `Block`, `compared`, `compare_refusal`), and `e2e perf --base-dist` in `xtask/src/e2e.rs`.  The 5 new tests failed first on their asserts, with stubs: `a_block_runs_b_h_h_b_and_gives_its_change` (`left: [Base, Head, Base, Head]`), `a_uniform_change_gives_its_class` (`left: None`), `a_slow_run_spoils_only_its_block` (no block spoiled), `mixed_blocks_need_more_or_are_undecided` (`left: None`) and `a_comparison_refuses_a_gate_an_update_and_odd_runs` (`"--gate" in ""`).  Then `cargo test -p xtask --lib` passed (784 tests).  `CHANGE_T` and `SPOIL_N` are 2 % until the A/A session sets them.
+  * [x] 5.4 and 5.5 (2026-11-13): the first A/A session set `T` = 1 % and `N` = 1.1 % (Surprises).  The second A/A comparison gave "no change" in Chrome and in Safari.  The tests of 5.2 pass with the new constants.
+  * [x] 5.6 (2026-11-13): how to run it, in `docs/references/local-browser-testing.md`, the `perf` paragraph of `README.md` and the module doc of `xtask/src/e2e.rs` (with the commit of 5.2).
+* [x] Step 6 (2026-11-13): the candidates `v64k8` and `r64`, in the working tree and in `m4/candidates.patch` (`git apply --check` passed in a clean worktree at `a5e6a4c`).  A new field `direct` of `Tile` came first, false for each current tile (no change of their WGSL).  Then the tests failed first on their asserts: `every_kernel_fits_the_default_limits` (the `want` list names `v64k8`, `r64` and their f16 variants), `workgroup_memory_within_defaults` (`left: None, right: Some(6144)`), `bank_conflicts` (`left: ["v64"], right: ["v64", "v64k8"]`), `current_kernels_keep_their_wgsl` (the 4 names of `NEW_KERNELS` name no source), `choice_keys_name_the_format` (`left: 3, right: 4`), and the native `candidates_match_v64_bit_for_bit` (`the candidates ["v64k8", "r64"] in TILES`, `left: 0, right: 2`).  With the code, `cargo test -p roformer-gpu --lib` passed (51 tests), and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed on the M2 Pro (Metal), the bit-for-bit test included.  With the unpadded `want` of `v64` (`[1, 1, 1, 4]`), `bank_conflicts` fails for `v64k8` (`left: [1, 1, 1, 2]`), as the plan says.
+* [x] Step 7 (2026-11-13): the gain rule, and the candidates that land.  `v64k8` has a gain in Safari with f16 weights, and lands: its pinned hashes replace its names in `NEW_KERNELS`, which is empty again.  `r64` has none in either browser, and does not land (`m4/r64.patch`).  The rule is in `docs/references/local-browser-testing.md`.
+* [x] Step 8 (2026-11-13): the self-tests of `v64k8`, with the head page of `a238db5`.  `e2e selftest --query "selftest=stages&step_limit=600&mm=v64k8"` passed in Safari and in Chrome, and with no `mm` (the kernels that each browser chose) in both (worst stage 69.4 dB each; logs `m4/runs/s8-{safari,chrome}-{mm-v64k8,auto}.stdout`).  Safari chose `v64k8,v64k8` and Chrome `v64,v64`.  A `--query` replaces the scenario's default query, so it names `selftest=stages` too: a first run with `--query mm=v64k8` alone never started the self-test, and was stopped.  Since review round 1, `selftest_query` puts `selftest=stages&step_limit=600&` before a `--query` with no `selftest` key, so `--query mm=v64k8` alone tests `v64k8`.
+* [x] Step 9 (2026-11-13): the same-session comparison of `v64k8`: no change in Chrome, which did not choose it, and a gain in Safari, which chose it and has its in-page gain of Step 7.  `v64k8` stays.  In review round 1, Safari's comparison ran again with `--runs 8` and the rule for kernels that differ: a gain, mean `r` -2.15 % (Surprises).
+* [x] Step 10 (2026-11-13): the cost of each forced flip.  Each cost plus the drift (5.7 %) is under the tolerance (10 %): the largest real one is Safari's flip to split attention, 3.4 % (9.1 % with the drift).  The tolerance stays (Decision log).
+* [x] Step 11 (2026-11-13): the baselines.  Safari's went from 7.40 s to 7.38 s (bound 8.14 s to 8.12 s), from 5 runs at `a238db5`; Chrome's does not change, since Chrome did not choose `v64k8`.
+* [x] Step 12 (2026-11-13): the worker headroom.  `memory-budget` passed 3 times in each browser; each growth is 57 MB, as at M1, and `WORKER_HEADROOM_MB` stays -17 MB.
+* [x] Review round 1 fixes (2026-11-13).  The new tests failed first on their asserts, with stubs: `a_comparison_runs_its_blocks_in_order` (`left: Undecided, right: Decided(Loss, true)`), `a_comparison_says_when_the_browser_version_changed` (`left: 0, right: 1`), `a_comparison_refuses_chunk_times_of_one_decimal` (no refusal), `a_result_records_whether_its_chunk_times_have_two_decimals` (`two.two_decimals` false), `a_head_with_two_kernel_choices_is_judged_on_the_mean` (`c.mixed` false), `the_rule_holds_at_its_edges` (`mean_verdict`: `left: Undecided, right: Decided(Loss, false)`), and `a_selftest_query_always_asks_for_the_self_test` (`left: "mm=v64k8"`).  Its other asserts on the edges of the rule kill the missed mutants, and pass on the code.  `kernels_id_is_the_fnv1a_of_the_kernel_sources` failed with `kernels_id` planted as 1 (`left: 1, right: 3211584178841456558`), and passes.  The case of `--base-dist` in `parses_scenario_and_options` passed at once: the parse was already there.
+* [x] Review round 2 fixes (2026-11-13).  The new tests failed first on their asserts: `a_slow_run_on_one_kernel_choice_still_spoils_its_block` (`left: Decided(Loss, false), right: Decided(NoChange, false)`), `a_comparison_refuses_a_software_or_fallback_adapter` (no refusal), `each_side_of_a_comparison_runs_its_own_page` (a stub gave the base folder to the head), and `a_selftest_query_always_asks_for_the_self_test` (`left: "selftest=stages"`).  These tests kill mutants and pass on the code: `a_base_with_two_kernel_choices_makes_the_comparison_mixed`, `a_block_line_says_when_its_kernels_differ`, `the_mean_verdict_holds_at_its_edges` and `a_comparison_with_no_base_page_fails`.  They failed on these mutants, planted by hand: `let mixed = differ(&kernels[1])`; `>=` and `- EPSILON` in the loss arm of `mean_verdict`; `<=`, `==` and `+ EPSILON` in its gain arm; `+ EPSILON` in its clear test; `order -= 0`; and `perf_compare` returning `Ok(())`.
+* [x] Review round 3 fixes (2026-11-13).  The new tests failed first on their asserts: `one_block_that_is_not_spoiled_decides_nothing` (a loss, not undecided), `each_side_of_a_comparison_runs_its_own_page` with `compare_dists` (a stub gave the head folder to the base), and `a_selftest_query_always_asks_for_the_self_test` (`left: "selftest=stages&step_limit"`).  `spoiled_blocks_alone_decide_nothing` passed at once.  It fails with the minimum of `mean_verdict` taken out (`&& false`), and so does the first test with the minimum at 1 (`counted.is_empty()`).  The test of `compare_dists` fails with the sides swapped.
+* [x] Review round 4 fixes (2026-11-13).  `CompareSites` starts the site of each side from the options and gives the site of a side; `perf_compare` uses it.  `each_side_of_a_comparison_runs_its_own_page` failed first on its assert (`left: "/tmp/base/dist", right: "/tmp/head/dist"`, with a stub lookup).  It fails with the folders swapped at either start, and with the lookup swapped.  The new assert of `a_selftest_query_always_asks_for_the_self_test` (`step_limit=abc`) fails with `!value.is_empty()` in place of the number check.
+* [x] Step 13 (2026-11-13): the checks before review round 1, at `01e6953`.  `check --tier push` with `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` passed its 15 lines, with the GPU test line and both perf gates run (log `m4/check-push.log`).  Chrome's gate passed: 4.69 s against a bound of 5.17 s (`v64,v64`, split).  Safari's gate passed: 7.46 s against a bound of 8.12 s, margin 0.66 s (`v64k8,v64`, split attention).  `cargo build -p xtask` passed.  For the orchestrator: `m4/parent-m4.diff` (the parent plan) and `m4/claude-rules-gpu.diff` (`.claude/rules/gpu.md`: the pin of Step 3, and the rules of Steps 5 and 7).  Each passes `git apply --check` on HEAD, and `docs-check` passes with both applied.
+
+* [x] Review round 1 (2026-11-13, `/review-rounds 9769916`): 8 should-fix (1 pre-existing), 11 nits and 30 missed mutants (24 confirmed, 4 refuted, 2 pre-existing).  Fixed in `9304b85`, with the parent and rule diffs in `331eb08`.
+* [x] Review round 2 (2026-11-13): 5 should-fix (1 pre-existing, GPU-3), 7 nits and 14 missed mutants, all confirmed.  Fixed in `5066444`, with the parent diff in `9444649`.
+* [x] Review round 3 (2026-11-13): 1 blocker (Step 5 gave the round 1 rule), 3 should-fix and 3 nits; the one missed mutant repeats the refuted 1-33.  Two validators stopped on an API error and ran again.  Fixed in `5a7319c`.
+* [x] Review round 4 (2026-11-13, late rule): 2 should-fix on VERIFY-1 (the site of each side in `perf_compare`, pre-existing; a `step_limit` that is not a number), fixed in `ab40862`.  3 nits reported, not fixed.
+* [x] Review round 5 (2026-11-13): 4 nits, reported, not fixed, and no missed mutant.  No fix, so it is the last round by decision 0024.  The log is `docs/reviews/gpu-speed-2026-11-12-m4.md`.
+
+## Surprises and discoveries
+
+* 2026-11-13, Step 4: the `wg` controls, one set of `?bench=v64&bench_rounds=5` (Safari 27.2, Chrome 157.0.8103.51, the same in each page; logs `m4/runs/s4-{safari,chrome}-{1,2}.log`).  Each control has almost no work, at `v64`'s grid on `freq qkv` (24 x 86 workgroups, 2,064).  Times in us for each dispatch, medians of 5, at the start and the end of each page.  Ratio: `(wg6k - wg0) / (wg10k - wg0)`.
+
+  | Page | `wg10k` | `wg6k` | `wg0` | Ratio |
+  | - | - | - | - | - |
+  | Safari 1, start | 414.1 (8.9 %) | 114.5 (0.9 %) | 10.7 (10.0 %) | 0.257 |
+  | Safari 1, end | 408.2 (6.8 %) | 113.0 (1.8 %) | 10.8 (8.7 %) | 0.257 |
+  | Safari 2, start | 410.2 (5.2 %) | 114.0 (1.8 %) | 11.3 (3.7 %) | 0.257 |
+  | Safari 2, end | 409.7 (1.7 %) | 113.5 (1.3 %) | 11.1 (4.1 %) | 0.257 |
+  | Chrome 1, start | 17.8 (14.7 %) | 14.0 (0.7 %) | 6.3 (6.3 %) | 0.670 |
+  | Chrome 1, end | 17.9 (1.3 %) | 14.2 (1.9 %) | 6.3 (2.9 %) | 0.681 |
+  | Chrome 2, start | 18.2 (26.1 %) | 14.2 (1.9 %) | 6.3 (4.8 %) | 0.664 |
+  | Chrome 2, end | 17.9 (3.0 %) | 14.3 (8.6 %) | 6.3 (0.6 %) | 0.690 |
+
+  The cost is not linear in the bytes: a linear cost gives 0.6.  In Safari, 6 KiB costs about a quarter of what 10 KiB costs.  The prediction for `v64k8` on `freq qkv` in Safari: `wg10k - wg6k` is 296 to 299 us of `v64`'s 3.53 to 3.57 ms (f16, 1,216 and 1,202 GFLOP/s), a gain of about 8.3 % to 8.4 %.  In Chrome: 3.6 to 4.0 us of 1.99 ms, about 0.2 %.  The cause of the curve is not known.  One guess, not checked: a core holds fewer workgroups at once with 10 KiB than with 6 KiB, and each waits for its own zero-init.
+* 2026-11-13, Step 5.4: the first A/A session, base and head of `59da862` (the chunk line in 2 decimals), `e2e perf --base-dist --runs 6` (Chrome 157.0.8103.51, then Safari 27.2, the same before and after; logs `m4/runs/aa1-{chrome,safari}.stdout` and the folders `m4/runs/aa1-{chrome,safari}/`).  Each figure is the chunk lower quartile of a run, in seconds.  "Apart": the larger difference of the two runs of a side in the block, over the faster run.
+
+  | Browser, block | B1 | H1 | H2 | B2 | `r` | Apart | Class |
+  | - | - | - | - | - | - | - | - |
+  | Chrome 1 | 4.69 | 4.70 | 4.70 | 4.70 | +0.11 % | 0.21 % | no change |
+  | Chrome 2 | 4.70 | 4.70 | 4.69 | 4.70 | -0.11 % | 0.21 % | no change |
+  | Chrome 3 | 4.69 | 4.70 | 4.69 | 4.70 | 0.00 % | 0.21 % | no change |
+  | Safari 1 | 7.37 | 7.36 | 7.40 | 7.37 | +0.14 % | 0.54 % | no change |
+  | Safari 2 | 7.39 | 7.36 | 7.39 | 7.40 | -0.27 % | 0.41 % | no change |
+  | Safari 3 | 7.41 | 7.38 | 7.38 | 7.38 | -0.20 % | 0.41 % | no change |
+
+  So `N` = the larger of 1 % and 2 x 0.54 % = 1.09 %, rounded up to 1.1 %.  `T` = the larger of 1 % and 2 x 0.27 %, rounded up to 0.5 %: 1 %.  The whole times were 51.8 to 52.0 s in Chrome and 81.2 to 83.7 s in Safari.  Safari's calibration chose `v64,i64` in 2 of 12 runs (H2 of block 1, B1 of block 2), and `v64,v64` in the rest.  Those two runs were 7.39 and 7.40 s, inside the spread of the others.
+
+* 2026-11-13, Step 5.5: the second A/A comparison, as the tool runs it (`--runs 4`), with `T` 1 % and `N` 1.1 %, base and head of `59da862` (Chrome 157.0.8103.51, Safari 27.2; logs `m4/runs/aa2-{chrome,safari}.stdout`).  Verdict: no change in both browsers, from 2 blocks.
+
+  | Browser, block | B1 | H1 | H2 | B2 | `r` | Apart | Class |
+  | - | - | - | - | - | - | - | - |
+  | Chrome 1 | 4.70 | 4.70 | 4.70 | 4.70 | 0.00 % | 0.00 % | no change |
+  | Chrome 2 | 4.70 | 4.70 | 4.70 | 4.70 | 0.00 % | 0.00 % | no change |
+  | Safari 1 | 7.38 | 7.42 | 7.38 | 7.37 | +0.34 % | 0.54 % | no change |
+  | Safari 2 | 7.38 | 7.38 | 7.39 | 7.38 | +0.07 % | 0.14 % | no change |
+
+  Safari's H1 of block 1 chose `v64,i64` again, and was the slowest run (7.42 s).
+
+* 2026-11-13, Step 7: one set of `?bench=v64,v64k8,r64,i64&bench_rounds=5` with the head page of the candidates (Safari 27.2, Chrome 157.0.8103.51, the same in each page; logs `m4/runs/s7-{safari,chrome}-{1,2}.log`, figures `m4/s7-ratios.txt`).  The reference is `v64`.  `R`: the candidate's calibration total over `v64`'s.  `S`: the largest spread of the bench lines in `R`.  Each shape's ratio is the candidate's time over `v64`'s.  A star: an effect (a gain or a loss) by the rule of Step 7.
+
+  | Candidate, browser, format, kind | Page 1: `R` (`S`) | Page 2: `R` (`S`) | Shapes, page 1; page 2 | Verdict |
+  | - | - | - | - | - |
+  | `v64k8`, Safari, f16, large | 0.946 (1.5 %) | 0.944 (1.4 %) | qkv 0.919, ff down 1.022, freq ff up 0.916; 0.924, 1.012, 0.912 | gain * |
+  | `v64k8`, Safari, f32, large | 0.937 (1.8 %) | 0.940 (1.4 %) | 0.909, 1.009, 0.912; 0.915, 1.012, 0.909 | gain * |
+  | `v64k8`, Safari, f16, small | 0.993 (1.5 %) | 0.993 (1.9 %) | gates 0.828, p·v 1; 0.828, 1 | none |
+  | `v64k8`, Safari, f32, small | 0.993 (1.8 %) | 0.993 (1.4 %) | 0.828, 1; 0.830, 1 | none |
+  | `v64k8`, Chrome, f16, large | 1.311 (1.3 %) | 1.318 (1.4 %) | 1.357, 1.212, 1.343; 1.366, 1.216, 1.350 | loss * |
+  | `v64k8`, Chrome, f32, large | 1.321 (1.5 %) | 1.322 (1.7 %) | 1.371, 1.213, 1.356; 1.372, 1.215, 1.355 | loss * |
+  | `v64k8`, Chrome, f16, small | 1.006 (5.9 %) | 1.006 (5.7 %) | 1.176, 1; 1.172, 1 | none |
+  | `v64k8`, Chrome, f32, small | 1.007 (3.7 %) | 1.006 (4.8 %) | 1.210, 1; 1.176, 1 | none |
+  | `r64`, Safari, f16, large | 1.202 (1.5 %) | 1.208 (1.7 %) | 1.121, 1.329, 1.207; 1.132, 1.334, 1.205 | loss * |
+  | `r64`, Safari, f32, large | 1.254 (1.8 %) | 1.254 (1.4 %) | 1.151, 1.407, 1.269; 1.153, 1.407, 1.264 | loss * |
+  | `r64`, Safari, f16, small | 0.982 (2.3 %) | 0.981 (2.4 %) | 0.574, 1; 0.569, 1 | none |
+  | `r64`, Safari, f32, small | 0.983 (3.4 %) | 0.983 (2.0 %) | 0.608, 1; 0.611, 1 | none |
+  | `r64`, Chrome, f16, large | 2.545 (2.4 %) | 2.537 (1.1 %) | 2.555, 2.497, 2.578; 2.547, 2.493, 2.566 | loss * |
+  | `r64`, Chrome, f32, large | 1.931 (1.4 %) | 1.927 (1.2 %) | 1.874, 1.967, 1.979; 1.868, 1.970, 1.973 | loss * |
+  | `r64`, Chrome, f16, small | 1.058 (5.9 %) | 1.058 (5.7 %) | 2.797, 1; 2.795, 1 | none |
+  | `r64`, Chrome, f32, small | 1.007 (3.7 %) | 1.007 (3.7 %) | 1.236, 1; 1.227, 1 | none |
+
+  So `v64k8` has a gain on the large products with f16 weights in Safari (5.4 % to 5.6 % of the calibration total), and lands.  Its `time ff down` (K 1,024, 72 workgroups) is 1.01 to 1.02 times `v64`, and `time qkv` and `freq ff up` (K 256) are 0.91 to 0.92: near the 8.3 % to 8.4 % that Step 4 predicted for `freq qkv`.  In Chrome, `v64k8` is 1.31 to 1.32 times slower, so Chrome's calibration must keep `v64` (Step 9).  `r64` has no gain on a kind in either browser, and does not land; its code is in `m4/r64.patch`.  `r64` is 0.57 to 0.61 times `v64` on `time gates` in Safari, but the small kind's total is mostly `time p·v`, which each vec4 kernel hands to `i64`.  With `i64` as the reference of the small kind in Safari (calibration chose it in 3 of 16 runs at the base), `R` is 0.957 to 0.959 for `r64` and 0.968 to 0.969 for `v64k8`, also with f16 weights.  The plan's reference is `v64`, so this does not count for `r64`.
+
+* 2026-11-13, Step 9: the same-session comparison of `v64k8`, base `a5e6a4c` (the commit before Step 7's commit), head `a238db5`, `--runs 4` (Chrome 157.0.8103.51, then Safari 27.2; logs `m4/runs/s9-{chrome,safari}.stdout` and the folders `m4/runs/s9-{chrome,safari}/`).  Chrome: no change.  Safari: a gain of about 2.4 %, from 3 blocks.  No head run in Chrome named `v64k8`; each Safari head run named it.
+
+  | Browser, block | B1 | H1 | H2 | B2 | `r` | Apart | Class |
+  | - | - | - | - | - | - | - | - |
+  | Chrome 1 | 4.69 | 4.69 | 4.70 | 4.70 | 0.00 % | 0.21 % | no change |
+  | Chrome 2 | 4.70 | 4.70 | 4.69 | 4.71 | -0.21 % | 0.21 % | no change |
+  | Safari 1 | 7.37 | 7.46 | 7.20 | 7.42 | -0.88 % | 3.61 % | spoiled |
+  | Safari 2 | 7.38 | 7.20 | 7.21 | 7.39 | -2.44 % | 0.14 % | gain |
+  | Safari 3 | 7.39 | 7.21 | 7.21 | 7.38 | -2.37 % | 0.14 % | gain |
+
+  The kernels of each run.  Chrome: `v64,v64`, attention `freq`, in each base and head run.  Safari base: `v64,v64` or `v64,i64` (B2 of block 1), attention `fused`.  Safari head: `v64k8,v64k8` with attention `fused` in 5 runs (7.20 to 7.21 s), and `v64k8,v64` with attention `freq` in H1 of block 1 (7.46 s).  So in that run, calibration put the time axis on split attention, and the run was 3.6 % slower than the other head runs, and 0.9 % slower than the base runs.  With `v64k8`, calibration timed split attention at 3.13 to 3.14 s for each chunk, against 3.54 to 3.55 s with `v64` at the base, and fused at 3.42 to 3.46 s.  The fused / split ratio, 1.09 to 1.105, is now at `FUSED_MARGIN` (1.1).  So the time axis flips between fused and split from one calibration to the next.  The separation says that split is the slower one.  Step 10 measures the cost of that flip.
+
+* 2026-11-13, Step 10: the cost of each forced flip between near choices, with the head page of `a238db5` (Chrome 157.0.8103.51, Safari 27.2, the same at the start and the end; logs `m4/s10-{chrome,safari}.txt` and `m4/runs/s10-{chrome,safari}-<n>/`).  The near choices, from the `kernels for this GPU` lines of Step 9's head runs.  Chrome: the small products (`v64` 0.74 s; `v64k8` 0.74 to 0.75 s, `i64` 0.75 s, `s64` 0.79 to 0.81 s).  Its large products (`v64` 0.78 s, the next 1.03 s) and its attention (fused / split 1.23 to 1.24) are not near.  Safari: the large products (`v64k8` 1.25 to 1.26 s, `v64` 1.33 to 1.34 s), the small products (`v64k8` 1.18 to 1.20 s, `v64` 1.19 to 1.25 s, `i64` 1.22 to 1.27 s), and the time axis (fused / split 1.09 to 1.105).  The runs went unforced, forced, forced, unforced, with the unforced runs between two flips shared.  Cost: (forced median - unforced median) / unforced median, of the chunk lower quartiles.
+
+  | Browser, flip | Unforced runs (kernels) | Forced runs (kernels) | Cost |
+  | - | - | - | - |
+  | Chrome, `mm=v64,v64k8` | 4.70, 4.69 (`v64,v64`, split) | 4.72, 4.72 | +0.5 % |
+  | Chrome, `mm=v64,i64` | 4.69, 4.69 | 4.72, 4.72 | +0.6 % |
+  | Chrome, `mm=v64,s64` | 4.69, 4.69 | 4.78, 4.77 | +1.8 % |
+  | Safari, `mm=v64,v64k8` | 7.44 (split), 7.38 (split) | 7.38 (fused), 8.04 (split) | +4.0 % |
+  | Safari, `mm=v64k8,v64` | 7.38 (split), 7.21 (fused) | 7.23 (fused), 7.47 (split) | +0.8 % |
+  | Safari, `mm=v64k8,i64` | 7.21 (fused), 7.36 (fused) | 7.52 (split), 7.48 (split) | +3.0 % |
+  | Safari, `attn=freq` | 7.36 (fused), 7.22 (fused) | 7.45, 7.47 | +2.3 % |
+
+  In Safari the time axis decides the figure, not the matmul kernel.  Over the 13 Safari runs: each run with fused attention and `v64k8` for the large products took 7.21 to 7.36 s (median 7.225 s, 4 runs).  Each run with split attention and `v64k8` took 7.38 to 7.52 s (median 7.47 s, 7 runs): 3.4 % slower.  Calibration chose split in 2 of the 5 unforced runs, and in 1 of the 6 head runs of Step 9.  It timed split at 3.11 to 3.16 s and fused at 3.42 to 3.51 s for each chunk in each run, so its choice falls on each side of `FUSED_MARGIN` by chance.  The run of 8.04 s had `v64` for the large products and split attention.  A calibration does not choose that pair: with `v64`, it times split at 3.54 to 3.55 s, and chooses fused.  The URL forced `v64` after calibration had chosen split with `v64k8`.
+  
+  Calibration's split time is too low in Safari, by about the same amount at the base and the head.  At the base, it gave fused / split 0.97 (M2: 0.975 to 0.992), and a forced split cost 9.5 % (M2 Step 5.3), about 0.70 s for each chunk.  At the head, it gives fused / split 1.10, and split costs 3.4 %, about 0.25 s for each chunk.  Both put calibration's split about 0.5 s for each chunk below the separation's.  The cause is not known.
+
+* 2026-11-13, Step 11: Safari's baseline from 5 runs of `e2e perf --runs 5 --update-baselines` at `a238db5` (Safari 27.2 at the start and the end; log `m4/s11-safari.stdout`).  The chunk lower quartiles: 7.44 s (`v64k8,v64`, split), 7.38 s (`v64k8,v64k8`, split), 7.47 s (`v64k8,v64`, split), 7.22 s and 7.22 s (`v64k8,v64k8`, fused).  The baseline is their median, 7.38 s, with a tolerance of 10 %: a bound of 8.12 s, against 7.40 s and 8.14 s before.  So it went down a little, with no `--raise`.  Calibration chose split in 3 of the 5 runs.  Chrome's baseline does not change: its calibration did not choose `v64k8` (Step 9).
+
+* 2026-11-13, Step 12: `memory-budget` at `29d8567`, 3 runs in Chrome 157.0.8103.51 and 3 in Safari 27.2 (logs `m4/s12.txt`, `m4/runs/s12-{chrome,safari}-{1,2,3}.stdout`).  Each run passed its checks.  The worker grew by 57 MB in each of the 12 separations (the 1-minute and the 4-minute song of each run), as at M1 (57 MB, noise 1 MB).  So check 3's margin is 6.16 MB in each: the budget is 63.16 MB (the peak 80.16 MB plus -17 MB).  The tab total was 799 MB in each Chrome separation, and 758 MB in 5 Safari separations and 801 MB in one, at most 943 MB.  `git log 156324a..HEAD -- roformer/` is empty, so `roformer::separate::working_set` has no change since M1: the peak is still 80.16 MB, and the smallest lost-cut rise of cut 3 is still 9.44 MB.  So each growth is M1's, the margin is in the band of the doc, and `WORKER_HEADROOM_MB` stays -17 MB.
+
+* 2026-11-13, review round 1 (1-3): Step 9's Safari comparison again, with the rule of review round 1 and `--runs 8`, base `a5e6a4c`, head the page of the review fixes (Safari 27.2 at the start and the end; log `m4/runs/r1s9-safari.stdout`).  A first try stopped at run 4: the base run hung after "click Separate 6 stems" until its time limit of 600 s (`m4/runs/r1s9a-safari-stopped.stdout`); it ran again in full.  Verdict: a gain, from the mean `r` of 4 blocks, -2.15 %, since the kernels differ.
+
+  | Block | B1 | H1 | H2 | B2 | `r` | Note |
+  | - | - | - | - | - | - | - |
+  | 1 | 7.39 | 7.22 | 7.23 | 7.39 | -2.23 % | |
+  | 2 | 7.39 | 7.23 | 7.38 | 7.40 | -1.22 % | kernels differ |
+  | 3 | 7.40 | 7.19 | 7.22 | 7.43 | -2.83 % | kernels differ |
+  | 4 | 7.38 | 7.23 | 7.22 | 7.41 | -2.30 % | |
+
+  Kernels.  Base: `v64,v64`, fused, in 7 runs; `v64,i64`, fused, in 1 (B2 of block 3).  Head: `v64k8,v64k8`, fused, in 5 runs; `v64k8,v64`, fused, in 2; `v64k8,v64k8` with split attention in 1 (H2 of block 2, 7.38 s).  So split came in 1 of 8 head calibrations here, against 6 of 16 in Steps 9 to 11.
+
+## Decision log
+
+* 2026-11-13, agent (team leader), plan review round 2: the same-session comparison reads the chunk lower quartile of each run, and the worker logs the chunk times to 0.01 s.  This reverses the parent's line "Not taken: chunk times in 2 decimals" (intent review of M2), which rested on a clean whole time.  Why: in M2's Step 5.1 runs, groups of slow chunks added about 9 % to a Chrome run's whole time, and the lower quartile stayed at 4.70 s.  With slow runs about 3 in 10, the whole time would give a false loss or gain in about 16 % of comparisons.  At 0.1 s, the lower quartile has steps of 1.4 % to 2.1 %, too coarse for 3 %.  For the orchestrator to accept.
+* 2026-11-13, agent (team leader): the comparison is code (`e2e perf --base-dist`), with pure tests, not a procedure done by hand.  Why: M4, M5 and M6 use it about 10 times in two browsers, and the order of the runs and the ranks are easy to get wrong by hand (VERIFY-1).
+* 2026-11-13, agent (team leader), plan review rounds 1 and 2: the verdict reads blocks of B H H B, and needs 2 blocks of the same class that are not spoiled.  Not the fastest runs of each side.  Why: with a drift of 1 % for each run, the fastest runs are the early ones, and a true loss of 3 % gave a rank change of only 2 %.  A block cancels a linear drift.  One slow run or one change of the GPU's state spoils only its block (the parent's cases 2 and 4).
+* 2026-11-13, agent (team leader), plan review round 1: `T` comes from an A/A session, base and head of the same commit, at the block size that the comparisons use.  A second A/A comparison checks it.  Why: the noise of this rule in one session was not measured, and a check from the same session that set `T` passes by construction.
+* 2026-11-13, agent (team leader), plan review round 1: the `wg` controls run on a scratch branch, do not land, and do not gate `v64k8`.  Why: they only predict BK 8's gain, and Step 7's own ratios decide.  The parent asks for them first, and their figures go into the quirk entry.
+* 2026-11-13, agent (team leader), plan review rounds 1 and 2: the pin of Step 3 covers each generated source and each shader file, not only the kernels that calibration chooses, and each candidate that lands.  Why: calibration protects none of them once they are current, and M5 and M6 use the pin.
+* 2026-11-13, agent (team leader), plan review round 2: a candidate is committed when it has an in-page gain (Step 7), and reverted when Step 9 finds a loss, twice undecided, or a browser that chose it with no gain.  Why: Step 9's base is the commit before the candidate.
+
+* 2026-11-13, agent (implementer), Step 5.1: the chunk line keeps PROTO-1 with no change of `stem-protocol`.  Why: the line is the text of a `Reply::Log` message, whose encoder and decoder do not change.  The one writer of the text is `worker/src/web.rs`.  The one reader is `chunk_done` and `chunk_times` in `xtask/src/e2e.rs` and `xtask/src/e2e/perf.rs`.  The test `chunk_times_have_two_decimals` reads the writer's format in `worker/src/web.rs`, and parses a line of 2 decimals in the same commit.  `xtask` does not take `stem-protocol`, so a shared format function there would add a dependency for one log line.
+* 2026-11-13, agent (implementer), Step 5.2: the verdict takes the class of 2 blocks or more that are not spoiled, with at most one block of another class, and never with a loss and a gain together.  Why: the plan's case "a loss, then two blocks of no change, gives no change" needs one block of another class to be allowed.  A loss and a gain together say that the noise is larger than `T`, so they give undecided.
+* 2026-11-13, agent (implementer), Step 5.2: the test of a uniform loss of 3 % with a drift uses a drift of 1 % for each run only when `SPOIL_N` is 4 % or more; else a quarter of `SPOIL_N`.  Why: B1 and B2 of a block are 3 runs apart, so a drift of 1 % for each run puts them 3 % apart, and a smaller `N` spoils each block.  The drift still cancels in `r`.
+* 2026-11-13, agent (implementer), Step 5.2: a spoiled block is one whose two runs of a side differ by more than `N` of the faster run.
+* 2026-11-13, agent (implementer), Step 7: `v64k8` lands.  Why: a gain on the large products with f16 weights in Safari, in both pages (`R` 0.946 and 0.944, `S` 1.5 % and 1.4 %).  In Chrome it is a loss (`R` 1.31), so calibration must keep `v64` there; Step 9 checks it.
+* 2026-11-13, agent (implementer), Step 7: `r64` does not land.  Why: no gain on a kind with f16 weights in either browser, against the reference `v64` (Safari small `R` 0.98 within `S` 2.3 %; large 1.20; Chrome 1.06 and 2.54).  Its gain on `time gates` in Safari (0.57) does not show in the small total, which `time p·v` holds.
+* 2026-11-13, agent (implementer), Step 7: the field `direct` of `Tile` and `matmul_vec4_direct.wgsl` go with `r64`, since no other tile uses them.  The test `candidates_match_v64_bit_for_bit` stays, for `v64k8`.
+* 2026-11-13, agent (implementer), Step 10: the tolerance of 10 % stays, and `v64k8` stays.  Why: each flip that a calibration can make costs at most 3.4 % (Safari, split attention), 9.1 % with the drift of 5.7 %, under 10 %.  The run of 8.04 s (+11.3 %) had a pair that only a URL can force.  Not taken: a wider `FUSED_MARGIN`.  It would change the time-axis choice on GPUs that this Mac cannot measure; the UHD 630 lost 20 % with fused.  Not taken: a revert of `v64k8`.  Step 9 shows no loss, and Safari's fused runs gain 2.4 %.
+* 2026-11-13, agent (implementer), Step 10: open, for the orchestrator and M5: with `v64k8`, Safari's calibration puts the time axis on split attention in about 6 of 16 calibrations (Steps 9 to 11), and those runs are 3.4 % slower than the fused ones, and about 1 % slower than the base.  A block of two such head runs is a loss by the comparison's rule (`r` about +1.1 %).  Calibration's split time in Safari is about 0.5 s for each chunk too low at the base and at the head.  M5 works on the time axis, so it is the place to find the cause.
+* 2026-11-13, agent (implementer), review round 1 (1-2): when the runs of a side chose different kernels anywhere in a comparison, the comparison runs each block up to the most and takes the class of the mean `r`, with no block spoiled.  Why: a block whose head runs chose a fast and a slow set of kernels was spoiled as noise, so a slow choice in 40 % of runs (a mean loss of 4 %) gave "no change" in about 45 % of comparisons.  With `--runs 8`, the chance is now 0.6^8 = 1.7 % (`a_head_with_two_kernel_choices_is_judged_on_the_mean` asserts that figure).  With `--runs 4` it is about 13 %: 2 blocks of 4 fast head runs stop at "no change" before a slow choice shows.  So `docs/references/local-browser-testing.md` asks for `--runs 8` where calibration has a near choice.
+* 2026-11-13, agent (implementer), review round 1 (1-1): `run_comparison` in `xtask/src/e2e/perf.rs` holds the schedule, the names of the runs, the checks of each run and the verdict, with tests.  `perf_compare` keeps only the pages and the printing.
+* 2026-11-13, agent (orchestrator): v64k8 stays though Safari's calibration chooses split attention in about 6 of 16 calibrations, about 1 % slower than the base; M5 finds why calibration times split too low.  The new comparison of review round 1 (`--runs 8`, the rule for kernels that differ) gives a gain in Safari: the mean `r` of 4 blocks is -2.15 %, with split in 1 of 8 head runs (TD-101).
+* 2026-11-13, agent (implementer), review round 2 (2-1): when the kernels differ, a block is still spoiled when the two runs of one side chose the same kernels and differ by more than `N`.  A side whose two runs chose different kernels does not spoil its block.  The verdict is the class of the mean `r` of the blocks that are not spoiled, and every block still runs.  Why: a cost-free flip of the base made the comparison mixed (Safari's `v64,v64` and `v64,i64`).  Then one slow head run on unchanged kernels gave a loss (`a_slow_run_on_one_kernel_choice_still_spoils_its_block`).
+* 2026-11-13, agent (implementer), review round 2 (2-5): the comparison refuses a run on a fallback or a software adapter, and `--swiftshader`, as the gate does (`adapter_refusal`, GPU-3).
+* 2026-11-13, agent (implementer), review round 3 (3-2): when the kernels differ, fewer than 2 blocks that are not spoiled give undecided, as when they do not differ.  The verdict line says how many blocks counted ("the mean r of 1 of 4 blocks").  Why: one block decided a loss or a gain (`one_block_that_is_not_spoiled_decides_nothing`).  The 60/40 figure stays 0.6^8: no block of that case is spoiled.
+
+## Outcomes and retrospective
+
+2026-11-13, before the review rounds.  `v64k8` (BK 8, 6 KiB of workgroup memory) lands as a calibration candidate.  Safari chooses it, and its in-page gain is 5.4 % to 5.6 % of the large products; Chrome keeps `v64`.  In Safari the separation is 2.4 % faster when calibration keeps fused attention on the time axis (7.20 to 7.22 s for each chunk, against 7.37 to 7.42 s at the base).  `v64k8` also lowers calibration's time for split attention, so Safari now puts the time axis on split in about 6 of 16 calibrations (Steps 9 to 11), and those runs are about 1 % slower than the base.  Calibration's split time in Safari was about 0.5 s for each chunk too low before M4 too; M5 is the place for its cause.  `r64`, with no workgroup memory, is slower than `v64` on the large products in both browsers, and does not land.  The zero-init cost is not linear in the bytes: in Safari, 6 KiB costs about a quarter of 10 KiB.  M4 also leaves three tools for M5 and M6: `--raise` for each raise of a bound, the pin of each current kernel's WGSL, and `e2e perf --base-dist` with `T` 1 % and `N` 1.1 % from two A/A sessions.
+
+Done on 2026-11-13, after 5 review rounds (43 agents, 2,668,176 tokens, 106.6 wall minutes, 0 interventions; rounds 4 and 5 fixed 2 findings, both in the tests of `perf_compare` and `selftest_query`).
+
+What M4 did not do:
+
+* It did not find why Safari's calibration times split attention about 0.5 s for each chunk too low.  TD-101 records it, and M5 finds the cause before it adds a third attention candidate (the orchestrator's decision).
+* `r64`, a kernel with no workgroup memory, does not land.  Its code is in the session scratchpad only.
+* The nits of rounds 4 and 5 are reported, not fixed: a repeated `step_limit` key, two wording points, a Progress quote, one value read from two sources in `perf_compare`, and no test of the call `sites.of(side)` in `perf_compare`, which only a real `--base-dist` run covers.
+
+What to do differently:
+
+* Write the edge cases of a verdict rule into the plan before the code: kernels that differ on either side, blocks that are spoiled, and a minimum count.  Rounds 1 to 4 each found one more case in the same-session comparison.
+* Put each choice that an I/O function makes, such as the page of each side, in a pure function with a test when it is first written.  Three rounds found the same gap at three places.
+* A fix that changes a rule changes the plan's design text in the same commit.  Round 3 found Step 5 still giving the round 1 rule.

@@ -14,9 +14,12 @@
 use roformer::weights::{Dtype, Store, WeightError};
 use roformer::{
     BandGroup, DEPTH, DIM, DIM_HEAD, FEATURES, FREQS_PER_BANDS, HEADS, HIDDEN, STEMS, band_groups,
+    widest_band,
 };
 
-use crate::{Act, AttentionPolicy, Gpu, GpuBuffer, MatMul, Rec, View, Weight, WeightFormat};
+use crate::{
+    Act, AttentionPolicy, FusedKernel, Gpu, GpuBuffer, MatMul, Rec, View, Weight, WeightFormat,
+};
 
 const INNER: usize = HEADS * DIM_HEAD;
 const BANDS: usize = FREQS_PER_BANDS.len();
@@ -173,6 +176,28 @@ fn per_seq(seq: usize, fused: bool) -> usize {
     (seq * 3 * INNER).max(scores).max(seq * HIDDEN)
 }
 
+/// The default upper bound on any per-step intermediate, in f32 elements
+/// (32 MiB): one band for each split time-attention step at full chunk
+/// length (about 4 GFLOP), so each GPU step stays short.  The worker's
+/// `?max_elems=` overrides it.  Calibration times the time transformer at
+/// the budget of the run.
+pub const BUDGET: usize = 8 << 20;
+
+/// The bands of each time-transformer step of one layer, in order, for a
+/// chunk of `frames` frames at `budget`, with fused attention or without
+/// ([`Job::layer_steps`]).  At 1,151 frames and [`BUDGET`]: 62 steps of 1
+/// band without, and 15 steps of 4 bands and 1 of 2 with.
+pub fn time_steps(frames: usize, budget: usize, fused: bool) -> Vec<usize> {
+    let n = (budget / per_seq(frames, fused)).clamp(1, BANDS);
+    let mut out = Vec::new();
+    let mut first = 0;
+    while first < BANDS {
+        out.push(n.min(BANDS - first));
+        first += n;
+    }
+    out
+}
+
 impl Net {
     /// Uploads the weights of an exported safetensors file (f32, f16 or
     /// bf16).  Every tensor must be used and have the expected shape.
@@ -269,6 +294,13 @@ impl Net {
                 WeightFormat::F32
             },
         })
+    }
+
+    /// Each band group of the band split with its gains (`[count, width]`,
+    /// times the square root of the width), as [`normalise_bands`] takes
+    /// them.
+    pub fn split_gains(&self) -> impl Iterator<Item = (&BandGroup, &[f32])> {
+        self.split.iter().map(|sg| (&sg.g, sg.gamma.as_slice()))
     }
 
     /// Sequences per transformer step for sequences of `seq` tokens, with
@@ -401,6 +433,50 @@ fn rope_table(seq: usize) -> Vec<f32> {
     cos
 }
 
+/// The band-split RMSNorm of band `j` of group `g`, for each frame of
+/// `features` (`[T, FEATURES]`): the band's features of the frame,
+/// divided by their norm and multiplied by `gamma` (the band's gains times
+/// the square root of its width).  It writes the band's rows `[T, width]`
+/// to `out`, which holds exactly `T x g.width` floats.
+pub fn normalise_band(features: &[f32], g: &BandGroup, j: usize, gamma: &[f32], out: &mut [f32]) {
+    let w = g.width;
+    let t = features.len() / FEATURES;
+    assert_eq!(features.len(), t * FEATURES);
+    assert_eq!(gamma.len(), w);
+    assert_eq!(out.len(), t * w);
+    for f in 0..t {
+        let src = &features[f * FEATURES + g.offset + j * w..][..w];
+        let n = src.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+        let dst = &mut out[f * w..][..w];
+        for c in 0..w {
+            dst[c] = src[c] / n * gamma[c];
+        }
+    }
+}
+
+/// The band-split RMSNorm of `features` (`[T, FEATURES]`), one band at a
+/// time, in a buffer of the widest band.  `groups` gives each band group
+/// with its gains (`[count, width]`).  `write(at, rows)` takes each band's
+/// rows (`[T, width]`) and their offset in floats in the normalised input,
+/// which is `[count, T, width]` for each group.  [`Job::set_input`]
+/// writes them to the GPU.
+pub fn normalise_bands<'g>(
+    features: &[f32],
+    groups: impl IntoIterator<Item = (&'g BandGroup, &'g [f32])>,
+    mut write: impl FnMut(usize, &[f32]),
+) {
+    let t = features.len() / FEATURES;
+    let mut band = vec![0.0f32; t * widest_band()];
+    for (g, gamma) in groups {
+        let w = g.width;
+        for j in 0..g.count {
+            let rows = &mut band[..t * w];
+            normalise_band(features, g, j, &gamma[j * w..(j + 1) * w], rows);
+            write(t * g.offset + j * t * w, rows);
+        }
+    }
+}
+
 /// Buffers and steps for one chunk of `frames` STFT frames.
 pub struct Job<'a> {
     gpu: &'a Gpu,
@@ -434,16 +510,16 @@ impl<'a> Job<'a> {
     pub fn new(gpu: &'a Gpu, net: &'a Net, frames: usize) -> Self {
         let (t, f) = (frames, BANDS);
         let attention = gpu.attention.get();
-        let nt = net.sub_batch(f, t, attention.time);
-        let nf = net.sub_batch(t, f, attention.freq);
+        let nt = net.sub_batch(f, t, attention.time().is_some());
+        let nf = net.sub_batch(t, f, attention.freq());
         let tokens = (nt * t).max(nf * f);
         // Scores only for an axis that runs split attention.
-        let scores_t = if attention.time {
+        let scores_t = if attention.time().is_some() {
             0
         } else {
             nt * HEADS * t * t
         };
-        let scores_f = if attention.freq {
+        let scores_f = if attention.freq() {
             0
         } else {
             nf * HEADS * f * f
@@ -499,26 +575,15 @@ impl<'a> Job<'a> {
     }
 
     /// Uploads the network input `[T, FEATURES]`, applying the band-split
-    /// RMSNorm on the CPU (each band normalised over its own width).
+    /// RMSNorm on the CPU (each band normalised over its own width).  It
+    /// normalises one band at a time into a buffer of the widest band, and
+    /// writes it to the GPU at the band's offset, so it holds one band,
+    /// not the whole input.
     pub fn set_input(&self, features: &[f32]) {
-        let t = self.frames;
-        assert_eq!(features.len(), t * FEATURES);
-        let mut out = vec![0.0f32; t * FEATURES];
-        for sg in &self.net.split {
-            let (g, w) = (sg.g, sg.g.width);
-            for j in 0..g.count {
-                let gamma = &sg.gamma[j * w..(j + 1) * w];
-                for f in 0..t {
-                    let src = &features[f * FEATURES + g.offset + j * w..][..w];
-                    let n = src.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
-                    let dst = &mut out[t * g.offset + (j * t + f) * w..][..w];
-                    for c in 0..w {
-                        dst[c] = src[c] / n * gamma[c];
-                    }
-                }
-            }
-        }
-        self.gpu.write(&self.split_in, 0, &out);
+        assert_eq!(features.len(), self.frames * FEATURES);
+        normalise_bands(features, self.net.split_gains(), |at, rows| {
+            self.gpu.write(&self.split_in, at, rows);
+        });
     }
 
     /// Replaces the hidden state `[BANDS, T, DIM]` (to run single layers).
@@ -532,6 +597,14 @@ impl<'a> Job<'a> {
     pub fn set_normed(&self, x: &[f32]) {
         assert_eq!(x.len(), BANDS * self.frames * DIM);
         self.gpu.write(&self.xt, 0, x);
+    }
+
+    /// The band-normalised input that [`Self::set_input`] wrote, per group
+    /// `[count, T, width]`.
+    pub async fn split_input(&self) -> Result<Vec<f32>, String> {
+        self.gpu
+            .read(&self.split_in, 0, self.frames * FEATURES)
+            .await
     }
 
     pub async fn hidden(&self) -> Result<Vec<f32>, String> {
@@ -551,18 +624,13 @@ impl<'a> Job<'a> {
     pub fn layer_steps(&self, layer: usize) -> Vec<Step> {
         let (t, f) = (self.frames, BANDS);
         let mut out = Vec::new();
-        let n = self.net.sub_batch(f, t, self.attention.time);
         let mut first = 0;
-        while first < f {
-            out.push(Step::Time {
-                layer,
-                first,
-                n: n.min(f - first),
-            });
+        for n in time_steps(t, self.net.budget, self.attention.time().is_some()) {
+            out.push(Step::Time { layer, first, n });
             first += n;
         }
         out.push(Step::ToFreq);
-        let n = self.net.sub_batch(t, f, self.attention.freq);
+        let n = self.net.sub_batch(t, f, self.attention.freq());
         let mut first = 0;
         while first < t {
             out.push(Step::Freq {
@@ -598,13 +666,21 @@ impl<'a> Job<'a> {
         out
     }
 
-    /// Every step of the forward pass, in order.
-    pub fn steps(&self) -> Vec<Step> {
+    /// The steps that every stem's mask needs, in order: the band split,
+    /// the layers and the final norm.
+    pub fn shared_steps(&self) -> Vec<Step> {
         let mut out = vec![Step::Split];
         for i in 0..DEPTH {
             out.extend(self.layer_steps(i));
         }
         out.push(Step::FinalNorm);
+        out
+    }
+
+    /// Every step of the forward pass, in order: [`Job::shared_steps`],
+    /// then [`Job::mask_steps`] for each stem.
+    pub fn steps(&self) -> Vec<Step> {
+        let mut out = self.shared_steps();
         for s in 0..STEMS.len() {
             out.extend(self.mask_steps(s));
         }
@@ -617,26 +693,28 @@ impl<'a> Job<'a> {
         let (t, f) = (self.frames, BANDS);
         match *step {
             Step::Split => self.split(&mut r),
-            Step::Time { layer, first, n } => self.transformer(
+            Step::Time { layer, first, n } => transformer(
                 &mut r,
+                &self.step_bufs(),
                 &self.net.layers[layer].0,
                 &self.x,
                 t,
                 first,
                 n,
                 &self.rope_time,
-                self.attention.time,
+                self.attention.time(),
             ),
             Step::ToFreq => r.transpose(&self.x, &self.xt, f, t),
-            Step::Freq { layer, first, n } => self.transformer(
+            Step::Freq { layer, first, n } => transformer(
                 &mut r,
+                &self.step_bufs(),
                 &self.net.layers[layer].1,
                 &self.xt,
                 f,
                 first,
                 n,
                 &self.rope_freq,
-                self.attention.freq,
+                self.attention.freq().then_some(FusedKernel::Tiled),
             ),
             Step::ToTime => r.transpose(&self.xt, &self.x, t, f),
             Step::FinalNorm => r.rmsnorm(&self.x, 0, &self.net.final_norm, &self.xt, 0, f * t),
@@ -668,173 +746,16 @@ impl<'a> Job<'a> {
         }
     }
 
-    /// One transformer on sequences `first..first + nb` of `buf`
-    /// (`[*, seq, DIM]`), updated in place.
-    #[allow(clippy::too_many_arguments)]
-    fn transformer<'s>(
-        &'s self,
-        r: &mut Rec<'s>,
-        b: &'s Block,
-        buf: &'s wgpu::Buffer,
-        seq: usize,
-        first: usize,
-        nb: usize,
-        rope: &'s wgpu::Buffer,
-        fused: bool,
-    ) {
-        let tok0 = first * seq;
-        let ntok = nb * seq;
-        let x_off = tok0 * DIM;
-        r.rmsnorm(buf, x_off, &b.attn_norm, &self.xn, 0, ntok);
-        r.matmul(&MatMul::new(
-            (&self.xn, View::rows(0, DIM)),
-            (&b.qkv, View::t(0, DIM)),
-            (&self.qkv, View::rows(0, 3 * INNER)),
-            ntok,
-            3 * INNER,
-            DIM,
-        ));
-        r.rope(&self.qkv, rope, ntok, seq);
-        let mut g = MatMul::new(
-            (&self.xn, View::rows(0, DIM)),
-            (&b.gates_w, View::t(0, DIM)),
-            (&self.gates, View::rows(0, HEADS)),
-            ntok,
-            HEADS,
-            DIM,
-        );
-        g.bias = Some((&b.gates_b, 0, 0));
-        r.matmul(&g);
-
-        let alpha = (DIM_HEAD as f32).powf(-0.5);
-        if fused {
-            // Scores, softmax, p.v and gate in one dispatch; the scores
-            // never reach memory.
-            r.attention(&self.qkv, Some(&self.gates), &self.o, seq, nb, alpha);
-        } else {
-            self.split_attention(r, seq, nb, alpha);
+    /// The buffers that a transformer step of this job writes.
+    fn step_bufs(&self) -> StepBufs<'_> {
+        StepBufs {
+            xn: &self.xn,
+            qkv: &self.qkv,
+            scores: &self.scores,
+            o: &self.o,
+            gates: &self.gates,
+            h: &self.h,
         }
-        let mut out = MatMul::new(
-            (&self.o, View::rows(0, INNER)),
-            (&b.out, View::t(0, INNER)),
-            (buf, View::rows(x_off, DIM)),
-            ntok,
-            DIM,
-            INNER,
-        );
-        out.accumulate = true;
-        r.matmul(&out);
-
-        r.rmsnorm(buf, x_off, &b.ff_norm, &self.xn, 0, ntok);
-        let mut h = MatMul::new(
-            (&self.xn, View::rows(0, DIM)),
-            (&b.w1, View::t(0, DIM)),
-            (&self.h, View::rows(0, HIDDEN)),
-            ntok,
-            HIDDEN,
-            DIM,
-        );
-        h.bias = Some((&b.b1, 0, 0));
-        h.act = Act::Gelu;
-        r.matmul(&h);
-        let mut y = MatMul::new(
-            (&self.h, View::rows(0, HIDDEN)),
-            (&b.w2, View::t(0, HIDDEN)),
-            (buf, View::rows(x_off, DIM)),
-            ntok,
-            DIM,
-            HIDDEN,
-        );
-        y.bias = Some((&b.b2, 0, 0));
-        y.accumulate = true;
-        r.matmul(&y);
-    }
-
-    /// Attention as separate dispatches: scores matmul into `self.scores`,
-    /// softmax, p.v matmul, gate.  The fused kernel computes the same.
-    fn split_attention<'s>(&'s self, r: &mut Rec<'s>, seq: usize, nb: usize, alpha: f32) {
-        // scores[s, h, i, j] = q[s, i, h] . k[s, j, h] / 8
-        let row = 3 * INNER;
-        let mut sc = MatMul::new(
-            (
-                &self.qkv,
-                View {
-                    off: 0,
-                    rs: row,
-                    cs: 1,
-                    bo: seq * row,
-                    bi: DIM_HEAD,
-                },
-            ),
-            (
-                &self.qkv,
-                View {
-                    off: INNER,
-                    rs: 1,
-                    cs: row,
-                    bo: seq * row,
-                    bi: DIM_HEAD,
-                },
-            ),
-            (
-                &self.scores,
-                View {
-                    off: 0,
-                    rs: seq,
-                    cs: 1,
-                    bo: HEADS * seq * seq,
-                    bi: seq * seq,
-                },
-            ),
-            seq,
-            seq,
-            DIM_HEAD,
-        );
-        sc.outer = nb;
-        sc.inner = HEADS;
-        sc.alpha = alpha;
-        r.matmul(&sc);
-        r.softmax(&self.scores, nb * HEADS * seq, seq);
-        // o[s, i, h*64 + d] = sum_j p[s, h, i, j] v[s, j, h, d]
-        let mut pv = MatMul::new(
-            (
-                &self.scores,
-                View {
-                    off: 0,
-                    rs: seq,
-                    cs: 1,
-                    bo: HEADS * seq * seq,
-                    bi: seq * seq,
-                },
-            ),
-            (
-                &self.qkv,
-                View {
-                    off: 2 * INNER,
-                    rs: row,
-                    cs: 1,
-                    bo: seq * row,
-                    bi: DIM_HEAD,
-                },
-            ),
-            (
-                &self.o,
-                View {
-                    off: 0,
-                    rs: INNER,
-                    cs: 1,
-                    bo: seq * INNER,
-                    bi: DIM_HEAD,
-                },
-            ),
-            seq,
-            DIM_HEAD,
-            seq,
-        );
-        pv.outer = nb;
-        pv.inner = HEADS;
-        r.matmul(&pv);
-        r.gate(&self.o, &self.gates, nb * seq);
     }
 
     fn mask_part<'s>(&'s self, r: &mut Rec<'s>, mg: &'s MaskGroup, k: usize, n: usize) {
@@ -895,20 +816,383 @@ impl<'a> Job<'a> {
     }
 }
 
+/// The buffers that one transformer step writes, besides the hidden
+/// state: the normalised input, q/k/v, the scores of split attention, the
+/// attention output, the gates and the feed-forward's hidden layer.
+struct StepBufs<'s> {
+    xn: &'s wgpu::Buffer,
+    qkv: &'s wgpu::Buffer,
+    scores: &'s wgpu::Buffer,
+    o: &'s wgpu::Buffer,
+    gates: &'s wgpu::Buffer,
+    h: &'s wgpu::Buffer,
+}
+
+/// One transformer on sequences `first..first + nb` of `buf`
+/// (`[*, seq, DIM]`), updated in place, with the step buffers `s`.
+/// [`Job::run`] and calibration ([`TimeStep`]) both record a step with it,
+/// so calibration times the dispatches that the separation runs.
+#[allow(clippy::too_many_arguments)]
+fn transformer<'s>(
+    r: &mut Rec<'s>,
+    s: &StepBufs<'s>,
+    b: &'s Block,
+    buf: &'s wgpu::Buffer,
+    seq: usize,
+    first: usize,
+    nb: usize,
+    rope: &'s wgpu::Buffer,
+    fused: Option<FusedKernel>,
+) {
+    let tok0 = first * seq;
+    let ntok = nb * seq;
+    let x_off = tok0 * DIM;
+    r.rmsnorm(buf, x_off, &b.attn_norm, s.xn, 0, ntok);
+    r.matmul(&MatMul::new(
+        (s.xn, View::rows(0, DIM)),
+        (&b.qkv, View::t(0, DIM)),
+        (s.qkv, View::rows(0, 3 * INNER)),
+        ntok,
+        3 * INNER,
+        DIM,
+    ));
+    r.rope(s.qkv, rope, ntok, seq);
+    let mut g = MatMul::new(
+        (s.xn, View::rows(0, DIM)),
+        (&b.gates_w, View::t(0, DIM)),
+        (s.gates, View::rows(0, HEADS)),
+        ntok,
+        HEADS,
+        DIM,
+    );
+    g.bias = Some((&b.gates_b, 0, 0));
+    r.matmul(&g);
+
+    let alpha = (DIM_HEAD as f32).powf(-0.5);
+    match fused {
+        // Scores, softmax, p.v and gate in one dispatch; the scores
+        // never reach memory.
+        Some(kernel) => r.attention(kernel, s.qkv, Some(s.gates), s.o, seq, nb, alpha),
+        None => split_attention(r, s, seq, nb, alpha),
+    }
+    let mut out = MatMul::new(
+        (s.o, View::rows(0, INNER)),
+        (&b.out, View::t(0, INNER)),
+        (buf, View::rows(x_off, DIM)),
+        ntok,
+        DIM,
+        INNER,
+    );
+    out.accumulate = true;
+    r.matmul(&out);
+
+    r.rmsnorm(buf, x_off, &b.ff_norm, s.xn, 0, ntok);
+    let mut h = MatMul::new(
+        (s.xn, View::rows(0, DIM)),
+        (&b.w1, View::t(0, DIM)),
+        (s.h, View::rows(0, HIDDEN)),
+        ntok,
+        HIDDEN,
+        DIM,
+    );
+    h.bias = Some((&b.b1, 0, 0));
+    h.act = Act::Gelu;
+    r.matmul(&h);
+    let mut y = MatMul::new(
+        (s.h, View::rows(0, HIDDEN)),
+        (&b.w2, View::t(0, HIDDEN)),
+        (buf, View::rows(x_off, DIM)),
+        ntok,
+        DIM,
+        HIDDEN,
+    );
+    y.bias = Some((&b.b2, 0, 0));
+    y.accumulate = true;
+    r.matmul(&y);
+}
+
+/// Attention as separate dispatches: scores matmul into `s.scores`,
+/// softmax, p.v matmul, gate.  The fused kernel computes the same.
+fn split_attention<'s>(r: &mut Rec<'s>, s: &StepBufs<'s>, seq: usize, nb: usize, alpha: f32) {
+    // scores[s, h, i, j] = q[s, i, h] . k[s, j, h] / 8
+    let row = 3 * INNER;
+    let mut sc = MatMul::new(
+        (
+            s.qkv,
+            View {
+                off: 0,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: DIM_HEAD,
+            },
+        ),
+        (
+            s.qkv,
+            View {
+                off: INNER,
+                rs: 1,
+                cs: row,
+                bo: seq * row,
+                bi: DIM_HEAD,
+            },
+        ),
+        (
+            s.scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: HEADS * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        seq,
+        seq,
+        DIM_HEAD,
+    );
+    sc.outer = nb;
+    sc.inner = HEADS;
+    sc.alpha = alpha;
+    r.matmul(&sc);
+    r.softmax(s.scores, nb * HEADS * seq, seq);
+    // o[s, i, h*64 + d] = sum_j p[s, h, i, j] v[s, j, h, d]
+    let mut pv = MatMul::new(
+        (
+            s.scores,
+            View {
+                off: 0,
+                rs: seq,
+                cs: 1,
+                bo: HEADS * seq * seq,
+                bi: seq * seq,
+            },
+        ),
+        (
+            s.qkv,
+            View {
+                off: 2 * INNER,
+                rs: row,
+                cs: 1,
+                bo: seq * row,
+                bi: DIM_HEAD,
+            },
+        ),
+        (
+            s.o,
+            View {
+                off: 0,
+                rs: INNER,
+                cs: 1,
+                bo: seq * INNER,
+                bi: DIM_HEAD,
+            },
+        ),
+        seq,
+        DIM_HEAD,
+        seq,
+    );
+    pv.outer = nb;
+    pv.inner = HEADS;
+    r.matmul(&pv);
+    r.gate(s.o, s.gates, nb * seq);
+}
+
+/// One time-transformer step with zero weights, for calibration
+/// (`bench::calibrate`).  It records the dispatches of [`Job::run`] for
+/// [`Step::Time`], through the same function, on buffers of its own.  It
+/// holds no [`Net`] and no [`Job`]: `?bench` has no model, and a job holds
+/// the hidden states of a whole chunk.
+pub struct TimeStep {
+    block: Block,
+    x: GpuBuffer,
+    xn: GpuBuffer,
+    qkv: GpuBuffer,
+    scores: GpuBuffer,
+    o: GpuBuffer,
+    gates: GpuBuffer,
+    h: GpuBuffer,
+    rope: GpuBuffer,
+    frames: usize,
+}
+
+impl TimeStep {
+    /// The buffers for the largest step of [`time_steps`] at `frames` and
+    /// `budget`, with weights in `format`, and the scores of a split step
+    /// when `split`.  At 1,151 frames and [`BUDGET`], with `split`, about
+    /// 113 MB: q/k/v of 4 bands (28 MB), the scores of 1 band (42 MB), the
+    /// hidden layer (19 MB), `o` (9.4 MB), `x` and `xn` (4.7 MB each), and
+    /// one layer's weights.
+    pub fn new(gpu: &Gpu, frames: usize, budget: usize, format: WeightFormat, split: bool) -> Self {
+        let most = |fused: bool| time_steps(frames, budget, fused).into_iter().max();
+        let bands = most(true).max(most(false)).unwrap_or(1);
+        let tokens = bands * frames;
+        let scores = if split {
+            most(false).unwrap_or(1) * HEADS * frames * frames
+        } else {
+            0
+        };
+        let weight = |label, len| gpu.zero_weight(label, len, format);
+        let block = Block {
+            attn_norm: gpu.buffer("calibration attn_norm", DIM),
+            qkv: weight("calibration qkv weight", 3 * INNER * DIM),
+            gates_w: weight("calibration gates weight", HEADS * DIM),
+            gates_b: gpu.buffer("calibration gates bias", HEADS),
+            out: weight("calibration out weight", DIM * INNER),
+            ff_norm: gpu.buffer("calibration ff_norm", DIM),
+            w1: weight("calibration w1", HIDDEN * DIM),
+            b1: gpu.buffer("calibration b1", HIDDEN),
+            w2: weight("calibration w2", DIM * HIDDEN),
+            b2: gpu.buffer("calibration b2", DIM),
+        };
+        Self {
+            block,
+            x: gpu.buffer("calibration x", tokens * DIM),
+            xn: gpu.buffer("calibration xn", tokens * DIM),
+            qkv: gpu.buffer("calibration qkv", tokens * 3 * INNER),
+            scores: gpu.buffer("calibration scores", scores),
+            o: gpu.buffer("calibration o", tokens * INNER),
+            gates: gpu.buffer("calibration gates", tokens * HEADS),
+            h: gpu.buffer("calibration h", tokens * HIDDEN),
+            rope: gpu.upload("calibration rope", &rope_table(frames)),
+            frames,
+        }
+    }
+
+    /// Records one time-transformer step of `bands` bands, with the fused
+    /// kernel `fused` or split attention, as [`Job::run`] records
+    /// [`Step::Time`].
+    pub fn record<'s>(&'s self, r: &mut Rec<'s>, bands: usize, fused: Option<FusedKernel>) {
+        let bufs = StepBufs {
+            xn: &self.xn,
+            qkv: &self.qkv,
+            scores: &self.scores,
+            o: &self.o,
+            gates: &self.gates,
+            h: &self.h,
+        };
+        transformer(
+            r,
+            &bufs,
+            &self.block,
+            &self.x,
+            self.frames,
+            0,
+            bands,
+            &self.rope,
+            fused,
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The normalised input `[count, T, width]` for each group, as
+    /// `Job::set_input` made it whole before it wrote one band at a
+    /// time: the reference for [`normalise_band`].
+    fn normalised_whole(features: &[f32], gammas: &[Vec<f32>]) -> Vec<f32> {
+        let t = features.len() / FEATURES;
+        let mut out = vec![0.0f32; t * FEATURES];
+        for (g, gamma) in band_groups().iter().zip(gammas) {
+            let w = g.width;
+            for j in 0..g.count {
+                let gamma = &gamma[j * w..(j + 1) * w];
+                for f in 0..t {
+                    let src = &features[f * FEATURES + g.offset + j * w..][..w];
+                    let n = src.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
+                    let dst = &mut out[t * g.offset + (j * t + f) * w..][..w];
+                    for c in 0..w {
+                        dst[c] = src[c] / n * gamma[c];
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// A value in -1..1 from `k`, with no pattern.
+    fn noise(k: usize) -> f32 {
+        let h = (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 40;
+        (h % 2001) as f32 / 1000.0 - 1.0
+    }
+
+    /// Cut 3 of M1 of `plans/active/gpu-speed.md`.  The input has one
+    /// frame of one band that is all zeros.  It asserts:
+    /// * the bands that `normalise_bands` writes, put at the offsets that
+    ///   it gives, equal the normalised input made whole, bit for bit;
+    /// * the widest band written is `widest_band`.
+    #[test]
+    fn bands_normalised_one_at_a_time_equal_the_whole_input() {
+        let t = 37;
+        let mut features: Vec<f32> = (0..t * FEATURES).map(noise).collect();
+        let quiet = band_groups()[2];
+        features[5 * FEATURES + quiet.offset..][..quiet.width].fill(0.0);
+        let gammas: Vec<Vec<f32>> = band_groups()
+            .iter()
+            .map(|g| {
+                (0..g.count * g.width)
+                    .map(|k| 1.0 + noise(k + 11))
+                    .collect()
+            })
+            .collect();
+        let want = normalised_whole(&features, &gammas);
+        let mut got = vec![f32::NAN; t * FEATURES];
+        let groups = band_groups();
+        let mut widest = 0;
+        normalise_bands(
+            &features,
+            groups.iter().zip(gammas.iter().map(Vec::as_slice)),
+            |at, rows| {
+                widest = widest.max(rows.len() / t);
+                got[at..][..rows.len()].copy_from_slice(rows);
+            },
+        );
+        for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+            assert_eq!(g.to_bits(), w.to_bits(), "float {k}");
+        }
+        assert_eq!(
+            widest,
+            widest_band(),
+            "the widest band written is `widest_band`"
+        );
+    }
 
     /// Without the scores buffer, a time-axis step takes 4 bands of a full
     /// chunk instead of 1 at the default budget.
     #[test]
     fn fused_attention_fits_more_bands_per_step() {
-        let budget = 8 << 20; // the worker's default
+        let budget = BUDGET;
         let frames = roformer::CHUNK / roformer::HOP + 1;
         assert_eq!((budget / per_seq(frames, false)).clamp(1, BANDS), 1);
         assert_eq!((budget / per_seq(frames, true)).clamp(1, BANDS), 4);
         // The frequency axis is bounded by q/k/v either way.
         assert_eq!(per_seq(BANDS, false), per_seq(BANDS, true));
+    }
+
+    /// Asserts that `time_steps`, at a full chunk (1,151 frames) and
+    /// `BUDGET`, gives 62 steps of 1 band without fused attention, and 15
+    /// steps of 4 bands then 1 of 2 with it.  At a budget of one element,
+    /// each step takes 1 band.  At a budget for all the bands, one step
+    /// takes the 62.  Each list covers the 62 bands once.
+    #[test]
+    fn time_steps_of_a_full_chunk() {
+        let frames = roformer::CHUNK / roformer::HOP + 1;
+        assert_eq!(frames, 1151);
+        assert_eq!(time_steps(frames, BUDGET, false), vec![1; 62]);
+        let mut fused = vec![4; 15];
+        fused.push(2);
+        assert_eq!(time_steps(frames, BUDGET, true), fused);
+        assert_eq!(time_steps(frames, 1, true), vec![1; BANDS]);
+        let all = BANDS * per_seq(frames, false);
+        assert_eq!(time_steps(frames, all, false), vec![BANDS]);
+        for budget in [1, BUDGET, 3 * BUDGET, all] {
+            for fused in [false, true] {
+                let steps = time_steps(frames, budget, fused);
+                assert_eq!(steps.iter().sum::<usize>(), BANDS, "{budget} {fused}");
+            }
+        }
     }
 
     /// One full chunk (1,151 frames) is about 6.1 TFLOP of matmuls, the

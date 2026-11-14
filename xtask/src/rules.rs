@@ -173,10 +173,11 @@ fn string_value(literal: &Literal) -> Option<String> {
 }
 
 /// The packages of the web app, one WebAssembly module each.
-pub const WEB_APP: [&str; 3] = ["app", "decode-worker", "stem-worker"];
+pub const WEB_APP: [&str; 4] = ["app", "decode-worker", "stem-worker", "write-worker"];
 
-/// The shells of the page side: the page and its decode worker.
-pub const PAGE_SIDE: [&str; 2] = ["app", "decode-worker"];
+/// The shells of the page side: the page, its decode worker and its write
+/// worker.
+pub const PAGE_SIDE: [&str; 3] = ["app", "decode-worker", "write-worker"];
 
 /// The shell of the worker side.
 pub const WORKER_SIDE: &str = "stem-worker";
@@ -243,6 +244,7 @@ fn manifest_of(package: &str) -> String {
     match package {
         "stem-worker" => "worker/Cargo.toml".into(),
         "decode-worker" => "decoder/Cargo.toml".into(),
+        "write-worker" => "writer/Cargo.toml".into(),
         "stem-protocol" => "protocol/Cargo.toml".into(),
         _ => format!("{package}/Cargo.toml"),
     }
@@ -1974,7 +1976,7 @@ const THIRD_PARTY_HEADER: &str = "| Crate | Version | Licence | Source |";
 pub const THIRD_PARTY_EDGES: [&str; 2] = ["normal", "normal,dev"];
 
 /// The args of a command in `THIRD-PARTY.md`, in its order, after `cargo`.
-pub fn third_party_args(edges: &str) -> [&str; 15] {
+pub fn third_party_args(edges: &str) -> [&str; 17] {
     [
         "tree",
         "-p",
@@ -1983,6 +1985,8 @@ pub fn third_party_args(edges: &str) -> [&str; 15] {
         "stem-worker",
         "-p",
         "decode-worker",
+        "-p",
+        "write-worker",
         "--target",
         "wasm32-unknown-unknown",
         "-e",
@@ -2585,7 +2589,7 @@ pub const MEM1_EXEMPT: [(&str, &str); 3] = [
 
 /// The members whose lint also fails a copy of a JS array (MEM-1, MEM-2):
 /// the crates of the page and the workers that read JS arrays.
-pub const MEM1_JS_CRATES: [&str; 4] = ["app", "worker", "decoder", "protocol"];
+pub const MEM1_JS_CRATES: [&str; 5] = ["app", "worker", "decoder", "writer", "protocol"];
 
 const MEM1_SLICE: &str = "path = \"slice::to_vec\"";
 const MEM1_JS: [&str; 2] = [
@@ -4166,6 +4170,7 @@ mod tests {
             ("app", "app/Cargo.toml"),
             ("stem-worker", "worker/Cargo.toml"),
             ("decode-worker", "decoder/Cargo.toml"),
+            ("write-worker", "writer/Cargo.toml"),
             ("stem-protocol", "protocol/Cargo.toml"),
         ] {
             assert_eq!(manifest_of(package), manifest, "{package}");
@@ -4554,6 +4559,7 @@ mod tests {
 | Engine and GPU | `roformer-gpu` | `roformer` |
 | Shells | `app` | `dsp`, `engine`, `stem-protocol`, `synth` |
 | Shells | `decode-worker` | `dsp`, `engine`, `stem-protocol` |
+| Shells | `write-worker` | `stem-protocol` |
 | Shells | `stem-worker` | `roformer`, `roformer-gpu`, `stem-protocol` |
 | Tools | `xtask` | `dsp`, `engine`, `roformer`, `synth` |
 ";
@@ -4622,6 +4628,11 @@ mod tests {
                         ("engine", Normal),
                         ("stem-protocol", Normal),
                     ],
+                ),
+                krate(
+                    "write-worker",
+                    "writer/Cargo.toml",
+                    &[("stem-protocol", Normal)],
                 ),
                 krate("synth", "synth/Cargo.toml", &[]),
                 krate("stem-protocol", "protocol/Cargo.toml", &[]),
@@ -5439,6 +5450,7 @@ mod tests {
             vec![
                 shared("app", "test-support"),
                 shared("decode-worker", "test-support"),
+                shared("write-worker", "test-support"),
             ],
         );
     }
@@ -5522,7 +5534,7 @@ mod tests {
 
     #[test]
     fn a_missing_shell_is_a_problem() {
-        for shell in ["stem-worker", "app", "decode-worker"] {
+        for shell in ["stem-worker", "app", "decode-worker", "write-worker"] {
             assert_problems(
                 shells(&without_crate(today(), shell)),
                 vec![layer1(
@@ -6812,8 +6824,8 @@ wgpu v30.0.1|MIT OR Apache-2.0|https://github.com/gfx-rs/wgpu (*)
         assert_eq!(
             commands(),
             [
-                "cargo tree -p app -p stem-worker -p decode-worker --target wasm32-unknown-unknown -e normal --prefix none -f \"{p}|{l}|{r}\"",
-                "cargo tree -p app -p stem-worker -p decode-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f \"{p}|{l}|{r}\"",
+                "cargo tree -p app -p stem-worker -p decode-worker -p write-worker --target wasm32-unknown-unknown -e normal --prefix none -f \"{p}|{l}|{r}\"",
+                "cargo tree -p app -p stem-worker -p decode-worker -p write-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f \"{p}|{l}|{r}\"",
             ]
         );
     }

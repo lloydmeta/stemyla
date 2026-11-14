@@ -17,8 +17,8 @@ use std::sync::Mutex;
 
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{DEPTH, DIM, DIM_HEAD, FEATURES, HEADS, HIDDEN, STEMS, band_groups};
-use roformer_gpu::net::{Job, Net, Step};
-use roformer_gpu::{Gpu, WeightFormat, weight_format};
+use roformer_gpu::net::{Job, Net, Step, TimeStep, normalise_bands};
+use roformer_gpu::{AttentionPolicy, Gpu, MatMulPolicy, WeightFormat, weight_format};
 use test_support::{Need, skip};
 
 /// Held by the tests that upload a whole model, so at most one ~700 MB
@@ -395,6 +395,37 @@ fn net_f16_weights_match_f32() {
     }
 }
 
+/// `Job::set_input` writes the band-normalised input to the GPU.  The
+/// model's gains are not 1, and `split_in` starts at zero.  It asserts:
+/// * the read-back of `split_in` equals what `normalise_bands` gives with
+///   the model's gains, bit for bit.
+#[test]
+fn set_input_writes_the_normalised_bands_to_the_gpu() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = gpu() else { return };
+    let frames = 9;
+    // No feature is 0, so no normalised float is 0.
+    let features: Vec<f32> = (0..frames * FEATURES)
+        .map(|i| ((i * 7919) % 2001) as f32 / 1000.0 - 0.9995)
+        .collect();
+    let store = Store::from_source(Random::new(&tensors())).unwrap();
+    let net = Net::load_store(&g, store, 400_000, WeightFormat::F32).unwrap();
+    let mut want = vec![0.0f32; frames * FEATURES];
+    normalise_bands(&features, net.split_gains(), |at, rows| {
+        want[at..][..rows.len()].copy_from_slice(rows);
+    });
+    assert!(want.iter().all(|v| *v != 0.0), "every float is set");
+    let job = Job::new(&g, &net, frames);
+    job.set_input(&features);
+    let got = pollster::block_on(job.split_input()).unwrap();
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(got.len(), want.len());
+    for (k, (a, b)) in got.iter().zip(&want).enumerate() {
+        assert_eq!(a.to_bits(), b.to_bits(), "float {k} of split_in");
+    }
+}
+
 /// On an adapter without `SHADER_F16_IN_F32` the f16 variants never
 /// compile, the f16 check does not pass, and an f16 setting loads an F16
 /// file as f32.
@@ -589,6 +620,132 @@ fn readbacks_checks_and_benchmarks_free_their_buffers() {
     assert!(errors.is_empty(), "{errors:?}");
 }
 
+/// Asserts that calibration frees each GPU buffer that it makes, with f32
+/// weights, and with f16 weights on a GPU whose f16 check passed:
+/// `live_bytes` is back to its value before, and the GPU gives no error
+/// (MEM-3).
+#[test]
+fn calibration_frees_its_buffers() {
+    let Some(g) = gpu() else { return };
+    pollster::block_on(g.check_kernels()).unwrap();
+    pollster::block_on(g.check_attention());
+    let start = g.live_bytes();
+    let t0 = std::time::Instant::now();
+    let now = || t0.elapsed().as_secs_f64();
+    let formats = WeightFormat::ALL
+        .into_iter()
+        .filter(|&f| f == WeightFormat::F32 || g.f16_ok.get());
+    for format in formats {
+        pollster::block_on(roformer_gpu::bench::calibrate(
+            &g,
+            format,
+            roformer_gpu::net::BUDGET,
+            now,
+            |_| {},
+        ));
+        assert_eq!(g.live_bytes(), start, "{format:?}");
+    }
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// The profile labels of one time-transformer step of 28 bands of 9
+/// frames with `i64`, and each label's count, for `policy`: the norms,
+/// q/k/v, rope, the gates, the attention, the output product and the
+/// feed-forward products.  The label of `vfused`'s dispatch ends in
+/// `vfused`, so the list names the fused kernel that runs.
+fn labels_of(policy: AttentionPolicy) -> Vec<(String, usize)> {
+    let mut labels = vec![
+        ("matmul 252x1024x256 x1 i64", 1),
+        ("matmul 252x1536x256 x1 i64", 1),
+        ("matmul 252x256x1024 x1 i64", 1),
+        ("matmul 252x256x512 x1 i64", 1),
+        ("matmul 252x8x256 x1 i64", 1),
+        ("rmsnorm", 2),
+        ("rope", 1),
+    ];
+    if policy == AttentionPolicy::VFused {
+        labels.push(("attention seq 9 x28 vfused", 1));
+    } else if policy.time().is_some() {
+        labels.push(("attention seq 9 x28", 1));
+    } else {
+        labels.extend([
+            ("gate", 1),
+            ("matmul 9x64x9 x224 i64", 1),
+            ("matmul 9x9x64 x224 i64", 1),
+            ("softmax 2016x9", 1),
+        ]);
+    }
+    labels.sort_unstable();
+    labels
+        .into_iter()
+        .map(|(l, n)| (l.to_string(), n))
+        .collect()
+}
+
+/// Asserts, on a profiling device, that calibration's step (`TimeStep`)
+/// records the dispatches that `Job::run` records for `Step::Time`, for
+/// split attention, the tiled fused kernel and `vfused`: the same profile
+/// labels, each as many times, and the labels of `labels_of`.  A label
+/// names a matmul's kernel and shape, and which fused kernel runs.  A
+/// step that records nothing, another shape or another fused kernel
+/// fails.
+/// The net has zero weights of the model's shapes; 9 frames and a budget
+/// of 400,000 give steps of 28 bands.
+#[test]
+fn calibration_records_the_step_of_the_separation() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let g = match pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance)) {
+        Ok(g) => g,
+        Err(e) => return skip(Need::Gpu, &e),
+    };
+    if !g.profiling() {
+        return skip(Need::Timestamps, "adapter without timestamp-query");
+    }
+    pollster::block_on(g.check_kernels()).unwrap();
+    pollster::block_on(g.check_attention());
+    g.policy.set(MatMulPolicy::Fixed(0));
+    let (frames, budget) = (9, 400_000);
+    let store = Store::from_source(Zeros::new(&tensors())).unwrap();
+    let net = Net::load_store(&g, store, budget, WeightFormat::F32).unwrap();
+    let profile = |g: &Gpu| {
+        pollster::block_on(g.done());
+        pollster::block_on(g.collect_profile()).unwrap();
+        g.take_profile()
+            .into_iter()
+            .map(|(label, (count, _))| (label, count))
+            .collect::<Vec<_>>()
+    };
+    for policy in [
+        AttentionPolicy::Split,
+        AttentionPolicy::Fused,
+        AttentionPolicy::VFused,
+    ] {
+        g.attention.set(policy);
+        let job = Job::new(&g, &net, frames);
+        let steps = job.layer_steps(0);
+        let Some(&Step::Time { n, .. }) = steps.first() else {
+            panic!("no time step: {steps:?}");
+        };
+        profile(&g);
+        job.run(&Step::Time {
+            layer: 0,
+            first: 0,
+            n,
+        });
+        let want = profile(&g);
+        let step = TimeStep::new(&g, frames, budget, WeightFormat::F32, true);
+        let mut r = g.rec();
+        step.record(&mut r, n, policy.time());
+        r.submit();
+        let got = profile(&g);
+        assert_eq!(want, labels_of(policy), "{policy:?}");
+        assert_eq!(got, want, "{policy:?}");
+    }
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
 /// On a profiling device each submission's timestamp readback buffer is
 /// destroyed once its timestamps are collected.
 #[test]
@@ -609,7 +766,65 @@ fn collected_profile_readbacks_are_freed() {
     pollster::block_on(g.done());
     pollster::block_on(g.collect_profile()).unwrap();
     assert_eq!(g.live_bytes(), start);
-    assert_eq!(g.take_profile().get("softmax").map(|v| v.0), Some(3));
+    assert_eq!(g.take_profile().get("softmax 4x64").map(|v| v.0), Some(3));
     let errors = g.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// The steps of the forward pass, and masks that follow the input.  Each
+/// input runs on a new `Job`.  It asserts:
+/// * `Job::shared_steps` equals the band split, then `layer_steps` of each
+///   layer in order, then the final norm;
+/// * `Job::steps` equals `shared_steps`, then `mask_steps` of each stem in
+///   order;
+/// * each run gives six masks, each with finite values;
+/// * the same input gives the same masks;
+/// * a second input gives a different mask for each stem.
+///
+/// TD-8 gives what this test does not check.
+#[test]
+fn the_masks_follow_the_input_through_the_shared_steps() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(g) = gpu() else { return };
+    let store = Store::from_source(Random::new(&tensors())).unwrap();
+    let net = Net::load_store(&g, store, 400_000, WeightFormat::F32).unwrap();
+    let frames = 9;
+    let job = Job::new(&g, &net, frames);
+
+    let mut layers = vec![Step::Split];
+    for layer in 0..DEPTH {
+        layers.extend(job.layer_steps(layer));
+    }
+    layers.push(Step::FinalNorm);
+    assert_eq!(job.shared_steps(), layers, "the shared steps");
+    let mut all = job.shared_steps();
+    for stem in 0..STEMS.len() {
+        all.extend(job.mask_steps(stem));
+    }
+    assert_eq!(job.steps(), all, "the steps of the forward pass");
+
+    let input = |seed: usize| -> Vec<f32> {
+        (0..frames * FEATURES)
+            .map(|i| (((i + seed) * 7919) % 2001) as f32 / 1000.0 - 1.0)
+            .collect()
+    };
+    drop(job);
+    let masks = |seed: usize| {
+        let job = Job::new(&g, &net, frames);
+        let masks = pollster::block_on(job.masks(&input(seed))).unwrap();
+        assert_eq!(masks.len(), STEMS.len(), "a mask for each stem");
+        for (stem, mask) in masks.iter().enumerate() {
+            assert!(mask.iter().all(|v| v.is_finite()), "stem {stem}");
+        }
+        masks
+    };
+    let first = masks(0);
+    let again = masks(0);
+    let second = masks(13);
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    assert_eq!(first, again, "the same input gives the same masks");
+    for (stem, (a, b)) in first.iter().zip(&second).enumerate() {
+        assert_ne!(a, b, "stem {stem}: the mask does not follow the input");
+    }
 }

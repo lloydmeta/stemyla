@@ -161,7 +161,8 @@ const SAVE: &str = "saves/1792640000000-1.wav";
 /// D3 of M8, MEM-5: a WAV save of a stored mix of 30 s writes a file equal
 /// to `engine::wav::encode_pcm16` of the mix, of exactly 44 + 4 x frames
 /// bytes once the end stage is done.  Each write is a whole array of at
-/// most `SAVE_WRITE_BYTES`.  Every full block goes through one JS array.
+/// most `SAVE_WRITE_BYTES`.  Every full block goes through one JS array,
+/// which the write worker gives back after each write (M5.1).
 /// The page's WebAssembly heap stays under the reader's spans, a write and
 /// 4 MB above its start (review round speed 3 of M8).
 #[wasm_bindgen_test]
@@ -179,7 +180,7 @@ async fn a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array() {
     job.sink_mut().take();
     let peak = store::tests::heap_peak_above(start) as f64 / 1e6;
     let record = store::tests::stop_spy();
-    let repeats = store::tests::spy_repeats();
+    let made = job.sink().arrays_made();
     drop(job);
     let got = store::test_read(SAVE).await;
     store::test_remove(store::SAVES).await;
@@ -195,11 +196,7 @@ async fn a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array() {
         vec!["whole"; full + 1].join(" "),
         "MEM-5: {full} full blocks, then the last"
     );
-    assert_eq!(
-        repeats,
-        format!("0{}0", "1".repeat(full - 1)),
-        "one JS array for every full block, and a new one for the last"
-    );
+    assert_eq!(made, 1, "one JS array for every full block");
     let ahead = lane_store::SAVE_AHEAD;
     let spans = (ahead.depth + 1) * ahead.span * 2 * 4 * 3;
     let bound = (spans + SAVE_WRITE_BYTES) as f64 / 1e6 + 4.0;

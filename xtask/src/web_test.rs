@@ -1,8 +1,10 @@
 //! `xtask web-test [--browser safari|chrome] [--chrome-arg <arg>]... [filter]`:
 //! the browser tests
-//! of `app` (song sessions in browser storage), `stem-worker` (model
-//! storage, message handling), `decode-worker`, `stem-protocol` and
-//! `engine` (the resampler with a 32-bit `usize`), compiled for wasm32 and
+//! of `app` (song sessions in browser storage, with the page-side fake
+//! of the write worker behind `fake-writer`), `stem-worker` (model
+//! storage, message handling), `decode-worker`, `write-worker`,
+//! `stem-protocol` and `engine` (the resampler with a 32-bit `usize`),
+//! compiled for wasm32 and
 //! run in a real browser by `wasm-bindgen-test-runner`.  It keeps the
 //! output of each crate run while it prints it, and fails a crate run
 //! whose test binary has no wasm test, unless a filter is given.  With a
@@ -19,6 +21,9 @@
 //!
 //! It runs each crate, also after a crate fails.  Then it prints one line
 //! for each crate, and fails with the name of each crate that failed.
+//! It exits with [`HANG_EXIT_CODE`] when each failed crate failed only by
+//! the runner's hang (TD-98, [`exit_code`]).  Each other failure exits
+//! with 1.  CI runs a step again only after the hang exit code.
 //!
 //! It sets Cargo's runner and the driver through the environment, so no
 //! `.cargo/config.toml` is needed, and it checks that the installed runner
@@ -82,7 +87,48 @@ fn parse_args(args: &[String], browser: Browser) -> Result<Options> {
     Ok(options)
 }
 
-pub fn run(args: &[String]) -> Result<()> {
+/// The exit code of a `web-test` whose each failed crate failed only by
+/// the runner's hang (TD-98).  It is `EX_TEMPFAIL` of `sysexits.h`.
+pub const HANG_EXIT_CODE: i32 = 75;
+
+/// One run per crate, with its targets: `--test web` names targets only
+/// `app` has.  The app's run turns on `fake-writer`, the page-side fake
+/// of the write worker, since the test runner serves no worker build.
+const CRATE_RUNS: [(&str, &[&str]); 6] = [
+    (
+        "app",
+        &[
+            "--lib",
+            "--test",
+            "web",
+            "--test",
+            "web_close",
+            "--test",
+            "web_output",
+            "--features",
+            "fake-writer",
+        ],
+    ),
+    ("stem-worker", &["--lib"]),
+    ("decode-worker", &["--lib"]),
+    ("write-worker", &["--lib"]),
+    ("stem-protocol", &["--test", "web"]),
+    ("engine", &["--lib"]),
+];
+
+/// Runs `web-test`, and gives its exit code: 0 when it passed,
+/// [`HANG_EXIT_CODE`] or 1 when it failed ([`exit_code`]).
+pub fn main(args: &[String]) -> i32 {
+    match run(args) {
+        Ok(code) => code,
+        Err(error) => {
+            eprintln!("Error: {error:?}");
+            1
+        }
+    }
+}
+
+fn run(args: &[String]) -> Result<i32> {
     let Options {
         browser,
         filter,
@@ -95,61 +141,38 @@ pub fn run(args: &[String]) -> Result<()> {
     let on_macos = cfg!(target_os = "macos");
     crate::drivers::refuse_a_locked_screen(browser, on_macos, crate::drivers::ioreg_root)?;
     let _active = crate::drivers::keep_user_active(browser, on_macos, crate::drivers::caffeinate);
+    // Its drop reports what Safari left, after each crate run ended.
+    let _safari_data =
+        crate::drivers::watch_safari_data(browser, on_macos, crate::drivers::darwin_user_temp_dir);
     let driver = browser.driver()?;
-    // One run per crate: `--test web` names targets only `app` has.
-    let runs: [(&str, &[&str]); 5] = [
-        (
-            "app",
-            &[
-                "--lib",
-                "--test",
-                "web",
-                "--test",
-                "web_close",
-                "--test",
-                "web_output",
-            ],
-        ),
-        ("stem-worker", &["--lib"]),
-        ("decode-worker", &["--lib"]),
-        ("stem-protocol", &["--test", "web"]),
-        ("engine", &["--lib"]),
-    ];
+    let runs = CRATE_RUNS;
     let mut results = Vec::with_capacity(runs.len());
     let mut outputs = Vec::with_capacity(runs.len());
     for (package, targets) in runs {
-        let mut cmd = Command::new(env!("CARGO"));
-        cmd.current_dir(&root);
-        cmd.args(crate_run_args(package, targets, filter.as_deref()))
-            .env(
-                "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER",
-                "wasm-bindgen-test-runner",
-            );
-        for var in DRIVER_VARS {
-            cmd.env_remove(var).env_remove(format!("{var}_REMOTE"));
-        }
-        // It would skip every browser test and report success.
-        cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
-        // The runner gives each test binary 20 s by default.  The app's
-        // lib tests run the `?streamtest` runs, the stored lanes of M6,
-        // which play in real time, and the saves of M8.  They took 197 s in
-        // CI run 40788465048, and 219 s to 231 s on the maintainer's Mac.
-        // One run there passed 300 s (review round speed 1 of M8).  600 s
-        // is about 3 times the CI time.
-        if std::env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
-            cmd.env("WASM_BINDGEN_TEST_TIMEOUT", WEB_TEST_TIMEOUT_S);
-        }
-        let var = match browser {
-            Browser::Chrome => "CHROMEDRIVER",
-            Browser::Safari => "SAFARIDRIVER",
+        let capabilities = match browser {
+            Browser::Chrome => Some(chrome_capabilities(&root, &chrome_args)?),
+            Browser::Safari => None,
         };
-        cmd.env(var, &driver);
-        if browser == Browser::Chrome {
-            cmd.env(
-                "WASM_BINDGEN_TEST_WEBDRIVER_JSON",
-                chrome_capabilities(&root, &chrome_args)?,
-            );
+        // Removed at the end of this crate run, also after an error.
+        let chrome_folder = if crate::webdriver::wants_chrome_folder(browser, on_macos) {
+            Some(crate::webdriver::ChromeFolder::create(
+                std::path::Path::new(crate::webdriver::CHROME_FOLDER_PARENT),
+            )?)
+        } else {
+            None
+        };
+        let mut cmd = CrateRun {
+            package,
+            targets,
+            filter: filter.as_deref(),
+            browser,
+            driver: &driver,
+            capabilities: capabilities.as_deref(),
+            chrome_folder: chrome_folder
+                .as_ref()
+                .map(crate::webdriver::ChromeFolder::path),
         }
+        .command(&root);
         for var in run_vars(browser, package) {
             println!(
                 "web-test: {package}: {}={}, since {}",
@@ -179,16 +202,115 @@ pub fn run(args: &[String]) -> Result<()> {
         ));
         outputs.push(output);
     }
-    match verdict(&results, &outputs, filter.as_deref()) {
-        Ok(lines) => {
-            println!("{lines}");
-            Ok(())
-        }
-        Err(lines) => bail!(
-            "{lines}\nbrowser tests failed in {browser:?}; if no test ran, check the driver: {}",
-            browser.setup_hint()
-        ),
+    let End {
+        stdout,
+        stderr,
+        code,
+    } = end(browser, &results, &outputs, filter.as_deref());
+    if let Some(lines) = stdout {
+        println!("{lines}");
     }
+    for lines in stderr {
+        eprintln!("{lines}");
+    }
+    Ok(code)
+}
+
+/// What a `web-test` prints and gives at its end.
+#[derive(Debug, PartialEq, Eq)]
+struct End {
+    /// The text for stdout, or `None`.
+    stdout: Option<String>,
+    /// The texts for stderr, in order.
+    stderr: Vec<String>,
+    /// The exit code.
+    code: i32,
+}
+
+/// The [`End`] of a `web-test` from its [`verdict`].  A pass gives 0 and
+/// the summary on stdout.  A failure gives the code of [`failure_end`],
+/// and the error and the note on stderr.
+fn end(
+    browser: Browser,
+    results: &[(&str, bool)],
+    outputs: &[String],
+    filter: Option<&str>,
+) -> End {
+    match verdict(results, outputs, filter) {
+        Ok(lines) => End {
+            stdout: Some(lines),
+            stderr: Vec::new(),
+            code: 0,
+        },
+        Err(lines) => {
+            let error = format!(
+                "Error: {lines}\nbrowser tests failed in {browser:?}; if no test ran, check the driver: {}",
+                browser.setup_hint()
+            );
+            let (note, code) = failure_end(results, outputs);
+            End {
+                stdout: None,
+                stderr: std::iter::once(error).chain(note).collect(),
+                code,
+            }
+        }
+    }
+}
+
+/// The line that `wasm-bindgen-test-runner` 0.2.130 prints when a test
+/// page gives no `test result: ` line in the time limit (`headless.rs`).
+const HANG: &str = "Failed to detect test as having been run. It might have timed out.";
+
+/// The parts of lines that show a failure other than the hang and a
+/// failed test.  They are a panic and a failed WebDriver request.
+const NOT_A_HANG: [&str; 2] = ["panicked at ", "request failed"];
+
+/// Whether `line` shows a failed test.  wasm-bindgen-test 0.3.80 prints
+/// `test <name> ... FAIL` for it (`log_test` and `TestResult` in
+/// `src/rt/mod.rs`).
+fn a_failed_test(line: &str) -> bool {
+    let line = line.trim();
+    line.starts_with("test ") && line.ends_with(" ... FAIL")
+}
+
+/// Whether the output of a failed crate run shows only the runner's hang.
+/// It has the [`HANG`] line.  It has no line of [`a_failed_test`], and no
+/// line that holds a part of [`NOT_A_HANG`].
+fn failed_only_by_the_hang(output: &str) -> bool {
+    let output = plain(output);
+    output.lines().any(|line| line.trim() == HANG)
+        && !output
+            .lines()
+            .any(|line| a_failed_test(line) || NOT_A_HANG.iter().any(|part| line.contains(part)))
+}
+
+/// The exit code of a failed `web-test`.  It is [`HANG_EXIT_CODE`] when at
+/// least one crate failed, and [`failed_only_by_the_hang`] holds for each
+/// failed crate.  Else it is 1.
+fn exit_code(results: &[(&str, bool)], outputs: &[String]) -> i32 {
+    let failed: Vec<&str> = results
+        .iter()
+        .zip(outputs)
+        .filter(|((_, passed), _)| !passed)
+        .map(|(_, output)| output.as_str())
+        .collect();
+    if !failed.is_empty() && failed.iter().all(|output| failed_only_by_the_hang(output)) {
+        HANG_EXIT_CODE
+    } else {
+        1
+    }
+}
+
+/// The note and the exit code of a failed `web-test`.  The code is
+/// [`exit_code`].  The note is `Some` only for [`HANG_EXIT_CODE`].
+fn failure_end(results: &[(&str, bool)], outputs: &[String]) -> (Option<String>, i32) {
+    let code = exit_code(results, outputs);
+    let note = (code == HANG_EXIT_CODE).then(|| {
+        format!(
+            "web-test: each failed crate failed only by the runner's hang (\"{HANG}\"); exit code {HANG_EXIT_CODE} (TD-98)"
+        )
+    });
+    (note, code)
 }
 
 /// Runs one crate with `run`.  In Safari, it ends the stale sessions with
@@ -355,6 +477,62 @@ fn plain(text: &str) -> String {
     kept
 }
 
+/// One crate run of `web-test`.
+struct CrateRun<'a> {
+    package: &'a str,
+    targets: &'a [&'a str],
+    filter: Option<&'a str>,
+    browser: Browser,
+    /// The WebDriver executable.
+    driver: &'a std::path::Path,
+    /// The `webdriver.json` for the runner, for Chrome.
+    capabilities: Option<&'a std::path::Path>,
+    /// The run's Chrome folder, for Chrome on macOS.
+    chrome_folder: Option<&'a std::path::Path>,
+}
+
+impl CrateRun<'_> {
+    /// The `cargo test` command of this crate run, in `root`.  The runner
+    /// and its driver inherit its environment.
+    fn command(&self, root: &std::path::Path) -> Command {
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.current_dir(root);
+        cmd.args(crate_run_args(self.package, self.targets, self.filter))
+            .env(
+                "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER",
+                "wasm-bindgen-test-runner",
+            );
+        for var in DRIVER_VARS {
+            cmd.env_remove(var).env_remove(format!("{var}_REMOTE"));
+        }
+        // It would skip every browser test and report success.
+        cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
+        // The runner gives each test binary 20 s by default.  The app's
+        // lib tests run the `?streamtest` runs, the stored lanes of M6,
+        // which play in real time, and the saves of M8.  They took 197 s in
+        // CI run 40788465048, and 219 s to 231 s on the maintainer's Mac.
+        // One run there passed 300 s (review round speed 1 of M8).  600 s
+        // is about 3 times the CI time.
+        if std::env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
+            cmd.env("WASM_BINDGEN_TEST_TIMEOUT", WEB_TEST_TIMEOUT_S);
+        }
+        let var = match self.browser {
+            Browser::Chrome => "CHROMEDRIVER",
+            Browser::Safari => "SAFARIDRIVER",
+        };
+        cmd.env(var, self.driver);
+        if let Some(capabilities) = self.capabilities {
+            cmd.env("WASM_BINDGEN_TEST_WEBDRIVER_JSON", capabilities);
+        }
+        // Cargo and rustc do not read it.  chromedriver makes each
+        // session's profile in the folder (`crate::webdriver::ChromeFolder`).
+        if let Some(folder) = self.chrome_folder {
+            cmd.env(crate::webdriver::CHROME_TMP_VAR, folder);
+        }
+        cmd
+    }
+}
+
 /// The arguments of the `cargo test` of one crate run.  `--color never`
 /// keeps Cargo's `Running` lines plain for [`session_did_not_start`], also
 /// with CI's `CARGO_TERM_COLOR: always`.
@@ -484,6 +662,106 @@ version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 "#;
 
+    fn env_of(cmd: &Command, name: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    /// Asserts:
+    /// * Chrome's crate run with a Chrome folder gives it to the runner,
+    ///   and so to chromedriver, in `MAC_CHROMIUM_TMPDIR`;
+    /// * a Safari crate run gives no such variable.
+    #[test]
+    fn a_chrome_crate_run_gives_its_chrome_folder_to_the_driver() {
+        let chrome = CrateRun {
+            package: "app",
+            targets: &["--lib"],
+            filter: None,
+            browser: Browser::Chrome,
+            driver: std::path::Path::new("/Users/lloyd/chromedriver"),
+            capabilities: Some(std::path::Path::new("/Users/lloyd/web-test-chrome.json")),
+            chrome_folder: Some(std::path::Path::new("/tmp/stemyla-chrome/4242-0")),
+        };
+        let cmd = chrome.command(std::path::Path::new("/Users/lloyd/stemyla"));
+        assert_eq!(
+            env_of(&cmd, crate::webdriver::CHROME_TMP_VAR).as_deref(),
+            Some("/tmp/stemyla-chrome/4242-0")
+        );
+        assert_eq!(
+            env_of(&cmd, "CHROMEDRIVER").as_deref(),
+            Some("/Users/lloyd/chromedriver")
+        );
+        assert_eq!(
+            env_of(&cmd, "WASM_BINDGEN_TEST_WEBDRIVER_JSON").as_deref(),
+            Some("/Users/lloyd/web-test-chrome.json")
+        );
+        let safari = CrateRun {
+            browser: Browser::Safari,
+            driver: std::path::Path::new("/usr/bin/safaridriver"),
+            capabilities: None,
+            chrome_folder: None,
+            ..chrome
+        };
+        let cmd = safari.command(std::path::Path::new("/Users/lloyd/stemyla"));
+        assert_eq!(env_of(&cmd, crate::webdriver::CHROME_TMP_VAR), None);
+        assert_eq!(env_of(&cmd, "WASM_BINDGEN_TEST_WEBDRIVER_JSON"), None);
+        assert_eq!(
+            env_of(&cmd, "SAFARIDRIVER").as_deref(),
+            Some("/usr/bin/safaridriver")
+        );
+    }
+
+    /// The app's tests write through the page-side fake of the write
+    /// worker, since the test runner serves no worker build (M5.1): its
+    /// crate run turns on `fake-writer`, and no other crate run names it.
+    /// The shipped page never turns it on: not Trunk's link, and not the
+    /// app's default features, also through another feature.
+    #[test]
+    fn only_the_apps_crate_run_turns_on_the_fake_writer() {
+        for (package, targets) in CRATE_RUNS {
+            let fake = targets
+                .windows(2)
+                .any(|w| w == ["--features", "fake-writer"]);
+            assert_eq!(fake, package == "app", "{package}: {targets:?}");
+        }
+        let index = include_str!("../../app/index.html");
+        let app_link = index
+            .lines()
+            .find(|line| line.contains("data-bin=\"app\""))
+            .expect("the app's Trunk link");
+        for turns_on in [
+            "fake-writer",
+            "data-cargo-features",
+            "data-cargo-all-features",
+        ] {
+            assert!(!app_link.contains(turns_on), "Trunk's link: {app_link}");
+        }
+        // The app's features as Trunk builds it (the default ones), with
+        // each feature that turns on another resolved.
+        let out = Command::new(env!("CARGO"))
+            .current_dir(crate::workspace_root())
+            .args(["tree", "--locked", "--color", "never", "-p", "app"])
+            .args([
+                "--target",
+                "wasm32-unknown-unknown",
+                "-e",
+                "features",
+                "-i",
+                "app",
+            ])
+            .output()
+            .expect("cargo tree runs");
+        let tree = String::from_utf8_lossy(&out.stdout);
+        let errors = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            out.status.success() && tree.contains("app feature \"default\""),
+            "cargo tree ({}): {tree}\n{errors}",
+            out.status
+        );
+        assert!(!tree.contains("app feature \"fake-writer\""), "{tree}");
+    }
+
     #[test]
     fn finds_the_exact_package_in_the_lockfile() {
         assert_eq!(
@@ -495,6 +773,219 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             Some("0.4.79")
         );
         assert_eq!(locked_version(LOCK, "wasm"), None);
+    }
+
+    /// The output of a crate run that hung, as in CI run 43229036261
+    /// (TD-98).
+    const HUNG: &str = "     Running tests/web_output.rs (target/wasm32-unknown-unknown/debug/deps/web_output-ae8a3c20e4ab00f7.wasm)\n\
+        Running headless tests in Safari on `http://127.0.0.1:49241/`\n\
+        Loading Wasm module...\n\
+        Failed to detect test as having been run. It might have timed out.\n\
+        driver status: signal: 9 (SIGKILL)\n\
+        Error: some tests failed\n\
+        error: test failed, to rerun pass `-p app --test web_output`\n";
+
+    /// The output of a crate run with a failed test, as in CI run
+    /// 43152005940.
+    const A_FAILED_TEST: &str = "test web::tests::a_mix_file_changed_after_the_open_gives_no_old_samples ... FAIL\n\
+        failures:\n\
+        \x20       panicked at worker/src/web/tests.rs:3576:24:\n\
+        test result: FAILED. 109 passed; 1 failed; 0 ignored; 0 filtered out; finished in 63.72s\n";
+
+    /// The output of a crate run whose WebDriver request failed, as in CI
+    /// run 43223719719.
+    const A_FAILED_REQUEST: &str = "Error: webdriver POST /session/ABE2DB61/execute/sync request failed\n\
+        error: test failed, to rerun pass `-p engine --lib`\n";
+
+    fn outputs(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|text| text.to_string()).collect()
+    }
+
+    /// Asserts:
+    /// * one failed crate that hung gives [`HANG_EXIT_CODE`];
+    /// * two failed crates that both hung give [`HANG_EXIT_CODE`];
+    /// * a passed crate with any output does not change the code;
+    /// * a hang line in colour gives [`HANG_EXIT_CODE`];
+    /// * a hang after a passed test gives [`HANG_EXIT_CODE`];
+    /// * a hang after a line that ends with " ... FAIL" but does not
+    ///   start with "test " gives [`HANG_EXIT_CODE`].
+    #[test]
+    fn only_hung_crates_give_the_hang_exit_code() {
+        let results = [("app", false), ("engine", true)];
+        assert_eq!(
+            exit_code(&results, &outputs(&[HUNG, A_FAILED_TEST])),
+            HANG_EXIT_CODE
+        );
+        let both = [("app", false), ("stem-worker", false)];
+        assert_eq!(exit_code(&both, &outputs(&[HUNG, HUNG])), HANG_EXIT_CODE);
+        let coloured = HUNG.replace("Failed to detect", "\u{1b}[31mFailed to detect");
+        assert_eq!(
+            exit_code(&results[..1], &outputs(&[&coloured])),
+            HANG_EXIT_CODE
+        );
+        let after_a_passed_test = format!("test lloyd ... ok\n{HUNG}");
+        assert_eq!(
+            exit_code(&results[..1], &outputs(&[&after_a_passed_test])),
+            HANG_EXIT_CODE
+        );
+        let not_a_test_line = format!("lloyd: test ... FAIL\n{HUNG}");
+        assert_eq!(
+            exit_code(&results[..1], &outputs(&[&not_a_test_line])),
+            HANG_EXIT_CODE
+        );
+    }
+
+    /// Asserts that each of these gives 1:
+    /// * a hung crate and a crate with a failed test (CI run 43152005940);
+    /// * a failed WebDriver request (CI run 43223719719);
+    /// * a hang after a failed test in the same crate run;
+    /// * a hang after a failed test with no panic, on a line with spaces
+    ///   around it;
+    /// * a hang and a panic in the same crate run;
+    /// * a hang and a failed WebDriver request in the same crate run;
+    /// * a failed crate with no output;
+    /// * no failed crate, as when a filter matched no test.
+    #[test]
+    fn each_other_failure_gives_exit_code_1() {
+        let two = [("app", false), ("stem-worker", false)];
+        assert_eq!(exit_code(&two, &outputs(&[HUNG, A_FAILED_TEST])), 1);
+        let one = [("engine", false)];
+        assert_eq!(exit_code(&one, &outputs(&[A_FAILED_REQUEST])), 1);
+        let after_a_failed_test = format!("test lloyd ... FAIL\n{HUNG}");
+        assert_eq!(exit_code(&one, &outputs(&[&after_a_failed_test])), 1);
+        let with_spaces = format!("  test web::tests::lloyd ... FAIL \r\n{HUNG}");
+        assert_eq!(exit_code(&one, &outputs(&[&with_spaces])), 1);
+        let with_a_panic = format!("    panicked at app/src/lib.rs:1:1:\n{HUNG}");
+        assert_eq!(exit_code(&one, &outputs(&[&with_a_panic])), 1);
+        let with_a_request = format!("{HUNG}{A_FAILED_REQUEST}");
+        assert_eq!(exit_code(&one, &outputs(&[&with_a_request])), 1);
+        assert_eq!(exit_code(&one, &outputs(&[""])), 1);
+        assert_eq!(exit_code(&[("app", true)], &outputs(&[HUNG])), 1);
+    }
+
+    /// Asserts:
+    /// * a crate that hung gives [`HANG_EXIT_CODE`] and a note that names
+    ///   the hang line, the code and TD-98;
+    /// * a crate with a failed test gives 1 and no note.
+    #[test]
+    fn only_the_hang_exit_code_gets_the_hang_note() {
+        let failed = [("app", false)];
+        let (note, code) = failure_end(&failed, &outputs(&[HUNG]));
+        assert_eq!(code, HANG_EXIT_CODE);
+        assert_eq!(
+            note.as_deref(),
+            Some(
+                "web-test: each failed crate failed only by the runner's hang (\"Failed to detect test as having been run. It might have timed out.\"); exit code 75 (TD-98)"
+            )
+        );
+        assert_eq!(failure_end(&failed, &outputs(&[A_FAILED_TEST])), (None, 1));
+    }
+
+    /// Finding 3-1 of review round 3 of M3 of `gpu-speed`.  Asserts:
+    /// * crates that all passed give 0, the summary on stdout and no
+    ///   stderr;
+    /// * a failed test gives 1, no stdout, and only the error on stderr;
+    /// * a hung crate gives [`HANG_EXIT_CODE`], no stdout, and the error
+    ///   and then the hang note on stderr;
+    /// * a filter that matched no test gives 1 and no stdout.
+    #[test]
+    fn only_a_pass_ends_with_exit_code_0() {
+        let passed = [("app", true)];
+        let ran = outputs(&["running 1 test\n"]);
+        assert_eq!(
+            end(Browser::Safari, &passed, &ran, None),
+            End {
+                stdout: Some("web-test: app: passed".to_string()),
+                stderr: Vec::new(),
+                code: 0,
+            }
+        );
+        let failed = [("stem-worker", false)];
+        let a_failed_test = end(Browser::Safari, &failed, &outputs(&[A_FAILED_TEST]), None);
+        assert_eq!(a_failed_test.code, 1);
+        assert_eq!(a_failed_test.stdout, None);
+        assert_eq!(a_failed_test.stderr.len(), 1, "{:?}", a_failed_test.stderr);
+        assert!(
+            a_failed_test.stderr[0].starts_with("Error: web-test: stem-worker: failed\n"),
+            "{:?}",
+            a_failed_test.stderr
+        );
+        assert!(
+            a_failed_test.stderr[0].contains("browser tests failed in Safari; "),
+            "{:?}",
+            a_failed_test.stderr
+        );
+        let hung = end(Browser::Chrome, &[("app", false)], &outputs(&[HUNG]), None);
+        assert_eq!(hung.code, HANG_EXIT_CODE);
+        assert_eq!(hung.stdout, None);
+        assert_eq!(hung.stderr.len(), 2, "{:?}", hung.stderr);
+        assert_eq!(
+            Some(&hung.stderr[1]),
+            failure_end(&[("app", false)], &outputs(&[HUNG])).0.as_ref()
+        );
+        let no_match = end(Browser::Chrome, &passed, &outputs(&[""]), Some("lloyd"));
+        assert_eq!(no_match.code, 1);
+        assert_eq!(no_match.stdout, None);
+    }
+
+    /// Asserts that a line that only holds the hang text in other words
+    /// is not the hang.
+    #[test]
+    fn only_the_whole_hang_line_is_the_hang() {
+        assert!(failed_only_by_the_hang(HUNG));
+        assert!(!failed_only_by_the_hang(
+            "Failed to detect test as having been run.\n"
+        ));
+        assert!(!failed_only_by_the_hang(
+            "note: Failed to detect test as having been run. It might have timed out. lloyd\n"
+        ));
+    }
+
+    /// The lines of each step of the workflow `ci` that uses
+    /// `nick-fields/retry`, trimmed.  A step goes from its `- ` line at
+    /// the step indent to the next one.
+    fn retry_steps(ci: &str) -> Vec<Vec<&str>> {
+        ci.split("\n      - ")
+            .filter(|step| step.contains("uses: nick-fields/retry@"))
+            .map(|step| step.lines().map(str::trim).collect())
+            .collect()
+    }
+
+    /// Findings 1-5 of review round 1 and 3-10 of review round 3 of M3 of
+    /// `gpu-speed`.  Asserts that CI has 2 retry steps, and that each:
+    /// * runs `xtask -- web-test`;
+    /// * retries on [`HANG_EXIT_CODE`] only;
+    /// * has `warning_on_retry: true`;
+    /// * has no `retry_on`, which would retry each failure;
+    /// * has no `continue_on_error` and no step `continue-on-error`, which
+    ///   would pass a failed step;
+    /// * has no `new_command_on_retry`, which would run another command.
+    #[test]
+    fn ci_runs_web_test_again_only_after_the_hang() {
+        let steps = retry_steps(include_str!("../../.github/workflows/ci.yml"));
+        assert_eq!(steps.len(), 2, "{steps:?}");
+        let code = format!("retry_on_exit_code: {HANG_EXIT_CODE}");
+        for lines in steps {
+            assert!(
+                lines
+                    .iter()
+                    .any(|l| l.starts_with("command: cargo run --locked -p xtask -- web-test ")),
+                "{lines:?}"
+            );
+            assert!(lines.contains(&code.as_str()), "{lines:?}");
+            assert!(lines.contains(&"warning_on_retry: true"), "{lines:?}");
+            for refused in [
+                "retry_on:",
+                "continue_on_error:",
+                "continue-on-error:",
+                "new_command_on_retry:",
+            ] {
+                assert!(
+                    !lines.iter().any(|l| l.starts_with(refused)),
+                    "{refused} {lines:?}"
+                );
+            }
+        }
     }
 
     #[test]

@@ -13,6 +13,7 @@ use stem_protocol::decode::{
     ClassicRequest, DecodeReply, DecodeRequest, LaneEncoding, LaneRef, OverviewLane,
     OverviewsRequest, Source, WorkerRequest,
 };
+use stem_protocol::write::{Body, Outcome, WriteReply, WriteRequest};
 use stem_protocol::{
     Encode, Encoded, Malformed, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker,
 };
@@ -1520,4 +1521,244 @@ fn a_message_for_one_worker_is_not_read_as_one_for_the_other() {
         let err = Reply::from_js(&post(&msg, &transfer)).expect_err("not a stem worker reply");
         assert_eq!(err.kind, reply.kind());
     }
+    // The write worker (M5.1): none of its messages is read by the other
+    // two workers or by the page's readers of their replies, and it reads
+    // none of theirs.
+    for request in write_requests() {
+        let (msg, transfer) = request.to_js();
+        let msg = post(&msg, &transfer);
+        assert!(ToWorker::from_js(&msg).is_err(), "{}", request.kind());
+        assert!(WorkerRequest::from_js(&msg).is_err(), "{}", request.kind());
+        assert!(DecodeRequest::from_js(&msg).is_err(), "{}", request.kind());
+    }
+    for reply in write_replies() {
+        let (msg, transfer) = reply.to_js();
+        let msg = post(&msg, &transfer);
+        let err = Reply::from_js(&msg).expect_err("not a stem worker reply");
+        assert_eq!(err.kind, reply.kind());
+        let err = DecodeReply::from_js(&msg).expect_err("not a decode reply");
+        assert_eq!(err.kind, reply.kind());
+    }
+    let (msg, transfer) = Request::Init.to_js(&Settings::default());
+    assert!(WriteRequest::from_js(&post(&msg, &transfer)).is_err());
+    for request in worker_requests() {
+        let (msg, transfer) = request.to_js();
+        assert!(WriteRequest::from_js(&post(&msg, &transfer)).is_err());
+    }
+    for reply in decode_replies() {
+        let (msg, transfer) = reply.to_js();
+        let err = WriteReply::from_js(&post(&msg, &transfer)).expect_err("not a write reply");
+        assert_eq!(err.kind, reply.kind());
+    }
+    let (msg, transfer) = Reply::Alive.to_js();
+    assert!(WriteReply::from_js(&post(&msg, &transfer)).is_err());
+}
+
+/// `n` bytes, each its index modulo 251, in a whole array of their own.
+fn numbered(n: u32) -> Uint8Array {
+    let bytes: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
+    Uint8Array::from(&bytes[..])
+}
+
+/// The typed array of a write request or reply, if any.
+fn array_of_request(request: &WriteRequest) -> Option<Uint8Array> {
+    match request {
+        WriteRequest::File {
+            body: Body::Bytes(bytes),
+            ..
+        }
+        | WriteRequest::Block { bytes, .. } => Some(bytes.clone()),
+        WriteRequest::File { .. } | WriteRequest::End { .. } => None,
+    }
+}
+
+/// A write request as text, with its bytes or the size of its `Blob`.
+fn request_text(request: &WriteRequest) -> String {
+    match request {
+        WriteRequest::File { within, rel, body } => {
+            let body = match body {
+                Body::Blob(blob) => format!("blob of {} bytes", blob.size()),
+                Body::Bytes(bytes) => format!("bytes {:?}", bytes.to_vec()),
+            };
+            format!("file {within:?} {rel:?} {body}")
+        }
+        WriteRequest::Block {
+            within,
+            rel,
+            at,
+            bytes,
+        } => format!("block {within:?} {rel:?} at {at} {:?}", bytes.to_vec()),
+        WriteRequest::End { within, rel, size } => format!("end {within:?} {rel:?} {size:?}"),
+    }
+}
+
+/// A write reply as text, with its bytes.
+fn reply_text(reply: &WriteReply) -> String {
+    match reply {
+        WriteReply::Ready => "ready".into(),
+        WriteReply::Done { outcome, bytes } => format!(
+            "done {outcome:?} {:?}",
+            bytes.as_ref().map(Uint8Array::to_vec)
+        ),
+    }
+}
+
+fn write_requests() -> Vec<WriteRequest> {
+    vec![
+        WriteRequest::File {
+            within: String::new(),
+            rel: "sessions/1792640000000/src/0.wav".into(),
+            body: Body::Blob(blob(b"lloyd")),
+        },
+        WriteRequest::File {
+            within: "sessions/1792640000000".into(),
+            rel: "stems/bass.wav.page.part".into(),
+            body: Body::Bytes(numbered(300)),
+        },
+        WriteRequest::Block {
+            within: "sessions/1792640000000".into(),
+            rel: "mix.f32.part".into(),
+            at: 1_048_576,
+            bytes: numbered(4),
+        },
+        WriteRequest::Block {
+            within: String::new(),
+            rel: "saves/1-1.wav".into(),
+            at: 0,
+            bytes: numbered(44),
+        },
+        WriteRequest::End {
+            within: "sessions/1792640000000".into(),
+            rel: "mix.f32.part".into(),
+            size: Some(84_672_000),
+        },
+        WriteRequest::End {
+            within: String::new(),
+            rel: "saves/1-1.wav".into(),
+            size: None,
+        },
+    ]
+}
+
+fn write_replies() -> Vec<WriteReply> {
+    vec![
+        WriteReply::Ready,
+        WriteReply::Done {
+            outcome: Outcome::Written,
+            bytes: None,
+        },
+        WriteReply::Done {
+            outcome: Outcome::Written,
+            bytes: Some(numbered(8)),
+        },
+        WriteReply::Done {
+            outcome: Outcome::Gone,
+            bytes: Some(numbered(2)),
+        },
+        WriteReply::Done {
+            outcome: Outcome::Failed("QuotaExceededError".into()),
+            bytes: None,
+        },
+    ]
+}
+
+/// PROTO-1, MEM-2: each request of the write worker arrives intact
+/// through a structured clone, and its typed array is transferred: the
+/// page's array is empty after the post.
+#[wasm_bindgen_test]
+fn write_requests_arrive_intact_with_their_arrays_transferred() {
+    for request in write_requests() {
+        let want = request_text(&request);
+        let (msg, transfer) = request.to_js();
+        let got = WriteRequest::from_js(&post(&msg, &transfer)).map(|r| request_text(&r));
+        assert_eq!(got, Ok(want.clone()));
+        if let Some(sent) = array_of_request(&request) {
+            assert_eq!(sent.byte_length(), 0, "transferred: {want}");
+        } else {
+            assert_eq!(transfer.length(), 0, "a Blob is not transferred");
+        }
+    }
+}
+
+/// PROTO-1, MEM-2: each reply of the write worker arrives intact, the
+/// ready message too, and the array given back is transferred.
+#[wasm_bindgen_test]
+fn write_replies_arrive_intact_with_the_array_given_back() {
+    for reply in write_replies() {
+        let want = reply_text(&reply);
+        let (msg, transfer) = reply.to_js();
+        let got = WriteReply::from_js(&post(&msg, &transfer)).map(|r| reply_text(&r));
+        assert_eq!(got, Ok(want.clone()));
+        if let WriteReply::Done {
+            bytes: Some(bytes), ..
+        } = &reply
+        {
+            assert_eq!(bytes.byte_length(), 0, "transferred: {want}");
+        }
+    }
+}
+
+/// TD-16: a write message with a missing or wrong field is refused, with
+/// its type.
+#[wasm_bindgen_test]
+fn a_write_message_with_a_missing_or_wrong_field_is_refused() {
+    let requests = [
+        r#"{"type": "write-file", "rel": "a", "body": "lloyd"}"#,
+        r#"{"type": "write-file", "within": "", "body": "lloyd"}"#,
+        r#"{"type": "write-file", "within": "", "rel": "a"}"#,
+        r#"{"type": "write-file", "within": "", "rel": "a", "body": "lloyd"}"#,
+        r#"{"type": "write-block", "within": "", "rel": "a", "at": -1}"#,
+        r#"{"type": "write-block", "within": "", "rel": "a", "at": 1.5}"#,
+        r#"{"type": "write-block", "within": "", "rel": "a", "at": 0}"#,
+        r#"{"type": "write-end", "within": "", "rel": "a"}"#,
+        r#"{"type": "write-end", "within": "", "rel": "a", "size": -1}"#,
+        r#"{"type": "write-end", "within": "", "rel": "a", "size": "8"}"#,
+        r#"{"type": "write-end", "rel": "a", "size": 8}"#,
+    ];
+    for text in requests {
+        let msg = from_json(text);
+        let kind = WriteRequest::from_js(&msg).err().map(|e| e.kind);
+        assert_eq!(kind, Some(stem_protocol::kind_of(&msg)), "refused: {text}");
+    }
+    let replies = [
+        r#"{"type": "write-done"}"#,
+        r#"{"type": "write-done", "result": "lost"}"#,
+        r#"{"type": "write-done", "result": "failed"}"#,
+        r#"{"type": "write-done", "result": "written", "bytes": [1]}"#,
+        r#"{"type": "write-progress"}"#,
+    ];
+    for text in replies {
+        let msg = from_json(text);
+        let kind = WriteReply::from_js(&msg).err().map(|e| e.kind);
+        assert_eq!(kind, Some(stem_protocol::kind_of(&msg)), "refused: {text}");
+    }
+}
+
+/// Each write message names its kind, and each kind starts with
+/// `write-`.
+#[wasm_bindgen_test]
+fn each_write_message_names_its_kind() {
+    let requests: Vec<&str> = write_requests().iter().map(WriteRequest::kind).collect();
+    assert_eq!(
+        requests,
+        [
+            "write-file",
+            "write-file",
+            "write-block",
+            "write-block",
+            "write-end",
+            "write-end"
+        ]
+    );
+    let replies: Vec<&str> = write_replies().iter().map(WriteReply::kind).collect();
+    assert_eq!(
+        replies,
+        [
+            "write-ready",
+            "write-done",
+            "write-done",
+            "write-done",
+            "write-done"
+        ]
+    );
 }

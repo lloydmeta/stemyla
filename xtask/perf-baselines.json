@@ -1,0 +1,82 @@
+[
+  {
+    "key": {
+      "browser": "chrome",
+      "adapter": "apple metal-3",
+      "chip": "Apple M2 Pro"
+    },
+    "version": "157.0.8103.51",
+    "date": "2026-11-14",
+    "commit": "9d6d447",
+    "runs": [
+      {
+        "order": 1,
+        "kernels": "matmul v64,v64, attention vfused",
+        "chunk_lower_quartile": 3.58
+      },
+      {
+        "order": 2,
+        "kernels": "matmul v64,v64, attention vfused",
+        "chunk_lower_quartile": 3.59
+      },
+      {
+        "order": 3,
+        "kernels": "matmul v64,v64, attention vfused",
+        "chunk_lower_quartile": 3.59
+      },
+      {
+        "order": 4,
+        "kernels": "matmul v64,v64, attention vfused",
+        "chunk_lower_quartile": 3.6
+      },
+      {
+        "order": 5,
+        "kernels": "matmul v64,v64k8, attention vfused",
+        "chunk_lower_quartile": 3.61
+      }
+    ],
+    "baseline": 3.59,
+    "tolerance_pct": 10.0,
+    "raise": ""
+  },
+  {
+    "key": {
+      "browser": "safari",
+      "adapter": "apple apple apple",
+      "chip": "Apple M2 Pro"
+    },
+    "version": "27.2",
+    "date": "2026-11-14",
+    "commit": "9d6d447",
+    "runs": [
+      {
+        "order": 1,
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.58
+      },
+      {
+        "order": 2,
+        "kernels": "matmul v64k8,v64, attention vfused",
+        "chunk_lower_quartile": 5.55
+      },
+      {
+        "order": 3,
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.57
+      },
+      {
+        "order": 4,
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.57
+      },
+      {
+        "order": 5,
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.58
+      }
+    ],
+    "baseline": 5.57,
+    "tolerance_pct": 10.0,
+    "raise": ""
+  }
+]

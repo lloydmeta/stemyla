@@ -17,6 +17,13 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and the numbers of phases 2 and 3b.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
+* `plans/active/gpu-speed.md`: faster separation on Apple GPUs, in Safari first, with no loss on other GPUs.  A perf gate, and `memory-budget` at the default chunk.
+* `plans/active/gpu-speed-m51.md`: M5.1 of `plans/active/gpu-speed.md`: test runs and the app leave no browser data that grows with the runs.  Chrome profiles go, and Safari's write-stream swap files are found and cut.
+* `plans/completed/gpu-speed-m5.md`: M5 of `plans/active/gpu-speed.md`, done on 2026-11-14: calibration times whole time-transformer steps (`FUSED_MARGIN` 1.0), and `vfused`, a fused attention with vec4 reads that both browsers choose: a separation 20 % to 22 % faster.
+* `plans/completed/gpu-speed-m4.md`: M4 of `plans/active/gpu-speed.md`, done on 2026-11-13: `v64k8`, `v64` with a K tile of 8, as a calibration candidate that Safari chooses.  Also the rule for a shown gain, the same-session comparison (`e2e perf --base-dist`) and `--raise` for each raise of a bound.
+* `plans/completed/gpu-speed-m3.md`: M3 of `plans/active/gpu-speed.md`, done on 2026-11-13: why Safari runs the same WGSL slower than Chrome, with WebKit's zero-init of workgroup memory as one cause, and the start points of M4 and M5.
+* `plans/completed/gpu-speed-m2.md`: M2 of `plans/active/gpu-speed.md`, done on 2026-11-12: the scenario `e2e perf`, its baselines on the M2 Pro, and its gate in `check --tier push`.
+* `plans/completed/gpu-speed-m1.md`: M1 of `plans/active/gpu-speed.md`, done on 2026-11-12: `memory-budget` at the default chunk, with four checks for MEM-4, and cuts of the worker's working set.
 * `plans/active/tech-debt-rungs.md`: the open entries of `tech-debt.md`, sorted by impact and effort, and closed in three PRs.
 * `plans/completed/tech-debt-rungs-m2.md`: M2 of `plans/active/tech-debt-rungs.md`, rung 2, done on 2026-11-11: the dev tools at their new pins, Safari in `web-test` and CI, TD-8 (the wasm GPU tests), the resampler on wasm32, the decode worker's tests in Safari, TD-92 and TD-93.
 * `plans/completed/tech-debt-rungs-m2-td97.md`: step 11 of M2 of `plans/active/tech-debt-rungs.md`, done on 2026-11-12: the page's memory check of `e2e save` in Safari, now a bound of 3 MiB from the measured spread.
@@ -84,6 +91,8 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0028-m4a-with-alac-as-the-save-format.md`: the app saves 16-bit stereo ALAC M4A, written by the Pure crate `m4a` with a safe port of `alac-encoder` 0.3.0 (accepted, amended 2026-11-08 and 2026-11-10).
 * `decisions/0029-m4a-is-apache-2-only.md`: the crate `m4a` is Apache-2.0 only, since its ALAC encoder is a port of Apple's Apache-2.0 reference (accepted).
 * `decisions/0030-the-save-check-counts-the-heap.md`: a count of the page's Rust heap for the memory check of `e2e save` (rejected; the check keeps the memory's growth, with a bound of 3 MiB).
+* `decisions/0031-the-push-tier-runs-the-perf-gate.md`: tier `push`, when asked, runs `e2e perf --gate` in Chrome and Safari when `STEMYLA_PERF_WEIGHTS` names the model and the paths change GPU or worker code (accepted).
+* `decisions/0032-a-write-worker-crate.md`: a page-side worker crate writes the page's song-sized files through sync access handles, since Safari keeps a swap file of each write stream that closes (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References
@@ -92,6 +101,8 @@ Distilled facts from outside the repo, each with its source and the date it was 
 
 * `references/browser-quirks.md`: Safari, Web Audio and WebGPU behaviour the code works around.
 * `references/webgpu-limits.md`: the WebGPU default limits every kernel must fit (GPU-1).
+* `references/webkit-bug-workgroup-zero-init.md`: a WebKit bug text for the maintainer to file: Safari sets workgroup memory to zero with one thread.
+* `references/webkit-bug-writable-swap-file.md`: a WebKit bug text for the maintainer to file: Safari keeps the temporary file of each OPFS write stream that closes.
 * `references/local-browser-testing.md`: running `xtask web-test` and `xtask e2e` on the maintainer's Mac: Safari, Chrome, model files and known local failures; reading an iPhone's memory kills.
 
 ## Conventions

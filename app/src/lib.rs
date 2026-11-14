@@ -31,6 +31,7 @@ pub mod store;
 pub mod store_meta;
 #[cfg(target_arch = "wasm32")]
 pub mod streamtest;
+pub mod writer;
 
 /// Lanes that are not parts of the mix: computed from the others, or the
 /// original recording kept beside its separated stems.  They start muted,

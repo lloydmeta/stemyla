@@ -36,7 +36,12 @@
 //!   lag 0 (M8, M3 and M4 of `docs/plans/completed/m4a.md`, `e2e/save.rs`).
 //! * `bench`: `?bench`, every matmul kernel on every model shape (WebGPU).
 //! * `selftest`: `?selftest`, the GPU against the CPU reference files
-//!   (`--weights`, and `xtask roformer-selftest` output).
+//!   (`--weights`, and `xtask roformer-selftest` output).  With no
+//!   `--query`, it tests `mm=s64`.  A `--query` with no `selftest` key
+//!   gets `selftest=stages&` before it: `--query mm=<kernel>` tests that
+//!   kernel, and `--query selftest=stages` tests the kernels that the GPU
+//!   chooses.  A `--query` with no `step_limit` that has a number gets
+//!   `step_limit=600` at its end.
 //! * `separate`: drop a clip and the model, Separate, lanes appear
 //!   (`--weights`).  The clip is kept in browser storage, so it separates
 //!   on the storage path; a fallback to the memory path fails it.  The clip
@@ -46,26 +51,92 @@
 //! * `memory-budget`: separate songs of 1 and 4 minutes, each in a new
 //!   browser, and print the peak memory of each and the difference
 //!   (`--weights`).  M2 of `docs/plans/completed/stream-from-storage.md`.
-//! * `memory-budget` also prints how much the page's and the worker's
-//!   WebAssembly memory grew during each separation, and fails if either
-//!   is more than 4 MB (D9 of M3 in
+//! * `memory-budget` runs at the default chunk, with no query unless
+//!   `--query` gives one.  It prints how much the page's and the worker's
+//!   WebAssembly memory grew during each separation.  It fails if the
+//!   page's is more than 4 MB (D9 of M3 in
 //!   `docs/plans/completed/stream-from-storage-m3.md`, step 4 of M4).  The
-//!   page's growth includes its write of the mix.  A fallback to the
-//!   memory path fails it.  It also checks that the page and the decode
-//!   worker grow by at most 4 MB while the song opens, and that Separate
-//!   writes no second mix (M5); `separate` checks that too.  Since M7, the
-//!   page's growth from the separation's end to the stems shown must be at
-//!   most 4 MB more for the 4-minute song than for the 1-minute song: the
-//!   stems show as stored lanes, with no read-back.
+//!   page's growth includes its write of the mix.  The worker grows by
+//!   one chunk's working set, so it has four checks (M1 of
+//!   `docs/plans/active/gpu-speed.md`).  It stays flat after chunk 2.  It
+//!   grows by at most 4 MB more for the 4-minute song than for the
+//!   1-minute song.  Its growth fits the working set's peak plus a
+//!   measured headroom.  The tab total fits the iPhone's budget (MEM-4).
+//!   A fallback to the memory path fails it.  It also checks that the
+//!   page and the decode worker grow by at most 4 MB while the song opens,
+//!   and that Separate writes no second mix (M5); `separate` checks that
+//!   too.  Since M7, the page's growth from the separation's end to the
+//!   stems shown must be at most 4 MB more for the 4-minute song than for
+//!   the 1-minute song: the stems show as stored lanes, with no read-back.
 //! * `stored-stems`: one worker separates 3 seconds of the synthetic mix on the
 //!   memory path, then on the storage path into a session folder, from a mix
 //!   file there (`--weights`).  Each stem file equals the memory path's stem as
 //!   a 16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
-//!   checks them against `--hashes`.
+//!   checks them against `--hashes`.  It runs `mm=s64` at a chunk of 16,384
+//!   samples, with `attn=split` unless `--query` sets `attn`.  It fails
+//!   when the worker does not run the asked `attn` (`auto` asks for none).
 //! * `weights`: f16 weights against f32 weights, from a blank page
 //!   (`--weights`; M9 of `docs/plans/completed/stream-from-storage.md`).  The
 //!   stems of the two formats must be equal bit for bit, with M3's kernels
 //!   and with this GPU's own; the speed is reported as a measure.
+//! * `perf`: separates the 1-minute song of `memory-budget` at the default
+//!   chunk, `--runs N` times (default 1), each in a new browser profile
+//!   (`--weights`; M2 of `docs/plans/active/gpu-speed.md`, `e2e/perf.rs`).
+//!   Each run writes `<out>/perf-<browser>-<n>.json`: the browser and its
+//!   version, the adapter and its `isFallbackAdapter`, the kernels, the
+//!   time of each chunk, the median and the lower quartile of chunks 2 to
+//!   N, the whole time and the matmul rate.  With `--query profile=1`, it
+//!   adds the GPU time in four groups.  The key of a baseline in
+//!   `xtask/perf-baselines.json` is the browser, the adapter text and the
+//!   host's chip (`sysctl`).  A run fails when its chunk lower quartile is
+//!   over the key's baseline by more than the tolerance.  With no baseline,
+//!   it is not gated; `--gate` makes that a failure.  A profile run is
+//!   never gated, also with `--gate`.  A fallback adapter value other than
+//!   `no`, a software adapter (SwiftShader, llvmpipe, lavapipe, Basic
+//!   Render), `--swiftshader`, `--headed` in Chrome, f32 weights, or a
+//!   query that
+//!   sets `chunk`, `overlap`, `max_elems`, `mm`, `attn`, `weights`, `bench`
+//!   or `selftest` is
+//!   never a pass: `--gate` and `--update-baselines` fail it.
+//!   `--update-baselines` with `--runs 5` or more writes the key's
+//!   baseline.  In an update, a run over the old bound gives a note, and
+//!   `update_refusal` decides: it refuses each raise of the bound, with
+//!   any browser version, unless `--raise "<reason>"` gives the reason.
+//!   After a browser update, the reason names it, for example
+//!   `--raise "Safari 27.2 to 27.3"`.
+//!   With `--base-dist DIR`, `perf` runs the same-session comparison of
+//!   the base page in `DIR` and the head page in `--dist`, with HEAD's
+//!   `xtask` for both.  It runs blocks of 4 runs in the order base, head,
+//!   head, base.  `--runs` is the count of each side: even, and 4 or more.
+//!   It starts with `--runs` / 2 blocks, then runs one more block at a
+//!   time until a verdict.  It runs 4 blocks at most, or `--runs` / 2 when
+//!   that is more.  Each run writes
+//!   `<out>/perf-<browser>-<base or head>-<n>.json`.  The figure of a run
+//!   is its chunk lower quartile.  The change of a block is
+//!   `(H1 + H2) / (B1 + B2) - 1`.  A block is a loss over `CHANGE_T`, a
+//!   gain under `-CHANGE_T`, else no change.  A block is spoiled when the
+//!   two runs of a side chose the same kernels and differ by more than
+//!   `SPOIL_N`.  A spoiled block does not count.  When each side chose one
+//!   set of kernels, the verdict is the class of 2 blocks or more
+//!   (`perf::compared`).  It allows at most one block of another class,
+//!   and not a loss and a gain together; else it is undecided.  When the
+//!   runs of a side chose different kernels, it runs each block up to that
+//!   most.  Then the verdict is the class of the mean change of the blocks
+//!   that are not spoiled, and needs 2 of them (`perf::mean_verdict`).
+//!   "3 % or more" then uses the size of that mean.  It prints each kernel
+//!   choice with its count, under "kernels differ".  `--query` applies to
+//!   both sides.  `--head-query Q` sets each key of `Q` on the head's
+//!   query: a key of both takes the head's value, and a new key goes at
+//!   the end (`perf::side_query`).  The output gives the query of each
+//!   side before the first run.  A comparison refuses `attn=split` and
+//!   `attn=time` in `--query` or `--head-query`, since both split the
+//!   frequency axis.  It fails a run whose `kernels:` line does not name
+//!   the `attn` that its side's query forces (`attn=auto` forces none).
+//!   `perf` refuses `--head-query` without `--base-dist`.  It refuses
+//!   `--gate`, `--update-baselines` and `--swiftshader`.  It refuses a run
+//!   on a fallback or a software adapter (GPU-3).  It refuses a run whose
+//!   chunk times have 1 decimal: the oldest base is `59da862`, the first
+//!   commit that logs them with 2.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -73,9 +144,17 @@
 //! WebGPU, for machines without a GPU), `--query Q` (page URL query for
 //! the GPU scenarios), `--weights FILE`, `--selftest-dir DIR`,
 //! `--reference DIR`, `--download`, `--flac`, `--hashes H1,...,H6` (the
-//! six SHA-256s of `stored-stems`, in the worker's stem order), and click
+//! six SHA-256s of `stored-stems`, in the worker's stem order), `--runs N`,
+//! `--gate`, `--update-baselines`, `--raise REASON`, `--base-dist DIR` and
+//! `--head-query Q` (`perf`), and click
 //! positions `--play-x`,
 //! `--tempo-x`, `--download-x`, `--separate-x` (CSS pixels in the top bar).
+//!
+//! Each scenario has a time limit from its start ([`scenario_limit_secs`]).
+//! Each run of `perf` has its own limit, from when the run opens its page
+//! ([`Opts::deadline`]).  At the limit, a wait fails with one line
+//! ([`limit_line`]).  Its error
+//! drops the page, which ends the WebDriver session and stops the driver.
 //!
 //! Classic WebDriver has no console events and no init scripts, so the
 //! server adds `xtask/e2e/*.js` to the page (`xtask serve --inject`): one
@@ -93,6 +172,7 @@ use std::time::{Duration, Instant};
 
 mod decode;
 mod old_session;
+mod perf;
 mod playback;
 mod save;
 mod weights;
@@ -108,8 +188,113 @@ const ITEM_X: f64 = 100.0;
 const ITEM_Y: f64 = 168.0;
 const ITEM_DY: f64 = 21.0;
 /// The longest wait, in seconds, for a run of the model on the GPU: 4
-/// hours, for a slow GPU or SwiftShader.
+/// hours, for a slow GPU or SwiftShader.  The scenario's time limit
+/// ([`scenario_limit_secs`]) can end a wait sooner.
 const MODEL_RUN_SECS: u64 = 4 * 3600;
+
+/// The scenarios of `xtask e2e`, in the order of its usage text.
+const SCENARIOS: [&str; 16] = [
+    "smoke",
+    "decode",
+    "playback",
+    "old-session",
+    "audio-resume",
+    "storage",
+    "flac",
+    "save",
+    "bench",
+    "selftest",
+    "separate",
+    "worker-check",
+    "memory-budget",
+    "stored-stems",
+    "weights",
+    "perf",
+];
+
+/// The time limit of `smoke`, `decode`, `playback`, `old-session`,
+/// `audio-resume` and `flac`, in seconds.  CI run 40894815433 ran these and
+/// `storage` in 4.0 minutes together.  `old-session` took 46 s on CI, and
+/// `flac` 26 s on the maintainer's Mac.
+const NO_MODEL_LIMIT_S: u64 = 15 * 60;
+/// The time limit of `storage`, in seconds.  With `--weights`, it also loads
+/// a real model, and no run of that was measured.
+const STORAGE_LIMIT_S: u64 = 30 * 60;
+/// The time limit of one run of `perf`, in seconds, from when the run opens
+/// its page.  On 2026-11-12, a run took 99 s in Safari and 70 s in Chrome
+/// on the M2 Pro.
+const PERF_RUN_LIMIT_S: u64 = 10 * 60;
+/// The time limit of `bench`, `selftest`, `separate`, `worker-check`,
+/// `stored-stems` and `memory-budget`, in seconds.  No whole run of these was
+/// measured, so the limit is generous.
+const GPU_LIMIT_S: u64 = 60 * 60;
+/// The time limit of `weights`, in seconds.  No whole run was measured, so
+/// the limit is generous.  Its part 3 alone separates about 60 s of audio 10
+/// times.  Each took 70 to 95 s on the Radeon (`stream-from-storage-m9.md`).
+const WEIGHTS_LIMIT_S: u64 = 2 * 60 * 60;
+
+/// The time limit of a scenario, in seconds, from the start of `xtask e2e`;
+/// `None` for a name that is not a scenario.  `perf` has this limit for each
+/// run, from when the run opens its page ([`Opts::deadline`]).  A scenario
+/// that runs the model has [`MODEL_RUN_SECS`] with `swiftshader`, since no
+/// such run was measured.
+///
+/// `save` has the limit of its CI step ([`save::STEP_LIMIT_S`]).  On CI, the
+/// step's clock starts before `cargo` builds xtask, so the step limit ends
+/// `save` first, with no limit line (TD-100).  The risk is low.  Each wait of
+/// `save` has its own end.  CI discards a hosted runner after the job, with
+/// its browser and driver.
+fn scenario_limit_secs(scenario: &str, swiftshader: bool) -> Option<u64> {
+    let model_run = |secs| if swiftshader { MODEL_RUN_SECS } else { secs };
+    Some(match scenario {
+        "smoke" | "decode" | "playback" | "old-session" | "audio-resume" | "flac" => {
+            NO_MODEL_LIMIT_S
+        }
+        "storage" => STORAGE_LIMIT_S,
+        "save" => save::STEP_LIMIT_S,
+        "bench" | "selftest" | "separate" | "worker-check" | "stored-stems" | "memory-budget" => {
+            model_run(GPU_LIMIT_S)
+        }
+        "weights" => model_run(WEIGHTS_LIMIT_S),
+        "perf" => model_run(PERF_RUN_LIMIT_S),
+        _ => return None,
+    })
+}
+
+/// The line of a scenario that its time limit stops.
+fn limit_line(scenario: &str, limit_secs: u64, what: &str) -> String {
+    format!(
+        "e2e {scenario} FAILED: its time limit of {limit_secs} s ended while it waited for {what}"
+    )
+}
+
+/// What a wait does next.
+#[derive(Debug, PartialEq, Eq)]
+enum WaitState {
+    /// It waits on.
+    Going,
+    /// It ends with no match, at its own end.
+    Ended,
+    /// It fails, since the scenario's time limit ended first.
+    OverLimit,
+}
+
+/// The state at `now` of a wait that ends by itself at `own_end`, in a
+/// scenario whose time limit ends at `deadline`.  A wait whose own end comes
+/// first is never over the limit; the next wait is.
+fn wait_state(now: Instant, own_end: Instant, deadline: Instant) -> WaitState {
+    if own_end <= deadline {
+        if now > own_end {
+            WaitState::Ended
+        } else {
+            WaitState::Going
+        }
+    } else if now >= deadline {
+        WaitState::OverLimit
+    } else {
+        WaitState::Going
+    }
+}
 
 const SWIFTSHADER: [&str; 7] = [
     "--enable-unsafe-webgpu",
@@ -137,6 +322,20 @@ pub struct Opts {
     pub flac: bool,
     /// `stored-stems` checks the stems' SHA-256s against these.
     pub hashes: Option<String>,
+    /// `perf`: the number of runs, each in a new browser profile.
+    pub runs: usize,
+    /// `perf`: a run with no baseline, or that is never a pass, fails.  A
+    /// profile run is not gated, also with this option.
+    pub gate: bool,
+    /// `perf`: the runs write the baseline of their key.
+    pub update_baselines: bool,
+    /// `perf`: the reason of a raise of the bound.
+    pub raise: Option<String>,
+    /// `perf`: the page of the base of a same-session comparison.
+    pub base_dist: Option<PathBuf>,
+    /// `perf --base-dist`: the keys that the head's query sets on
+    /// `--query` ([`perf::side_query`]).
+    pub head_query: Option<String>,
     pub play_x: f64,
     pub tempo_x: f64,
     pub download_x: f64,
@@ -149,6 +348,11 @@ pub struct Opts {
     pub item_y: f64,
     /// The rows of the Save menu's items, in CSS pixels.
     pub item_dy: f64,
+    /// When the options were read, the start of the scenario's time limit
+    /// ([`Opts::deadline`]).
+    pub started: Instant,
+    /// The scenario's time limit, in seconds ([`scenario_limit_secs`]).
+    pub limit_secs: u64,
 }
 
 impl Opts {
@@ -156,10 +360,9 @@ impl Opts {
         let scenario = args
             .first()
             .filter(|s| !s.starts_with("--"))
-            .context(
-                "usage: xtask e2e <smoke|decode|playback|old-session|audio-resume|storage|flac|save|bench|selftest|separate|worker-check|memory-budget|stored-stems> [options]",
-            )?
+            .with_context(|| format!("usage: xtask e2e <{}> [options]", SCENARIOS.join("|")))?
             .clone();
+        let started = Instant::now();
         // Defaults are in the workspace, wherever this runs from.
         let root = crate::workspace_root();
         let mut o = Self {
@@ -176,6 +379,12 @@ impl Opts {
             download: false,
             flac: false,
             hashes: None,
+            runs: 1,
+            gate: false,
+            update_baselines: false,
+            raise: None,
+            base_dist: None,
+            head_query: None,
             // Positions in the 1100-pixel top bar with no model loaded.
             play_x: 600.0,
             // 75% on the 50..150% tempo slider while playing ("Pause" is
@@ -191,6 +400,9 @@ impl Opts {
             item_x: ITEM_X,
             item_y: ITEM_Y,
             item_dy: ITEM_DY,
+            started,
+            // Set from the scenario and its options after the loop.
+            limit_secs: 0,
         };
         let mut i = 1;
         while i < args.len() {
@@ -214,6 +426,12 @@ impl Opts {
                 "--download" => o.download = true,
                 "--flac" => o.flac = true,
                 "--hashes" => o.hashes = Some(value()?),
+                "--runs" => o.runs = value()?.parse()?,
+                "--gate" => o.gate = true,
+                "--update-baselines" => o.update_baselines = true,
+                "--raise" => o.raise = Some(value()?),
+                "--base-dist" => o.base_dist = Some(value()?.into()),
+                "--head-query" => o.head_query = Some(value()?),
                 "--play-x" => o.play_x = value()?.parse()?,
                 "--tempo-x" => o.tempo_x = value()?.parse()?,
                 "--download-x" => o.download_x = value()?.parse()?,
@@ -227,7 +445,23 @@ impl Opts {
             }
             i += 1;
         }
+        o.limit_secs = scenario_limit_secs(&o.scenario, o.swiftshader)
+            .with_context(|| format!("unknown scenario {}", o.scenario))?;
         Ok(o)
+    }
+
+    /// The end of the time limit of a page that opens at `opened`.  The
+    /// limit of `perf` starts when each run opens its page, so each run has
+    /// its own.  The limit of another scenario starts at [`Opts::started`].
+    fn deadline(&self, opened: Instant) -> Result<Instant> {
+        let start = if self.scenario == "perf" {
+            opened
+        } else {
+            self.started
+        };
+        start
+            .checked_add(Duration::from_secs(self.limit_secs))
+            .context("the time limit is too long")
     }
 
     fn weights(&self) -> Result<&Path> {
@@ -247,6 +481,12 @@ pub fn run(args: &[String]) -> Result<()> {
     let on_macos = cfg!(target_os = "macos");
     crate::drivers::refuse_a_locked_screen(o.browser, on_macos, crate::drivers::ioreg_root)?;
     let _active = crate::drivers::keep_user_active(o.browser, on_macos, crate::drivers::caffeinate);
+    // Its drop reports what Safari left, after each driver of the run ended.
+    let _safari_data = crate::drivers::watch_safari_data(
+        o.browser,
+        on_macos,
+        crate::drivers::darwin_user_temp_dir,
+    );
     if !o.dist.join("index.html").is_file() {
         bail!(
             "{} has no index.html (build the app first: cd app && trunk build --release)",
@@ -270,6 +510,7 @@ pub fn run(args: &[String]) -> Result<()> {
         "memory-budget" => memory_budget(&o),
         "stored-stems" => stored_stems(&o),
         "weights" => weights::run(&o),
+        "perf" => perf(&o),
         other => bail!("unknown scenario {other}"),
     }
 }
@@ -289,16 +530,22 @@ fn start_server(dist: &Path, mut mounts: serve::Mounts, inject: &[&str]) -> Resu
 
 /// One browser on one page, with the page's console as it arrives.
 /// Its log is written to `<out>/<scenario>.log` when it is dropped, so a
-/// scenario that stops early still leaves one.
+/// scenario that stops early still leaves one.  A drop also ends the
+/// WebDriver session, then stops the driver process.  A wait past the
+/// scenario's time limit gives an error, so its `?` drops the page.
 struct Page {
     session: Session,
-    _driver: Driver,
+    /// `None` only for a page on a fake driver in a test.
+    _driver: Option<Driver>,
     base: String,
     t0: Instant,
     log: Vec<String>,
     out: PathBuf,
     scenario: String,
     failures: Vec<String>,
+    /// The end of the scenario's time limit.
+    deadline: Instant,
+    limit_secs: u64,
 }
 
 impl Page {
@@ -315,17 +562,20 @@ impl Page {
         // draws with, unless it may fall back to SwiftShader.
         args.push("--enable-unsafe-swiftshader".into());
         args.push(format!("--window-size={},{}", VIEWPORT.0, VIEWPORT.1));
+        let deadline = o.deadline(Instant::now())?;
         let (driver, session) = start_session(o.browser, &args)?;
         let tries = session.set_viewport(VIEWPORT.0, VIEWPORT.1)?;
         let mut page = Self {
             session,
-            _driver: driver,
+            _driver: Some(driver),
             base,
             t0: Instant::now(),
             log: Vec::new(),
             out: o.out.clone(),
             scenario: o.scenario.clone(),
             failures: Vec::new(),
+            deadline,
+            limit_secs: o.limit_secs,
         };
         page.note(&format!("viewport: {}", tries.join("; ")));
         page.session.goto(&page.url(path))?;
@@ -365,13 +615,15 @@ impl Page {
     }
 
     /// The first log line after `from` that `matches`, waiting up to `secs`.
+    /// Past the scenario's time limit, an error that names `what`.
     fn wait_for(
         &mut self,
         from: usize,
         secs: u64,
+        what: &str,
         matches: impl Fn(&str) -> bool,
     ) -> Result<Option<String>> {
-        let until = Instant::now() + Duration::from_secs(secs);
+        let own_end = Instant::now() + Duration::from_secs(secs);
         loop {
             self.poll()?;
             if let Some(l) = self.log[from.min(self.log.len())..]
@@ -380,21 +632,57 @@ impl Page {
             {
                 return Ok(Some(l.clone()));
             }
-            if Instant::now() > until {
-                return Ok(None);
+            match wait_state(Instant::now(), own_end, self.deadline) {
+                WaitState::Going => std::thread::sleep(Duration::from_millis(250)),
+                WaitState::Ended => return Ok(None),
+                WaitState::OverLimit => return Err(self.over_limit(what)),
             }
-            std::thread::sleep(Duration::from_millis(250));
         }
     }
 
-    /// Lets the page run for `secs`, collecting its console.
+    /// Lets the page run for `secs`, collecting its console.  Past the
+    /// scenario's time limit, an error.
     fn idle(&mut self, secs: f64) -> Result<()> {
-        let until = Instant::now() + Duration::from_secs_f64(secs);
-        while Instant::now() < until {
-            self.poll()?;
-            std::thread::sleep(Duration::from_millis(250));
+        let own_end = Instant::now() + Duration::from_secs_f64(secs);
+        loop {
+            match wait_state(Instant::now(), own_end, self.deadline) {
+                WaitState::Going => {
+                    self.poll()?;
+                    std::thread::sleep(Duration::from_millis(250));
+                }
+                WaitState::Ended => return Ok(()),
+                WaitState::OverLimit => {
+                    return Err(self.over_limit(&format!("the page to run for {secs} s")));
+                }
+            }
         }
-        Ok(())
+    }
+
+    /// Runs `script` in the page through `execute_async`, for up to `secs`
+    /// but not past the scenario's time limit.  Past the limit, an error
+    /// that names `what`.
+    fn run_script(&mut self, script: &str, args: Value, secs: u64, what: &str) -> Result<Value> {
+        let own_end = Instant::now() + Duration::from_secs(secs);
+        let over =
+            |p: &Self| wait_state(Instant::now(), own_end, p.deadline) == WaitState::OverLimit;
+        if over(self) {
+            return Err(self.over_limit(what));
+        }
+        let timeout = own_end
+            .min(self.deadline)
+            .saturating_duration_since(Instant::now());
+        match self.session.execute_async(script, args, timeout) {
+            Err(_) if over(self) => Err(self.over_limit(what)),
+            result => result,
+        }
+    }
+
+    /// The error of a wait for `what` past the scenario's time limit.  The
+    /// log gets its line too.
+    fn over_limit(&mut self, what: &str) -> anyhow::Error {
+        let line = limit_line(&self.scenario, self.limit_secs, what);
+        self.note(&line);
+        anyhow::anyhow!(line)
     }
 
     fn check(&mut self, ok: bool, what: &str) {
@@ -437,7 +725,7 @@ impl Page {
             .iter()
             .map(|(url, name, kind)| json!({ "url": url, "name": name, "type": kind }))
             .collect();
-        let dropped = self.session.execute_async(
+        let dropped = self.run_script(
             r#"const [files, done] = arguments;
             (async () => {
               const dt = new DataTransfer();
@@ -452,7 +740,8 @@ impl Page {
               return dt.files.length;
             })().then(done, (e) => done(`error: ${e}`));"#,
             json!([files]),
-            Duration::from_secs(300),
+            300,
+            "the drop of the files",
         )?;
         self.note(&format!("dropped {dropped} files"));
         if dropped.as_u64() != Some(files.len() as u64) {
@@ -593,7 +882,7 @@ fn smoke(o: &Opts) -> Result<()> {
         &["--autoplay-policy=no-user-gesture-required"],
         "index.html",
     )?;
-    let ready = p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    let ready = p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     p.check(ready.is_some(), "the app started");
     p.screenshot("smoke_empty")?;
     let webgl2 = p.session.execute(
@@ -612,7 +901,7 @@ fn smoke(o: &Opts) -> Result<()> {
         .collect();
     let from = p.mark();
     p.drop_files(&drop)?;
-    let kept = p.wait_for(from, 60, |l| {
+    let kept = p.wait_for(from, 60, "the dropped stems to be kept", |l| {
         l.contains("song kept in browser storage as session")
     })?;
     p.check(kept.is_some(), "the dropped stems open and are kept");
@@ -621,10 +910,12 @@ fn smoke(o: &Opts) -> Result<()> {
 
     let from = p.mark();
     p.click(o.play_x, "Play")?;
-    let played = p.wait_for(from, 60, played_a_second)?;
+    let played = p.wait_for(from, 60, "the playhead to move", played_a_second)?;
     p.check(played.is_some(), "the playhead moves after Play");
     // M6: every lane of the dropped stems plays from browser storage.
-    let stored = p.wait_for(from, 60, |l| playback::playback_line(l).is_some())?;
+    let stored = p.wait_for(from, 60, "a playback line", |l| {
+        playback::playback_line(l).is_some()
+    })?;
     let line = stored.as_deref().and_then(playback::playback_line);
     p.check(
         playback::all_from_storage(line.as_ref(), 5),
@@ -649,7 +940,7 @@ fn smoke(o: &Opts) -> Result<()> {
             .first()
             .is_some_and(|(t, _)| (0.70..=0.80).contains(t))
     };
-    let tempo = p.wait_for(from, 60, near_75)?;
+    let tempo = p.wait_for(from, 60, "the tempo of about 75%", near_75)?;
     p.check(tempo.is_some(), "the tempo slider sets about 75%");
     p.idle(3.0)?;
     p.screenshot("smoke_playing")?;
@@ -684,15 +975,17 @@ fn audio_resume(o: &Opts) -> Result<()> {
         &["--autoplay-policy=user-gesture-required"],
         "index.html",
     )?;
-    p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     let from = p.mark();
     p.drop_files(&[("/input/song.wav", "song.wav", "audio/wav")])?;
-    let kept = p.wait_for(from, 60, |l| l.contains("song kept in browser storage"))?;
+    let kept = p.wait_for(from, 60, "the song to be kept in browser storage", |l| {
+        l.contains("song kept in browser storage")
+    })?;
     p.check(kept.is_some(), "the song is kept in browser storage");
 
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, 60, |l| {
+    let restored = p.wait_for(from, 60, "the song to restore at page load", |l| {
         l.contains("Restored \"song\" from this browser")
     })?;
     p.check(restored.is_some(), "the song is restored at page load");
@@ -711,7 +1004,7 @@ fn audio_resume(o: &Opts) -> Result<()> {
     p.click(o.play_x, "Play")?;
     // A busy machine plays slower than real time, so this waits for the
     // playhead rather than for a fixed time.
-    let played = p.wait_for(from, 60, played_a_second)?;
+    let played = p.wait_for(from, 60, "the playhead to move", played_a_second)?;
     p.check(played.is_some(), "one click on Play starts playback");
     check_web_buffers(&mut p, from);
     p.screenshot("audio_resume")?;
@@ -749,7 +1042,7 @@ fn audio_resume(o: &Opts) -> Result<()> {
     )?;
     p.reload()?;
     let from = p.mark();
-    let with_stems = p.wait_for(from, 60, |l| {
+    let with_stems = p.wait_for(from, 60, "the song to restore with its stems", |l| {
         l.contains("Restored \"song\" and its separated stems from this browser")
     })?;
     p.check(
@@ -806,17 +1099,19 @@ fn drip(mut stream: TcpStream) -> Result<()> {
 }
 
 /// Runs `script` (an async function body using the page's `e2e` helpers;
-/// its result is returned) in the worker page.
+/// its result is returned) in the worker page.  Past the scenario's time
+/// limit, an error that names the place of the call.
+#[track_caller]
 fn in_page(p: &mut Page, script: &str, args: Value, secs: u64) -> Result<Value> {
+    let caller = std::panic::Location::caller();
     let wrapped = format!(
         "const done = arguments[arguments.length - 1];
         (async (...args) => {{ {script} }})(...arguments).then(
           (r) => done({{ ok: r }}),
           (e) => done({{ error: String(e && e.stack || e) }}));"
     );
-    let r = p
-        .session
-        .execute_async(&wrapped, args, Duration::from_secs(secs))?;
+    let what = format!("the page script of {}:{}", caller.file(), caller.line());
+    let r = p.run_script(&wrapped, args, secs, &what)?;
     p.poll()?;
     if let Some(e) = r.get("error") {
         bail!("in the page: {}", e.as_str().unwrap_or_default());
@@ -968,9 +1263,11 @@ fn storage(o: &Opts) -> Result<()> {
     p.session
         .goto(&p.url("index.html?model_url=/__e2e/blank.html"))?;
     let from = p.mark();
-    p.wait_for(from, 60, |l| l.contains("separator: "))?;
+    p.wait_for(from, 60, "the app to start", |l| l.contains("separator: "))?;
     p.click(o.download_x, "Download model")?;
-    let got = p.wait_for(from, 60, |l| l.contains(not_a_model))?;
+    let got = p.wait_for(from, 60, "the refusal of a file that is not a model", |l| {
+        l.contains(not_a_model)
+    })?;
     p.check(
         got.is_some(),
         "the app downloads from ?model_url= and refuses a non-model",
@@ -1152,7 +1449,7 @@ fn bench(o: &Opts) -> Result<()> {
         &format!("index.html?{q}"),
     )?;
     // Any error ends the wait (no WebGPU adapter, say), not only the verdict.
-    let verdict = p.wait_for(0, MODEL_RUN_SECS, |l| {
+    let verdict = p.wait_for(0, MODEL_RUN_SECS, "the end of the bench", |l| {
         l.contains("bench finished") || l.contains("WebGPU error") || is_page_error(l)
     })?;
     p.note(&format!("verdict: {verdict:?}"));
@@ -1194,6 +1491,34 @@ fn drop_model(p: &mut Page, url: &str) -> Result<()> {
     p.drop_files(&[(url, &name, "application/octet-stream")])
 }
 
+/// The query of `selftest`: with no `--query`, the default
+/// (`selftest=stages&step_limit=600&mm=s64`).  A `--query` with no
+/// `selftest` key gets `selftest=stages&` before it, so `--query
+/// mm=v64k8` tests `v64k8`, and `--query selftest=stages` tests the
+/// kernels that the GPU chooses.  A `--query` with no `step_limit` that
+/// has a number gets `step_limit=600` too.
+fn selftest_query(query: Option<&str>) -> String {
+    let Some(query) = query else {
+        return "selftest=stages&step_limit=600&mm=s64".to_string();
+    };
+    let query = query.trim_start_matches('?');
+    let has = |key: &str| {
+        query
+            .split('&')
+            .any(|pair| pair.split('=').next() == Some(key))
+    };
+    let step_limit = query.split('&').any(|pair| {
+        pair.split_once('=')
+            .is_some_and(|(key, value)| key == "step_limit" && value.parse::<f64>().is_ok())
+    });
+    match (has("selftest"), step_limit) {
+        (true, true) => query.to_string(),
+        (true, false) => format!("{query}&step_limit=600"),
+        (false, true) => format!("selftest=stages&{query}"),
+        (false, false) => format!("selftest=stages&{query}&step_limit=600"),
+    }
+}
+
 /// The in-app GPU self-test's verdict, with the model
 /// dropped on the page (the file picker cannot be driven over WebDriver).
 fn selftest(o: &Opts) -> Result<()> {
@@ -1206,18 +1531,18 @@ fn selftest(o: &Opts) -> Result<()> {
     }
     let model = weights_mount(o, &mut mounts)?;
     let base = start_server(&o.dist, mounts, &["console.js"])?;
-    let q = query(o, "selftest=stages&step_limit=600&mm=s64");
+    let q = selftest_query(o.query.as_deref());
     let mut p = Page::open(
         o,
         base,
         &["--enable-unsafe-webgpu"],
         &format!("index.html?{q}"),
     )?;
-    p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     drop_model(&mut p, &model)?;
     // A model that does not load never starts the self-test, so its
     // message ends the wait too.
-    let verdict = p.wait_for(0, MODEL_RUN_SECS, |l| {
+    let verdict = p.wait_for(0, MODEL_RUN_SECS, "the verdict of the self-test", |l| {
         l.contains("selftest passed")
             || l.contains("selftest FAILED")
             || l.contains("could not be loaded")
@@ -1330,12 +1655,12 @@ fn separate(o: &Opts) -> Result<()> {
         ],
         &format!("index.html?{q}"),
     )?;
-    p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     p.screenshot("separate_empty")?;
     let from = p.mark();
     p.drop_files(&[(&format!("/test/{}", c.file), c.file, c.media_type)])?;
     // Two seconds at 44.1 kHz are 88,200 frames.
-    let opened = p.wait_for(from, 60, |l| l.contains("song: opened"))?;
+    let opened = p.wait_for(from, 60, "the clip to open", |l| l.contains("song: opened"))?;
     p.note(&format!("opened: {opened:?}"));
     p.check(
         opened
@@ -1343,12 +1668,14 @@ fn separate(o: &Opts) -> Result<()> {
             .is_some_and(|l| l.contains("at 44100 Hz") && l.contains("(88200 frames)")),
         &format!("the {} Hz clip opens at 44.1 kHz", c.rate),
     );
-    let kept = p.wait_for(from, 60, |l| l.contains("song kept in browser storage"))?;
+    let kept = p.wait_for(from, 60, "the clip to be kept in browser storage", |l| {
+        l.contains("song kept in browser storage")
+    })?;
     p.check(kept.is_some(), "the clip opens");
     p.screenshot("separate_song")?;
     let from = p.mark();
     drop_model(&mut p, &model)?;
-    let loaded = p.wait_for(from, 1200, |l| {
+    let loaded = p.wait_for(from, 1200, "the model to load", |l| {
         l.contains("separator: model loaded")
             || l.contains("could not be loaded")
             || l.contains("not a BS-RoFormer")
@@ -1365,7 +1692,7 @@ fn separate(o: &Opts) -> Result<()> {
     p.screenshot("separate_model")?;
     let from = p.mark();
     p.click(o.separate_x, "Separate 6 stems")?;
-    let done = p.wait_for(from, MODEL_RUN_SECS, |l| {
+    let done = p.wait_for(from, MODEL_RUN_SECS, "the stems", |l| {
         (l.contains("separator: ") && l.contains(" stems in ")) || is_page_error(l)
     })?;
     p.note(&format!("separated: {done:?}"));
@@ -1412,11 +1739,20 @@ struct MemoryPeak {
 }
 
 impl MemoryPeak {
-    /// The sum of the parts' peaks: at most the peak of their sum.
+    /// The sum of the parts' peaks, and the write worker's
+    /// [`WRITE_WORKER_WASM_MB`]: at least the peak of their sum, so a
+    /// budget on it is safe.
     fn total(&self) -> f64 {
-        self.page_wasm + self.worker_wasm + self.decoder_wasm + self.gpu_live
+        self.page_wasm + self.worker_wasm + self.decoder_wasm + self.gpu_live + WRITE_WORKER_WASM_MB
     }
 }
+
+/// The write worker's WebAssembly memory, in MB, which no log line gives
+/// (M5.1 of `plans/active/gpu-speed.md`).  Its module starts with 17 pages
+/// of 64 KiB (1.11 MB, the memory section of `write-worker_bg.wasm` on
+/// 2026-11-14).  It holds only each request's paths in Rust; the bytes
+/// stay in JS.  So 2 pages more than its start bound it: 1.25 MB.
+const WRITE_WORKER_WASM_MB: f64 = 1.25;
 
 /// The largest value of each part in the `memory: ...` lines of `log`, or
 /// `None` if a part never appears.
@@ -1454,8 +1790,12 @@ fn long_song(out: &Path, minutes: u32) -> Result<PathBuf> {
 
 /// The tolerance of M10 for memory that must not grow with the song, in
 /// MB.  The checks that use it:
-/// * the page's and the worker's growth during a separation (D9 of M3,
-///   step 4 of M4: [`growth_check`]);
+/// * the page's growth during a separation (D9 of M3, step 4 of M4:
+///   [`growth_check`]);
+/// * the worker's growth after chunk 2 of a separation (M1 of the GPU
+///   speed plan: [`flat_after_warm_up_check`]);
+/// * the worker's growth during the separation of the 4-minute song
+///   against the 1-minute song (M1: [`song_growth_check`]);
 /// * the page's and the decode worker's growth during an open (D12 of M5:
 ///   [`open_growth_check`]);
 /// * the page's growth to show the stems, the 4-minute song against the
@@ -1470,8 +1810,8 @@ fn separation_shown(line: &str) -> bool {
     line.contains("with the stems shown") || is_page_error(line)
 }
 
-/// The check of D9 of M3 on the growth of `part` (the page or the
-/// worker) during a separation.
+/// The check of D9 of M3 on the growth of `part` (the page) during a
+/// separation.  The worker has the checks of M1 of the GPU speed plan.
 fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
     (
         growth.is_some_and(|g| g <= MAX_GROWTH_MB),
@@ -1479,6 +1819,208 @@ fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
             "the {part} grew by {growth:?} MB during the separation, at most {MAX_GROWTH_MB} MB"
         ),
     )
+}
+
+/// The headroom of the worker's growth during a separation above the
+/// peak of its working set (`roformer::separate::working_set`), in MB,
+/// at the default chunk and overlap with f16 weights.  It is the
+/// allocator's overhead, its fragmentation and the rounding to 64 KiB
+/// pages, less the heap that is free at the separation's start.  So it
+/// can be less than 0.
+///
+/// The proof (step 8 of M1, 2026-11-12, at the default chunk with f16
+/// weights): 3 runs of `memory-budget` in Chrome 157 and 3 in Safari 27.2
+/// gave 12 growths, each 57 MB.  The peak is 80.16 MB, so each headroom is
+/// -23.16 MB, with a spread of 0.  The worker logs whole MB, so a growth
+/// has an error of up to 1 MB.  So the measured noise is 1 MB: the spread
+/// and the log's error.  The taken noise is 2.16 MB, the orchestrator's
+/// choice: it adds the 1.16 MB margin of the earlier constant, -22
+/// MB.  The smallest rise of the peak from a lost cut in the GPU half is
+/// 9.44 MB (cut 3: the whole normalised input, 89.60 MB against 80.16
+/// MB).  The margin above the measured headroom is midway between the
+/// taken noise and that rise, so that the check is no nuisance (the
+/// maintainer, 2026-11-12): -23.16 + (2.16 + 9.44) / 2 = -17.36, rounded
+/// to -17 MB.  So the budget is 63.16 MB, 6.16 MB above the measured
+/// growth of 57 MB.  The taken noise (57 + 2.16 MB) does not fail it, and
+/// a lost cut 3 (57 + 9.44 = 66.44 MB) does.
+const WORKER_HEADROOM_MB: f64 = -17.0;
+
+/// MEM-4's budget for the tab during a separation, in MB: page wasm,
+/// worker wasm, decoder wasm, the write worker's wasm
+/// ([`WRITE_WORKER_WASM_MB`]) and GPU live bytes.  It is the 1,100 MB of
+/// M10 of `plans/completed/stream-from-storage.md`, less an MP3 save's
+/// frames (141 MB) and a save's page memory (16 MB), since
+/// `memory-budget` runs no save.  The 1,100 MB leaves about 950 MB under
+/// the iPhone's 2,048 MB for WebKit, the JS heap and WebGL, which no check
+/// measures (TD-11).  It assumes f16 weights.
+const TAB_BUDGET_MB: f64 = 943.0;
+
+/// The text that the worker logs with f32 weights on the GPU.
+const F32_WEIGHTS: &str = "f32 weights";
+
+/// The chunk that a worker's line `chunk k/N: ...` reports done: k.
+fn chunk_done(line: &str) -> Option<u32> {
+    let rest = &line[line.find("chunk ")? + "chunk ".len()..];
+    let (done, rest) = rest.split_once('/')?;
+    let total = rest.split(':').next()?;
+    if total.is_empty() || !total.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    done.parse().ok()
+}
+
+/// Check 1 of M1: flat after the warm-up.  The worker's WebAssembly
+/// memory grows by at most [`MAX_GROWTH_MB`] from its line after chunk 2
+/// to each later chunk's line and to the separation's end.  A missing
+/// line of chunk 2 or of the end fails it.
+fn flat_after_warm_up_check(log: &[String]) -> (bool, String) {
+    let chunks: Vec<(u32, f64)> = log
+        .iter()
+        .filter_map(|l| Some((chunk_done(l)?, number_after(l, "worker wasm ")?)))
+        .collect();
+    let at_two = chunks.iter().find(|(k, _)| *k == 2).map(|(_, mb)| *mb);
+    let end = log
+        .iter()
+        .find(|l| l.contains("at the separation's end"))
+        .and_then(|l| number_after(l, "worker wasm "));
+    let highest = chunks
+        .iter()
+        .filter(|(k, _)| *k > 2)
+        .map(|(_, mb)| *mb)
+        .chain(end)
+        .reduce(f64::max);
+    match (at_two, end, highest) {
+        (Some(base), Some(_), Some(top)) => (
+            top <= base + MAX_GROWTH_MB,
+            format!(
+                "the worker stays flat after the warm-up: {base:.0} MB after chunk 2, at most {top:.0} MB after it, at most {MAX_GROWTH_MB} MB more (margin {:.1} MB)",
+                base + MAX_GROWTH_MB - top
+            ),
+        ),
+        _ => (
+            false,
+            format!(
+                "the worker stays flat after the warm-up: no line of chunk 2 ({at_two:?}) or of the separation's end ({end:?})"
+            ),
+        ),
+    }
+}
+
+/// Check 2 of M1: no growth with the song.  The 4-minute song's worker
+/// growth during the separation is at most [`MAX_GROWTH_MB`] above the
+/// 1-minute song's.
+fn song_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
+    let text = format!(
+        "the worker grows by {long:?} MB during the separation of the long song, and by {short:?} MB for the short one: at most {MAX_GROWTH_MB} MB more"
+    );
+    match (short, long) {
+        (Some(s), Some(l)) => (
+            l <= s + MAX_GROWTH_MB,
+            format!("{text} (margin {:.1} MB)", s + MAX_GROWTH_MB - l),
+        ),
+        _ => (false, text),
+    }
+}
+
+/// The budget of check 3, in MB: the peak of the working set at the
+/// default chunk and overlap, plus [`WORKER_HEADROOM_MB`].
+fn working_set_budget_mb() -> f64 {
+    roformer::separate::working_set(roformer::CHUNK, roformer::OVERLAP)
+        .peak()
+        .bytes() as f64
+        / 1e6
+        + WORKER_HEADROOM_MB
+}
+
+/// Whether the page query `query` sets the chunk or the overlap.
+fn sets_the_chunk(query: &str) -> bool {
+    query
+        .split('&')
+        .map(|kv| kv.split('=').next().unwrap_or(""))
+        .any(|key| key == "chunk" || key == "overlap")
+}
+
+/// Check 3 of M1: a working-set budget.  The worker's growth during a
+/// separation is at most [`working_set_budget_mb`].  It gives `None`, not
+/// checked, for a query that sets the chunk or the overlap, or a log with
+/// f32 weights: the headroom is measured only at the default chunk with
+/// f16 weights.  Its text names the peak's phase, moment and parts, so a
+/// failure names the buffers to look at.
+fn working_set_check(growth: Option<f64>, query: &str, log: &[String]) -> (Option<bool>, String) {
+    let set = roformer::separate::working_set(roformer::CHUNK, roformer::OVERLAP);
+    let peak = set.peak();
+    let parts: Vec<String> = peak
+        .largest()
+        .parts
+        .iter()
+        .map(|p| format!("{} {:.2}", p.name, p.bytes as f64 / 1e6))
+        .collect();
+    let budget = working_set_budget_mb();
+    let text = format!(
+        "the worker grew by {growth:?} MB during the separation, at most {budget:.2} MB: the working set's peak {:.2} MB (the {} phase, at {}: {}) plus a headroom of {WORKER_HEADROOM_MB} MB",
+        peak.bytes() as f64 / 1e6,
+        peak.name,
+        peak.largest().at,
+        parts.join(", ")
+    );
+    if sets_the_chunk(query) {
+        return (
+            None,
+            format!(
+                "{text}: not checked, since the query {query:?} sets the chunk or the overlap, and the headroom is measured at the default chunk"
+            ),
+        );
+    }
+    if log.iter().any(|l| l.contains(F32_WEIGHTS)) {
+        return (
+            None,
+            format!(
+                "{text}: not checked, since the worker has f32 weights, and the headroom is measured with f16 weights"
+            ),
+        );
+    }
+    match growth {
+        Some(g) => (
+            Some(g <= budget),
+            format!("{text} (margin {:.2} MB)", budget - g),
+        ),
+        None => (Some(false), text),
+    }
+}
+
+/// Check 4 of M1: a tab total for the iPhone (MEM-4).  The sum of the
+/// four peaks and the write worker's memory ([`MemoryPeak::total`]) is at
+/// most [`TAB_BUDGET_MB`].  It
+/// gives `None`, not checked, for a log with f32 weights, since the
+/// budget assumes f16 weights (TD-63).
+fn tab_total_check(peak: Option<MemoryPeak>, log: &[String]) -> (Option<bool>, String) {
+    if log.iter().any(|l| l.contains(F32_WEIGHTS)) {
+        return (
+            None,
+            format!(
+                "the tab total {:?} MB: not checked, since the budget assumes f16 weights (TD-63)",
+                peak.map(|p| p.total())
+            ),
+        );
+    }
+    match peak {
+        Some(p) => (
+            Some(p.total() <= TAB_BUDGET_MB),
+            format!(
+                "the tab total is {:.0} MB (page wasm {:.0}, worker wasm {:.0}, decoder wasm {:.0}, write worker wasm {WRITE_WORKER_WASM_MB}, GPU live {:.0}), at most {TAB_BUDGET_MB} MB (margin {:.0} MB)",
+                p.total(),
+                p.page_wasm,
+                p.worker_wasm,
+                p.decoder_wasm,
+                p.gpu_live,
+                TAB_BUDGET_MB - p.total()
+            ),
+        ),
+        None => (
+            Some(false),
+            "the tab total: a part of the memory lines is missing".into(),
+        ),
+    }
 }
 
 /// How much the worker's WebAssembly memory grew from the start of a
@@ -1611,21 +2153,30 @@ fn shown_growth_check(short: Option<f64>, long: Option<f64>) -> (bool, String) {
 /// starts with empty WebAssembly memory.  Prints the peak of page wasm,
 /// worker wasm, decoder wasm and GPU live bytes for each, and their
 /// difference.  It also prints how much the page and the worker grew during
-/// each separation.  It fails if the song does not open, the model does not
-/// load, the song does not separate, or the memory lines are missing.  The
-/// growth and path checks fail it too:
-/// * if the page or the worker grows by more than [`MAX_GROWTH_MB`] during
-///   a separation ([`growth_check`]);
-/// * if the page or the decode worker grows by more than that during the
-///   open ([`open_growth_check`]);
+/// each separation.  It runs at the default chunk, the chunk that users
+/// run.  It fails if the song does not open, the model does not load, the
+/// song does not separate, or the memory lines are missing.  The growth,
+/// memory and path checks fail it too:
+/// * if the page grows by more than [`MAX_GROWTH_MB`] during a separation
+///   ([`growth_check`]);
+/// * if the worker grows by more than that after chunk 2
+///   ([`flat_after_warm_up_check`]);
+/// * if the worker grows by more than that more for the 4-minute song than
+///   for the 1-minute song ([`song_growth_check`]);
+/// * if the worker grows by more than the working set's peak plus the
+///   headroom ([`working_set_check`]), at the default chunk with f16
+///   weights;
+/// * if the sum of the four peaks and the write worker's memory is over
+///   [`TAB_BUDGET_MB`]
+///   ([`tab_total_check`]), with f16 weights;
+/// * if the page or the decode worker grows by more than [`MAX_GROWTH_MB`]
+///   during the open ([`open_growth_check`]);
 /// * if the page decodes the song on the main thread
 ///   ([`open_on_the_worker_check`]);
 /// * if Separate writes a second mix ([`no_mix_write_check`]);
 /// * if the 4-minute song's growth to show the stems is more than that
 ///   above the 1-minute song's ([`shown_growth_check`]);
 /// * if a separation falls back to the memory path ([`no_fallback_check`]).
-///
-/// It asserts no budget for the peak yet; M10 of the plan does.
 fn memory_budget(o: &Opts) -> Result<()> {
     let mut mounts = Vec::new();
     for minutes in BUDGET_MINUTES {
@@ -1633,9 +2184,11 @@ fn memory_budget(o: &Opts) -> Result<()> {
     }
     let model = weights_mount(o, &mut mounts)?;
     let base = start_server(&o.dist, mounts, &["console.js"])?;
-    let q = query(o, "chunk=16384&overlap=1&mm=s64");
+    // Users run the defaults, so the scenario does too.
+    let q = query(o, "");
     let mut peaks = Vec::new();
     let mut shown_growths = Vec::new();
+    let mut worker_growths = Vec::new();
     for minutes in BUDGET_MINUTES {
         let mut p = Page::open(
             o,
@@ -1647,15 +2200,12 @@ fn memory_budget(o: &Opts) -> Result<()> {
             &format!("index.html?{q}"),
         )?;
         p.scenario = format!("memory-budget-{minutes}");
-        p.wait_for(0, 60, |l| l.contains("separator: "))?;
-        let from = p.mark();
-        p.drop_files(&[(
+        p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
+        let from = open_song(
+            &mut p,
             &format!("/test/{minutes}/song.wav"),
-            "song.wav",
-            "audio/wav",
-        )])?;
-        let kept = p.wait_for(from, 300, |l| l.contains("song kept in browser storage"))?;
-        p.check(kept.is_some(), &format!("the {minutes}-minute song opens"));
+            &format!("the {minutes}-minute song opens"),
+        )?;
         let (ok, what) = open_on_the_worker_check(&p.log[from..]);
         p.check(ok, &what);
         // D12 of M5: neither the page nor the decode worker grows with the
@@ -1672,39 +2222,39 @@ fn memory_budget(o: &Opts) -> Result<()> {
                 ));
             }
         }
-        let from = p.mark();
-        drop_model(&mut p, &model)?;
-        let loaded = p.wait_for(from, 1200, |l| holds_or_error(l, "separator: model loaded"))?;
-        p.check(
-            loaded
-                .as_deref()
-                .is_some_and(|l| l.contains("model loaded")),
-            "the model loads",
-        );
-        let from = p.mark();
-        p.click(o.separate_x, "Separate 6 stems")?;
-        let shown = p.wait_for(from, MODEL_RUN_SECS, separation_shown)?;
-        p.check(
-            shown
-                .as_deref()
-                .is_some_and(|l| l.contains("with the stems shown")),
+        let from = load_and_separate(
+            &mut p,
+            o,
+            &model,
             &format!("the {minutes}-minute song separates"),
-        );
+        )?;
         let (ok, what) = no_fallback_check(&p.log[from..]);
         p.check(ok, &what);
         let (ok, what) = no_mix_write_check(&p.log[from..]);
         p.check(ok, &what);
-        for (part, growth) in [
-            ("page", page_growth(&p.log[from..])),
-            ("worker", worker_growth(&p.log[from..])),
-        ] {
-            let (ok, what) = growth_check(part, growth);
-            p.check(ok, &what);
-            if let Some(g) = growth {
-                p.note(&format!(
-                    "memory-budget: the {minutes}-minute song: {part} wasm grew by {g:.0} MB during the separation"
-                ));
-            }
+        let growth = page_growth(&p.log[from..]);
+        let (ok, what) = growth_check("page", growth);
+        p.check(ok, &what);
+        if let Some(g) = growth {
+            p.note(&format!(
+                "memory-budget: the {minutes}-minute song: page wasm grew by {g:.0} MB during the separation"
+            ));
+        }
+        // M1 of `plans/active/gpu-speed.md`: the worker grows by one
+        // chunk's working set, then stays flat.
+        let growth = worker_growth(&p.log[from..]);
+        if let Some(g) = growth {
+            p.note(&format!(
+                "memory-budget: the {minutes}-minute song: worker wasm grew by {g:.0} MB during the separation"
+            ));
+        }
+        worker_growths.push(growth);
+        let (ok, what) = flat_after_warm_up_check(&p.log[from..]);
+        p.check(ok, &what);
+        let (ok, what) = working_set_check(growth, &q, &p.log);
+        match ok {
+            Some(ok) => p.check(ok, &what),
+            None => p.note(&what),
         }
         let growth = shown_growth(&p.log[from..]);
         p.note(&format!(
@@ -1724,6 +2274,11 @@ fn memory_budget(o: &Opts) -> Result<()> {
             ));
             peaks.push((minutes, peak));
         }
+        let (ok, what) = tab_total_check(peak, &p.log);
+        match ok {
+            Some(ok) => p.check(ok, &what),
+            None => p.note(&what),
+        }
         p.finish()?;
     }
     if let [(short, a), (long, b)] = peaks[..] {
@@ -1733,14 +2288,313 @@ fn memory_budget(o: &Opts) -> Result<()> {
         );
     }
     // M7: the stems show with no read-back, so showing them does not grow
-    // with the song.
-    let (ok, what) = shown_growth_check(
-        shown_growths.first().copied().flatten(),
-        shown_growths.last().copied().flatten(),
+    // with the song.  M1 of the GPU speed plan: nor does the worker.
+    let checks = [
+        shown_growth_check(
+            shown_growths.first().copied().flatten(),
+            shown_growths.last().copied().flatten(),
+        ),
+        song_growth_check(
+            worker_growths.first().copied().flatten(),
+            worker_growths.last().copied().flatten(),
+        ),
+    ];
+    for (ok, what) in &checks {
+        println!(
+            "memory-budget: {} {what}",
+            if *ok { "ok:" } else { "FAIL:" }
+        );
+    }
+    verdict(&checks)
+}
+
+/// Drops the WAV at `url` on the page, waits until the song is kept in
+/// browser storage, and checks `what` on it.  Returns the log's mark
+/// before the drop.
+fn open_song(p: &mut Page, url: &str, what: &str) -> Result<usize> {
+    let from = p.mark();
+    p.drop_files(&[(url, "song.wav", "audio/wav")])?;
+    let kept = p.wait_for(from, 300, "the song to be kept in browser storage", |l| {
+        l.contains("song kept in browser storage")
+    })?;
+    p.check(kept.is_some(), what);
+    Ok(from)
+}
+
+/// Drops the model at `model`, waits until it loads, clicks Separate and
+/// waits until the stems are shown; checks the load, and `what` on the
+/// stems.  Returns the log's mark before the click.
+fn load_and_separate(p: &mut Page, o: &Opts, model: &str, what: &str) -> Result<usize> {
+    let from = p.mark();
+    drop_model(p, model)?;
+    let loaded = p.wait_for(from, 1200, "the model to load", |l| {
+        holds_or_error(l, "separator: model loaded")
+    })?;
+    p.check(
+        loaded
+            .as_deref()
+            .is_some_and(|l| l.contains("model loaded")),
+        "the model loads",
     );
-    println!("memory-budget: {} {what}", if ok { "ok:" } else { "FAIL:" });
-    if !ok {
-        bail!("memory-budget FAILED: {what}");
+    let separated_from = p.mark();
+    p.click(o.separate_x, "Separate 6 stems")?;
+    let shown = p.wait_for(
+        separated_from,
+        MODEL_RUN_SECS,
+        "the stems to show",
+        separation_shown,
+    )?;
+    p.check(
+        shown
+            .as_deref()
+            .is_some_and(|l| l.contains("with the stems shown")),
+        what,
+    );
+    Ok(separated_from)
+}
+
+/// `e2e perf`: separates the 1-minute song of `memory-budget` at the
+/// default chunk, `--runs` times, each in a new browser profile.  Each
+/// run writes `<out>/perf-<browser>-<n>.json` and is gated against the
+/// baseline of its key (`perf.rs`).  With `--base-dist`, it runs the
+/// same-session comparison instead ([`perf_compare`]).
+fn perf(o: &Opts) -> Result<()> {
+    if let Some(refusal) = perf::query_refusal(
+        o.base_dist.is_some(),
+        o.query.as_deref(),
+        o.head_query.as_deref(),
+    ) {
+        bail!("perf: {refusal}");
+    }
+    if let Some(base_dist) = &o.base_dist {
+        return perf_compare(o, base_dist);
+    }
+    if let Some(refusal) = perf::runs_refusal(
+        o.runs,
+        o.update_baselines,
+        o.query.as_deref().unwrap_or_default(),
+    ) {
+        bail!("perf: {refusal}");
+    }
+    let path = perf::baselines_path();
+    let baselines =
+        perf::read_baselines(&std::fs::read_to_string(&path)?).map_err(anyhow::Error::msg)?;
+    if let Some(refusal) = perf::file_refusal(&baselines, &path) {
+        bail!("perf: {refusal}");
+    }
+    let site = PerfSite::start(o, &o.dist)?;
+    let browser = perf::browser_name(o.browser);
+    let chip = perf::command_text("sysctl", &["-n", "machdep.cpu.brand_string"]);
+    let mut results = Vec::new();
+    for n in 1..=o.runs {
+        let name = format!("perf-{browser}-{n}");
+        let (mut p, result) = perf_run(o, &site, &query(o, ""), &name)?;
+        if let Some(result) = result {
+            let key = perf::key_of(&result, &chip);
+            let never = perf::never_a_pass(&result, o);
+            let baseline = perf::entry_of(&baselines, &key);
+            match perf::outcome(
+                &result,
+                &key,
+                never.as_deref(),
+                baseline,
+                o.gate,
+                o.update_baselines,
+            ) {
+                perf::Outcome::Note(text) => p.note(&format!("perf: {text}")),
+                perf::Outcome::Fail(text) => p.check(false, &format!("run {n}: {text}")),
+            }
+            results.push(result);
+        }
+        p.finish()?;
+    }
+    if o.update_baselines {
+        let date = perf::command_text("date", &["+%Y-%m-%d"]);
+        let commit = perf::command_text("git", &["rev-parse", "--short", "HEAD"]);
+        let raise = o.raise.as_deref().unwrap_or_default();
+        let entry =
+            perf::new_entry(&results, &chip, &date, &commit, raise).map_err(anyhow::Error::msg)?;
+        let old = perf::entry_of(&baselines, &entry.key);
+        if let Some(refusal) = perf::update_refusal(old, &entry, raise) {
+            bail!("perf: the update is refused: {refusal}");
+        }
+        println!("perf: {}", perf::update_line(old, &entry));
+        std::fs::write(
+            &path,
+            perf::write_baselines(&perf::with_entry(baselines, entry)),
+        )?;
+        println!("perf: wrote {}", path.display());
+    }
+    Ok(())
+}
+
+/// The server of one page of `e2e perf`, with the song and the model.
+struct PerfSite {
+    base: String,
+    model: String,
+}
+
+impl PerfSite {
+    /// Serves the page in `dist`, the 1-minute song and the model.
+    fn start(o: &Opts, dist: &Path) -> Result<Self> {
+        let mut mounts = vec![("/test/1/".to_string(), long_song(&o.out, 1)?)];
+        let model = weights_mount(o, &mut mounts)?;
+        let base = start_server(dist, mounts, &["console.js"])?;
+        Ok(Self { base, model })
+    }
+}
+
+/// One run of `e2e perf` on the page of `site` with the query `q`, as
+/// `name`: it writes
+/// `<out>/<name>.json` and prints its line.  It gives the
+/// page, which the caller finishes, and the result, or `None` when the
+/// log gives none (a failed check of the page).
+fn perf_run(
+    o: &Opts,
+    site: &PerfSite,
+    q: &str,
+    name: &str,
+) -> Result<(Page, Option<perf::PerfResult>)> {
+    let browser = perf::browser_name(o.browser);
+    let (frames, bands) = perf::perf_axes();
+    let mut p = Page::open(
+        o,
+        site.base.clone(),
+        &[
+            "--enable-unsafe-webgpu",
+            "--autoplay-policy=no-user-gesture-required",
+        ],
+        &format!("index.html?{q}"),
+    )?;
+    p.scenario = name.to_string();
+    p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
+    open_song(&mut p, "/test/1/song.wav", "the 1-minute song opens")?;
+    load_and_separate(&mut p, o, &site.model, "the 1-minute song separates")?;
+    let version = p.session.version.clone();
+    let result = match perf::perf_result(&p.log, browser, &version, frames, bands) {
+        Err(e) => {
+            p.check(false, &format!("the result of run {name}: {e}"));
+            None
+        }
+        Ok(result) => {
+            let file = o.out.join(format!("{name}.json"));
+            std::fs::write(&file, serde_json::to_string_pretty(&result)?)?;
+            p.note(&format!(
+                "perf: {browser} {version}, run {name}: chunk lower quartile {:.2} s, chunk median {:.2} s, whole {:.1} s, {:.2} TFLOP/s, kernels {}, {} weights, adapter {} (fallback adapter {}); {}",
+                result.chunk_lower_quartile,
+                result.chunk_median,
+                result.whole_secs,
+                result.tflops,
+                result.kernels,
+                result.weights,
+                result.adapter,
+                result.fallback,
+                file.display()
+            ));
+            if let Some(g) = &result.groups {
+                p.note(&format!(
+                    "perf: GPU time by group: time-axis attention {:.3} s, frequency-axis attention {:.3} s, linear products {:.3} s, other {:.3} s, total {:.3} s",
+                    g.time_attention, g.freq_attention, g.linear, g.other, g.total
+                ));
+            }
+            Some(result)
+        }
+    };
+    Ok((p, result))
+}
+
+/// The sites of a same-session comparison: one for the base page in
+/// `--base-dist`, one for the head page in `--dist`, each with the query
+/// of its side ([`perf::side_query`]).
+struct CompareSites<T> {
+    base: T,
+    head: T,
+    base_query: String,
+    head_query: String,
+}
+
+impl<T> CompareSites<T> {
+    /// Starts the site of each side of `o` with `start`: the base with
+    /// `--base-dist`, then the head with `--dist`.
+    fn start(o: &Opts, mut start: impl FnMut(&Path) -> Result<T>) -> Result<Self> {
+        let base_dist = o.base_dist.as_deref().context("no --base-dist")?;
+        let base = start(base_dist)?;
+        let head = start(&o.dist)?;
+        let side_query = |side| perf::side_query(o.query.as_deref(), o.head_query.as_deref(), side);
+        Ok(Self {
+            base,
+            head,
+            base_query: side_query(perf::Side::Base),
+            head_query: side_query(perf::Side::Head),
+        })
+    }
+
+    /// The site of `side`.
+    fn of(&self, side: perf::Side) -> &T {
+        match side {
+            perf::Side::Base => &self.base,
+            perf::Side::Head => &self.head,
+        }
+    }
+
+    /// The page queries of the base and the head, in that order, as
+    /// `perf::run_comparison` takes them.
+    fn queries(&self) -> [&str; 2] {
+        [&self.base_query, &self.head_query]
+    }
+
+    /// The page query of `side`.
+    fn query(&self, side: perf::Side) -> &str {
+        match side {
+            perf::Side::Base => &self.base_query,
+            perf::Side::Head => &self.head_query,
+        }
+    }
+}
+
+/// `e2e perf --base-dist <dir>`: the same-session comparison of the base
+/// page in `<dir>` and the head page in `--dist`.  [`perf::run_comparison`]
+/// holds the schedule and the verdict; this gives it the runs of each
+/// side's page and prints its lines.
+fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
+    if let Some(refusal) = perf::compare_refusal(o.runs, o.gate, o.update_baselines, o.swiftshader)
+    {
+        bail!("perf: {refusal}");
+    }
+    if !base_dist.join("index.html").is_file() {
+        bail!("perf: {} has no index.html", base_dist.display());
+    }
+    let sites = CompareSites::start(o, |dist| PerfSite::start(o, dist))?;
+    let browser = perf::browser_name(o.browser);
+    for side in [perf::Side::Base, perf::Side::Head] {
+        println!("perf: the {} query: \"{}\"", side.name(), sites.query(side));
+    }
+    perf::run_comparison(
+        browser,
+        o.runs,
+        sites.queries(),
+        |side, _n, name| {
+            let (p, result) = perf_run(o, sites.of(side), sites.query(side), name)
+                .map_err(|e| format!("run {name}: {e:#}"))?;
+            p.finish().map_err(|e| format!("run {name}: {e:#}"))?;
+            result.ok_or_else(|| format!("run {name} gave no result"))
+        },
+        |line| println!("{line}"),
+    )
+    .map_err(|e| anyhow::anyhow!("perf: {e}"))?;
+    Ok(())
+}
+
+/// The verdict of `memory-budget` on its checks across the songs: an
+/// error that names each failed check, or Ok when each passes.
+fn verdict(checks: &[(bool, String)]) -> Result<()> {
+    let failed: Vec<&str> = checks
+        .iter()
+        .filter(|(ok, _)| !*ok)
+        .map(|(_, what)| what.as_str())
+        .collect();
+    if !failed.is_empty() {
+        bail!("memory-budget FAILED: {}", failed.join("; "));
     }
     Ok(())
 }
@@ -1799,6 +2653,37 @@ fn stem_protocol_file(name: &str) -> String {
     format!("{name}.wav")
 }
 
+/// The attention policy of `stored-stems`: the value of `attn` in
+/// `--query`, else `split`.  Its other settings are fixed.
+fn stored_stems_attn(query: Option<&str>) -> String {
+    query
+        .unwrap_or_default()
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("attn="))
+        .unwrap_or("split")
+        .to_string()
+}
+
+/// Why the worker of `stored-stems` did not take the attention policy
+/// `attn`, from the text of its reply to the model message (which names
+/// its policy as `; attention <policy>,`), or `None`.  `auto` asks for no
+/// policy, so any policy passes it, as in `perf::forced_attn_problem`.
+fn stored_stems_attention_problem(model_reply: &str, attn: &str) -> Option<String> {
+    if attn == "auto" {
+        return None;
+    }
+    let ran = model_reply
+        .split_once("; attention ")
+        .and_then(|(_, rest)| rest.split([',', ')']).next());
+    (ran != Some(attn)).then(|| {
+        format!(
+            "the worker runs attention {}, not the asked {attn}",
+            ran.unwrap_or("(none named)")
+        )
+    })
+}
+
 /// The session folder that `stored-stems` plants for the storage path.
 const STORED_STEMS_SESSION: &str = "sessions/1792640000000";
 
@@ -1828,12 +2713,15 @@ fn stem_wavs(stems: &Value, names: &[&str]) -> Result<Vec<Vec<u8>>> {
 type Checks = Vec<(bool, String)>;
 
 /// The checks of `stored-stems` on what its page script returns (`r`),
-/// for a clip of `frames`, and the memory path's SHA-256s.  With `hashes`
+/// for a clip of `frames` and the asked attention policy `attn`, and the
+/// memory path's SHA-256s.  The worker's reply to the model message must
+/// name `attn` ([`stored_stems_attention_problem`]).  With `hashes`
 /// (`--hashes`), the SHA-256s must equal them.
 fn stored_stems_checks(
     r: &Value,
     frames: usize,
     hashes: Option<&str>,
+    attn: &str,
 ) -> Result<(Checks, Vec<String>)> {
     let mut checks = vec![
         (
@@ -1849,6 +2737,12 @@ fn stored_stems_checks(
             format!("the song is {frames} frames"),
         ),
     ];
+    let model_reply = r["replies"][0]["text"].as_str().unwrap_or_default();
+    let problem = stored_stems_attention_problem(model_reply, attn);
+    checks.push((
+        problem.is_none(),
+        problem.unwrap_or_else(|| format!("the worker runs attention {attn}")),
+    ));
     let segments = r["segments"].as_u64().unwrap_or(0);
     checks.push((segments > 1, format!("several segments ({segments})")));
     checks.push((
@@ -1909,13 +2803,16 @@ fn stored_stems_checks(
 /// `chunk: 16384, overlap: 2`, so that it sends several segments: first on the
 /// memory path, from two arrays, then on the storage path into a planted
 /// session folder, from the clip planted there as its mix file (`mix.f32`,
-/// interleaved).  The kernels are fixed (`mm: s64, attn: split`), so the two
-/// runs do the same arithmetic.  Each stem file must equal
+/// interleaved).  Both runs use `mm: s64`, and `attn` is `split` unless
+/// `--query` sets it (`stored_stems_attn`), so the two runs do the same
+/// arithmetic.  The worker must run the asked `attn`
+/// (`stored_stems_attention_problem`).  Each stem file must equal
 /// `engine::wav::encode_pcm16` of the memory path's stem, byte for byte.  The
 /// storage path must send no `segment` reply, and its last `stored` reply must
 /// cover the song.  It prints the SHA-256 of each memory-path stem as a 16-bit
 /// WAV, and checks them against `--hashes`.
 fn stored_stems(o: &Opts) -> Result<()> {
+    let attn = stored_stems_attn(o.query.as_deref());
     let (clip_dir, frames) = stored_stems_clip(&o.out)?;
     let mut mounts = vec![("/clip/".to_string(), clip_dir)];
     let model = weights_mount(o, &mut mounts)?;
@@ -1923,12 +2820,12 @@ fn stored_stems(o: &Opts) -> Result<()> {
     let mut p = Page::open(o, base, &["--enable-unsafe-webgpu"], "__e2e/blank.html")?;
     let r = in_page(
         &mut p,
-        "const [model, session, names] = args;
+        "const [model, session, names, attn] = args;
         await e2e.wipe();
         const clip = new Float32Array(await (await fetch('/clip/clip.f32')).arrayBuffer());
         const n = clip.length / 2;
         const bytes = new Uint8Array(await (await fetch(model)).arrayBuffer());
-        const opts = { mm: 's64', attn: 'split', chunk: 16384, overlap: 2, step_limit: 600 };
+        const opts = { mm: 's64', attn, chunk: 16384, overlap: 2, step_limit: 600 };
         const stems = {};
         // Each separation starts with a progress reply of 0 chunks done.
         const out = { segments: 0, storage_segments: 0, len: 0, stored: [], separations: 0 };
@@ -1971,12 +2868,14 @@ fn stored_stems(o: &Opts) -> Result<()> {
             roformer::STEMS
                 .iter()
                 .map(|n| [n.to_string(), stem_protocol_file(n)])
-                .collect::<Vec<_>>()
+                .collect::<Vec<_>>(),
+            attn
         ]),
         3600,
     )?;
     p.note(&format!("replies: {:?}", texts(&r["replies"])));
-    let (checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref())?;
+    p.note(&format!("stored-stems: attention {attn}"));
+    let (checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref(), &attn)?;
     for (name, hash) in roformer::STEMS.iter().zip(&hashes) {
         p.note(&format!("stored-stems: memory path: {name} sha256 {hash}"));
     }
@@ -2274,7 +3173,7 @@ mod tests {
             |frames: usize| json!({ "frames": frames, "len": 4, "stems": roformer::STEMS });
         json!({
             "replies": [
-                { "type": "model", "ok": true },
+                { "type": "model", "ok": true, "text": "model loaded in 0.4 s (apple metal-3, fallback adapter no; own WGSL kernels; matmul s64, checked OK: i64 s64; attention split, fused attention checked OK, vfused checked OK)" },
                 { "type": "done" },
                 { "type": "done" },
             ],
@@ -2289,7 +3188,7 @@ mod tests {
 
     /// The names of the checks that fail.
     fn failing(r: &Value, hashes: Option<&str>) -> Vec<String> {
-        let (checks, _) = stored_stems_checks(r, 4, hashes).unwrap();
+        let (checks, _) = stored_stems_checks(r, 4, hashes, "split").unwrap();
         checks
             .into_iter()
             .filter(|(ok, _)| !ok)
@@ -2300,8 +3199,18 @@ mod tests {
     #[test]
     fn the_stored_stems_checks_pass_a_good_reply_and_fail_wrong_ones() {
         let good = stored_stems_reply();
-        let (checks, hashes) = stored_stems_checks(&good, 4, None).unwrap();
-        assert_eq!(checks.len(), 15, "nine checks, and one for each stem");
+        let (checks, hashes) = stored_stems_checks(&good, 4, None, "split").unwrap();
+        assert_eq!(checks.len(), 16, "ten checks, and one for each stem");
+        let mut fused = good.clone();
+        fused["replies"][0]["text"] =
+            json!("model loaded (matmul s64; attention fused, fused attention checked OK)");
+        let (checks, _) = stored_stems_checks(&fused, 4, None, "fused").unwrap();
+        let failed: Vec<&str> = checks
+            .iter()
+            .filter(|(ok, _)| !ok)
+            .map(|(_, what)| what.as_str())
+            .collect();
+        assert!(failed.is_empty(), "attn fused: {failed:?}");
         assert_eq!(failing(&good, None), Vec::<String>::new());
         let all = hashes.join(",");
         assert_eq!(failing(&good, Some(&all)), Vec::<String>::new());
@@ -2311,8 +3220,13 @@ mod tests {
             failing(&good, Some(&wrong_hashes.join(","))),
             ["the memory path's stems equal the hashes given"]
         );
-        let cases: [(&str, Value, &str); 10] = [
+        let cases: [(&str, Value, &str); 11] = [
             ("/replies/0/ok", json!(false), "the worker loads the model"),
+            (
+                "/replies/0/text",
+                json!("model loaded (matmul s64; attention fused, fused attention checked OK)"),
+                "the worker runs attention",
+            ),
             (
                 "/replies/1/type",
                 json!("error"),
@@ -2787,6 +3701,19 @@ mod tests {
         assert!(Opts::parse(&args("--browser chrome")).is_err());
         assert!(Opts::parse(&args("smoke --play-x")).is_err());
         assert!(Opts::parse(&args("smoke --frobnicate")).is_err());
+        let c = Opts::parse(&args("perf --base-dist /tmp/base --runs 8")).unwrap();
+        assert_eq!(c.base_dist, Some(PathBuf::from("/tmp/base")));
+        assert_eq!(c.runs, 8);
+        assert_eq!(d.base_dist, None);
+        assert!(Opts::parse(&args("perf --base-dist")).is_err());
+        let h = Opts::parse(&args(
+            "perf --base-dist /tmp/base --head-query attn=freq --query mm=v64,v64",
+        ))
+        .map(|o| (o.head_query, o.query))
+        .map_err(|e| e.to_string());
+        assert_eq!(h, Ok((Some("attn=freq".into()), Some("mm=v64,v64".into()))));
+        assert_eq!(d.head_query, None);
+        assert!(Opts::parse(&args("perf --head-query")).is_err());
     }
 
     #[test]
@@ -2803,6 +3730,169 @@ mod tests {
         assert_eq!(page_errors(&log), log[2..]);
     }
 
+    /// Asserts that `CompareSites::start`, with the options of `perf
+    /// --dist /tmp/head/dist --base-dist /tmp/base/dist` and a start that
+    /// gives each folder it is given:
+    /// * starts the base folder, then the head folder;
+    /// * gives the base folder's site for `Side::Base`, and the head
+    ///   folder's site for `Side::Head`.
+    #[test]
+    fn each_side_of_a_comparison_runs_its_own_page() {
+        let o = Opts::parse(&args(
+            "perf --dist /tmp/head/dist --base-dist /tmp/base/dist",
+        ))
+        .expect("options");
+        let mut started = Vec::new();
+        let sites = CompareSites::start(&o, |dist| {
+            started.push(dist.to_path_buf());
+            Ok(dist.to_path_buf())
+        })
+        .expect("sites");
+        let (base, head) = (
+            PathBuf::from("/tmp/base/dist"),
+            PathBuf::from("/tmp/head/dist"),
+        );
+        assert_eq!(started, [base.clone(), head.clone()]);
+        assert_eq!(*sites.of(perf::Side::Base), base);
+        assert_eq!(*sites.of(perf::Side::Head), head);
+    }
+
+    /// Asserts that `CompareSites::start`, with the options of `perf
+    /// --base-dist /tmp/base/dist --query mm=v64k8,v64k8&attn=fused
+    /// --head-query attn=freq`, gives the base `--query` and the head
+    /// `--query` with `attn=freq`, alone and as the pair (base, head) that
+    /// `perf_compare` gives `run_comparison`.
+    #[test]
+    fn each_side_of_a_comparison_runs_its_own_query() {
+        let o = Opts::parse(&args(
+            "perf --base-dist /tmp/base/dist --query mm=v64k8,v64k8&attn=fused --head-query attn=freq",
+        ))
+        .expect("options");
+        let sites = CompareSites::start(&o, |dist| Ok(dist.to_path_buf())).expect("sites");
+        assert_eq!(sites.query(perf::Side::Base), "mm=v64k8,v64k8&attn=fused");
+        assert_eq!(sites.query(perf::Side::Head), "mm=v64k8,v64k8&attn=freq");
+        assert_eq!(
+            sites.queries(),
+            ["mm=v64k8,v64k8&attn=fused", "mm=v64k8,v64k8&attn=freq"]
+        );
+    }
+
+    /// Asserts that `stored_stems_attn` gives `split` with no `--query` and
+    /// with a query with no `attn`, and the value of `attn` otherwise
+    /// (`attn=fused`, `mm=s64&attn=freq`, `?attn=fused`).
+    #[test]
+    fn stored_stems_takes_attn_from_the_query() {
+        assert_eq!(stored_stems_attn(None), "split");
+        assert_eq!(stored_stems_attn(Some("mm=v64")), "split");
+        assert_eq!(stored_stems_attn(Some("attn=fused")), "fused");
+        assert_eq!(stored_stems_attn(Some("mm=s64&attn=freq")), "freq");
+        assert_eq!(stored_stems_attn(Some("?attn=fused")), "fused");
+    }
+
+    /// Asserts that `stored_stems_attention_problem` passes a model reply
+    /// that names the asked policy (`fused`, `vfused`), and fails one that
+    /// names another (`split` when `fused` was asked) or none, with a
+    /// reason that names both.  `auto` passes any policy.
+    #[test]
+    fn stored_stems_checks_the_workers_policy() {
+        let reply = |attn: &str| {
+            format!(
+                "model loaded in 0.4 s (apple metal-3, fallback adapter no; own WGSL kernels; matmul s64, checked OK: i64 s64; attention {attn}, fused attention checked OK, vfused checked OK)"
+            )
+        };
+        assert_eq!(
+            stored_stems_attention_problem(&reply("fused"), "fused"),
+            None
+        );
+        assert_eq!(
+            stored_stems_attention_problem(&reply("vfused"), "vfused"),
+            None
+        );
+        let problem = stored_stems_attention_problem(&reply("split"), "fused").unwrap_or_default();
+        assert!(
+            problem.contains("fused") && problem.contains("split"),
+            "{problem:?}"
+        );
+        assert!(stored_stems_attention_problem("model loaded", "split").is_some());
+        assert_eq!(
+            stored_stems_attention_problem(&reply("vfused"), "auto"),
+            None
+        );
+    }
+
+    /// Asserts that the page script of `stored-stems` takes `attn` from its
+    /// arguments, not a fixed `attn: 'split'` (the defect of `a058eb6`).
+    #[test]
+    fn the_stored_stems_script_takes_its_attn() {
+        let source = include_str!("e2e.rs");
+        let fixed = ["attn: 'split'", ", chunk: 16384"].concat();
+        assert!(!source.contains(&fixed), "a fixed attn in the script");
+        let taken = ["{ mm: 's64', attn", ", chunk: 16384"].concat();
+        assert!(source.contains(&taken), "the script takes attn");
+        let args = ["const [model, session, names, attn]", " = args;"].concat();
+        assert!(source.contains(&args), "the script reads attn");
+    }
+
+    /// Asserts that `selftest_query`:
+    /// * gives `selftest=stages&step_limit=600&mm=s64` with no `--query`;
+    /// * puts `selftest=stages&` before, and `&step_limit=600` after, a
+    ///   `--query` with no `selftest` key and no `step_limit` (`mm=v64k8`,
+    ///   `?mm=v64k8&weights=f16`, and `mm=i64&step_limit=`);
+    /// * adds `&step_limit=600` to a `--query` with a `selftest` key and no
+    ///   `step_limit` key (`selftest=stages`, and `mm=i64&selftest=full`);
+    /// * keeps a `--query` with both keys as it is
+    ///   (`selftest=stages&step_limit=60`), and puts only `selftest=stages&`
+    ///   before one with `step_limit` alone (`step_limit=60&mm=i64`);
+    /// * adds `&step_limit=600` when `step_limit` has no number
+    ///   (`selftest=stages&step_limit`, `selftest=stages&step_limit=`).
+    #[test]
+    fn a_selftest_query_always_asks_for_the_self_test() {
+        assert_eq!(
+            selftest_query(None),
+            "selftest=stages&step_limit=600&mm=s64"
+        );
+        assert_eq!(
+            selftest_query(Some("mm=v64k8")),
+            "selftest=stages&mm=v64k8&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("?mm=v64k8&weights=f16")),
+            "selftest=stages&mm=v64k8&weights=f16&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("selftest=stages")),
+            "selftest=stages&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("mm=i64&selftest=full")),
+            "mm=i64&selftest=full&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("selftest=stages&step_limit=60")),
+            "selftest=stages&step_limit=60"
+        );
+        assert_eq!(
+            selftest_query(Some("step_limit=60&mm=i64")),
+            "selftest=stages&step_limit=60&mm=i64"
+        );
+        assert_eq!(
+            selftest_query(Some("mm=i64&step_limit=")),
+            "selftest=stages&mm=i64&step_limit=&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("selftest=stages&step_limit")),
+            "selftest=stages&step_limit&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("selftest=stages&step_limit=abc")),
+            "selftest=stages&step_limit=abc&step_limit=600"
+        );
+        assert_eq!(
+            selftest_query(Some("selftest=stages&step_limit=")),
+            "selftest=stages&step_limit=&step_limit=600"
+        );
+    }
+
     /// Findings 1-29 and 1-72 of review round 1 of M5: a wait ends on its
     /// line or on a page error, not only on a line that is both.
     #[test]
@@ -2814,6 +3904,196 @@ mod tests {
         ));
         assert!(holds_or_error("PAGE ERROR: x is not defined", want));
         assert!(!holds_or_error("console.info: fine", want));
+    }
+
+    /// The worker's lines of one separation of 6 chunks, with f16
+    /// weights: `wasm[k]` after chunk k + 1, then at the end.
+    fn chunk_log(wasm: &[f64], end: f64) -> Vec<String> {
+        let mut log = vec![
+            "[0.0s] separator: memory: worker wasm 30 MB at the separation's start".to_string(),
+            "[0.1s] separator: separating 6 chunks; memory: worker wasm 58 MB, model on the GPU 350 MB (f16 weight matrices), chunk buffers 322 MB, GPU buffers live 673 MB".to_string(),
+        ];
+        for (k, mb) in wasm.iter().enumerate() {
+            log.push(format!(
+                "[{}.0s] separator: chunk {}/6: 4.7 s; so far 1022 GPU steps, 1.36 TFLOP/s; memory: worker wasm {mb} MB, model on the GPU 350 MB (f16 weight matrices), chunk buffers 322 MB, GPU buffers live 673 MB",
+                k + 1,
+                k + 1
+            ));
+            log.push(format!(
+                "[{}.1s] separator: chunk {}/6 after 4.7 s",
+                k + 1,
+                k + 1
+            ));
+        }
+        log.push(format!(
+            "[9.0s] separator: memory: worker wasm {end} MB at the separation's end"
+        ));
+        log
+    }
+
+    /// Check 1 of M1: flat after the warm-up, from chunk 2's line on.
+    #[test]
+    fn the_worker_must_stay_flat_after_the_warm_up() {
+        let flat = chunk_log(&[92.0, 125.0, 125.0, 125.0, 125.0, 125.0], 125.0);
+        let (ok, what) = flat_after_warm_up_check(&flat);
+        assert!(ok, "flat figures pass: {what}");
+        let at_most = chunk_log(&[92.0, 125.0, 125.0, 129.0, 125.0, 125.0], 129.0);
+        assert!(flat_after_warm_up_check(&at_most).0, "4 MB passes");
+        let rise = chunk_log(&[92.0, 125.0, 125.0, 125.0, 129.1, 129.1], 129.1);
+        let (ok, what) = flat_after_warm_up_check(&rise);
+        assert!(!ok, "a rise of 4.1 MB at chunk 5 fails: {what}");
+        let end = chunk_log(&[92.0, 125.0, 125.0, 125.0, 125.0, 125.0], 129.1);
+        assert!(!flat_after_warm_up_check(&end).0, "a rise at the end fails");
+        let no_two: Vec<String> = flat
+            .iter()
+            .filter(|l| !l.contains("chunk 2/6:"))
+            .cloned()
+            .collect();
+        let (ok, what) = flat_after_warm_up_check(&no_two);
+        assert!(!ok, "no chunk 2 line fails: {what}");
+        assert!(
+            !flat_after_warm_up_check(&flat[..flat.len() - 1]).0,
+            "no end line fails"
+        );
+        assert_eq!(
+            chunk_done(&flat[1]),
+            None,
+            "the line of the job is no chunk line"
+        );
+        assert_eq!(chunk_done(&flat[4]), Some(2));
+        assert_eq!(chunk_done("separator: chunk 12/48: 1.0 s"), Some(12));
+        assert_eq!(
+            chunk_done("chunk 2/six: worker wasm 9 MB"),
+            None,
+            "a total that is not a number"
+        );
+    }
+
+    /// The verdict of `memory-budget` on its checks across the songs: Ok
+    /// when each passes, else an error that names each failed check and
+    /// no passed one.
+    #[test]
+    fn the_verdict_names_each_failed_check() {
+        let pass = |what: &str| (true, what.to_string());
+        let fail = |what: &str| (false, what.to_string());
+        assert!(
+            verdict(&[pass("shown"), pass("worker")]).is_ok(),
+            "all pass"
+        );
+        let one = verdict(&[pass("shown"), fail("worker")]);
+        assert!(one.is_err(), "one fails");
+        let text = one.map_err(|e| e.to_string()).unwrap_err();
+        assert!(text.contains("worker"), "it names the failed check: {text}");
+        assert!(!text.contains("shown"), "it names no passed check: {text}");
+        let both = verdict(&[fail("shown"), fail("worker")]).map_err(|e| e.to_string());
+        assert_eq!(both, Err("memory-budget FAILED: shown; worker".to_string()));
+    }
+
+    /// Check 2 of M1: no growth with the song.
+    #[test]
+    fn the_long_song_must_not_grow_the_worker_more() {
+        assert!(
+            song_growth_check(Some(95.0), Some(95.0)).0,
+            "equal growths pass"
+        );
+        assert!(
+            song_growth_check(Some(95.0), Some(99.0)).0,
+            "4 MB more passes"
+        );
+        let (ok, what) = song_growth_check(Some(95.0), Some(99.1));
+        assert!(!ok, "4.1 MB more fails: {what}");
+        assert!(
+            !song_growth_check(None, Some(95.0)).0,
+            "a missing growth fails"
+        );
+        assert!(
+            !song_growth_check(Some(95.0), None).0,
+            "a missing growth fails"
+        );
+    }
+
+    /// Check 3 of M1: the worker's growth is at most the working set's
+    /// peak plus the measured headroom, at the default chunk with f16
+    /// weights.
+    #[test]
+    fn the_worker_growth_must_fit_the_working_set_budget() {
+        let log = chunk_log(&[92.0, 125.0], 125.0);
+        let peak = roformer::separate::working_set(roformer::CHUNK, roformer::OVERLAP);
+        let budget = working_set_budget_mb();
+        assert_eq!(
+            budget,
+            peak.peak().bytes() as f64 / 1e6 + WORKER_HEADROOM_MB
+        );
+        let (ok, what) = working_set_check(Some(budget), "", &log);
+        assert_eq!(ok, Some(true), "growth at the budget passes: {what}");
+        let (over, over_what) = working_set_check(Some(budget + 0.1), "x=1", &log);
+        assert_eq!(over, Some(false), "0.1 MB over fails: {over_what}");
+        assert!(what.contains("masks"), "it names the peak's phase: {what}");
+        // The measured growth of step 8 of M1, with the noise, passes.
+        // The same growth with a lost cut 3 fails.
+        let measured = 57.0;
+        let (ok, what) = working_set_check(Some(measured + 2.16), "", &log);
+        assert_eq!(
+            ok,
+            Some(true),
+            "the measured growth with its noise passes: {what}"
+        );
+        let (ok, what) = working_set_check(Some(measured + 9.44), "", &log);
+        assert_eq!(ok, Some(false), "a lost cut 3 fails: {what}");
+        assert_eq!(
+            working_set_check(None, "", &log).0,
+            Some(false),
+            "no growth fails"
+        );
+        let (ok, what) =
+            working_set_check(Some(budget + 50.0), "chunk=16384&overlap=1&mm=s64", &log);
+        assert_eq!(ok, None, "a chunk in the query is not checked: {what}");
+        assert_eq!(
+            working_set_check(Some(budget + 50.0), "overlap=4", &log).0,
+            None
+        );
+        assert_eq!(
+            working_set_check(Some(budget + 0.1), "mm=v64&xchunk=1", &log).0,
+            Some(false),
+            "only a chunk or an overlap parameter is not checked"
+        );
+        let f32_log: Vec<String> = log
+            .iter()
+            .map(|l| l.replace("f16 weight matrices", "f32 weights"))
+            .collect();
+        let (ok, what) = working_set_check(Some(budget + 50.0), "", &f32_log);
+        assert_eq!(ok, None, "f32 weights are not checked: {what}");
+    }
+
+    /// Check 4 of M1: the tab total under the iPhone's budget.  Since
+    /// M5.1, it also counts the write worker's WebAssembly memory, which
+    /// no log line gives ([`WRITE_WORKER_WASM_MB`]).
+    #[test]
+    fn the_tab_total_must_fit_the_budget() {
+        let log = chunk_log(&[92.0, 125.0], 125.0);
+        let peak = |gpu_live| MemoryPeak {
+            page_wasm: 33.0,
+            worker_wasm: 125.0,
+            decoder_wasm: 6.0,
+            gpu_live,
+        };
+        let (ok, what) = tab_total_check(Some(peak(777.75)), &log);
+        assert_eq!(ok, Some(true), "943 passes: {what}");
+        let (ok, what) = tab_total_check(Some(peak(777.85)), &log);
+        assert_eq!(ok, Some(false), "943.1 fails: {what}");
+        assert!(what.contains("write worker wasm 1.25"), "{what}");
+        assert_eq!(
+            tab_total_check(None, &log).0,
+            Some(false),
+            "a missing part fails"
+        );
+        let f32_log: Vec<String> = log
+            .iter()
+            .map(|l| l.replace("f16 weight matrices", "f32 weights"))
+            .collect();
+        let (ok, what) = tab_total_check(Some(peak(979.0)), &f32_log);
+        assert_eq!(ok, None, "f32 weights are not checked: {what}");
+        assert!(what.contains("TD-63"), "{what}");
     }
 
     /// The peak of each part, from the worker's lines after the model
@@ -2841,7 +4121,7 @@ mod tests {
                 gpu_live: 979.0
             }
         );
-        assert_eq!(peak.total(), 1559.0);
+        assert_eq!(peak.total(), 1559.0 + WRITE_WORKER_WASM_MB);
         assert_eq!(memory_peak(&log[..5]), None, "no decode worker line");
         assert_eq!(memory_peak(&log[..3]), None, "no page line yet");
     }
@@ -2889,6 +4169,442 @@ mod tests {
 
     /// Findings 1-47, 1-103, 2-30 and 2-58 of review rounds 1 and 2 of
     /// M3: a wait for the model was 4 hours in `memory_budget` with no test.
+    /// Finding 4-2 of review round 4 of M3: each run of `perf` has its own
+    /// limit.  Asserts:
+    /// * `perf` has 10 minutes for each run, not the old 4 hours.
+    /// * `perf` with `--swiftshader` has 4 hours for each run.
+    /// * `--runs 5` does not change the limit.
+    /// * The limit of a `perf` page ends 10 minutes after the page opens.
+    /// * The limit of a `smoke` page ends 15 minutes after `Opts::started`.
+    #[test]
+    fn perf_has_ten_minutes_for_each_run() {
+        assert_eq!(scenario_limit_secs("perf", false), Some(600));
+        assert_eq!(scenario_limit_secs("perf", true), Some(MODEL_RUN_SECS));
+        let perf = Opts::parse(&args("perf --runs 5")).unwrap();
+        assert_eq!(perf.limit_secs, 600);
+        let opened = perf.started + Duration::from_secs(3_000);
+        assert_eq!(
+            perf.deadline(opened).unwrap(),
+            opened + Duration::from_secs(600)
+        );
+        let smoke = Opts::parse(&args("smoke")).unwrap();
+        assert_eq!(
+            smoke.deadline(opened).unwrap(),
+            smoke.started + Duration::from_secs(900)
+        );
+    }
+
+    /// * Each scenario of the usage text has a limit, and another name has
+    ///   none.
+    /// * The scenarios with no model have 15 minutes, and `storage` 30.
+    /// * `save` has the limit of its CI step, also with `--swiftshader`.
+    /// * The scenarios that run the model have 1 hour, and `weights` 2
+    ///   hours.  With `--swiftshader`, each has 4 hours.
+    #[test]
+    fn each_scenario_has_a_time_limit() {
+        for scenario in SCENARIOS {
+            assert!(scenario_limit_secs(scenario, false).is_some(), "{scenario}");
+        }
+        assert_eq!(scenario_limit_secs("perfs", false), None);
+        for scenario in [
+            "smoke",
+            "decode",
+            "playback",
+            "old-session",
+            "audio-resume",
+            "flac",
+        ] {
+            assert_eq!(
+                scenario_limit_secs(scenario, false),
+                Some(900),
+                "{scenario}"
+            );
+            assert_eq!(scenario_limit_secs(scenario, true), Some(900), "{scenario}");
+        }
+        assert_eq!(scenario_limit_secs("storage", false), Some(1_800));
+        assert_eq!(scenario_limit_secs("save", false), Some(save::STEP_LIMIT_S));
+        assert_eq!(scenario_limit_secs("save", true), Some(save::STEP_LIMIT_S));
+        for scenario in [
+            "bench",
+            "selftest",
+            "separate",
+            "worker-check",
+            "stored-stems",
+            "memory-budget",
+        ] {
+            assert_eq!(
+                scenario_limit_secs(scenario, false),
+                Some(3_600),
+                "{scenario}"
+            );
+            assert_eq!(
+                scenario_limit_secs(scenario, true),
+                Some(MODEL_RUN_SECS),
+                "{scenario}"
+            );
+        }
+        assert_eq!(scenario_limit_secs("weights", false), Some(7_200));
+        assert_eq!(scenario_limit_secs("weights", true), Some(MODEL_RUN_SECS));
+    }
+
+    /// * The line names the scenario, its limit and what it waited for.
+    /// * `Opts::parse` gives the limit of the scenario and its options.
+    /// * `Opts::parse` refuses a name that is not a scenario.
+    #[test]
+    fn the_limit_line_names_the_scenario_the_limit_and_the_wait() {
+        assert_eq!(
+            limit_line("perf-safari-1", 600, "the stems to show"),
+            "e2e perf-safari-1 FAILED: its time limit of 600 s ended while it waited for the stems to show"
+        );
+        assert_eq!(Opts::parse(&args("perf --runs 3")).unwrap().limit_secs, 600);
+        assert_eq!(
+            Opts::parse(&args("perf --swiftshader")).unwrap().limit_secs,
+            MODEL_RUN_SECS
+        );
+        assert_eq!(Opts::parse(&args("smoke")).unwrap().limit_secs, 900);
+        let unknown = Opts::parse(&args("perfs")).err().map(|e| e.to_string());
+        assert_eq!(unknown.as_deref(), Some("unknown scenario perfs"));
+    }
+
+    /// * A wait that ends before the limit goes on to its own end, and then
+    ///   ends with no match, also past the limit.
+    /// * A wait that ends after the limit goes on to the limit, and then is
+    ///   over the limit.
+    #[test]
+    fn a_wait_stops_at_the_limit() {
+        let start = Instant::now();
+        let at = |secs| start + Duration::from_secs(secs);
+        assert_eq!(wait_state(at(5), at(10), at(20)), WaitState::Going);
+        assert_eq!(wait_state(at(10), at(10), at(20)), WaitState::Going);
+        assert_eq!(wait_state(at(11), at(10), at(20)), WaitState::Ended);
+        assert_eq!(wait_state(at(25), at(10), at(20)), WaitState::Ended);
+        assert_eq!(wait_state(at(15), at(30), at(20)), WaitState::Going);
+        assert_eq!(wait_state(at(20), at(30), at(20)), WaitState::OverLimit);
+        assert_eq!(wait_state(at(35), at(30), at(20)), WaitState::OverLimit);
+    }
+
+    /// What a fake driver gives for `execute/async`: after `delay`, a reply
+    /// with `status` and `value`.
+    struct ScriptReply {
+        delay: Duration,
+        status: u16,
+        value: Value,
+    }
+
+    impl ScriptReply {
+        fn ok(value: Value) -> Self {
+            Self {
+                delay: Duration::ZERO,
+                status: 200,
+                value,
+            }
+        }
+    }
+
+    /// One request that a fake driver received: its method and path, and
+    /// its JSON body.
+    type Request = (String, Value);
+
+    /// A fake WebDriver on a free port.  `execute/sync` gives `console`
+    /// first and then no line, `execute/async` gives `script`, and each
+    /// other request gives `null`.  It sends each request it receives on the
+    /// channel before it replies.  So a caller that has the reply finds the
+    /// request on the channel.
+    fn fake_driver(
+        console: &'static [&'static str],
+        script: ScriptReply,
+    ) -> (u16, std::sync::mpsc::Receiver<Request>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut console_sent = false;
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                reader.read_line(&mut request_line).unwrap();
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        length = v.trim().parse().unwrap();
+                    }
+                }
+                let mut body = vec![0; length];
+                std::io::Read::read_exact(&mut reader, &mut body).unwrap();
+                let request = request_line
+                    .rsplit_once(' ')
+                    .map_or(request_line.as_str(), |(head, _)| head)
+                    .to_string();
+                let (status, value) = if request.ends_with("/execute/sync") {
+                    let lines = if console_sent { &[][..] } else { console };
+                    console_sent = true;
+                    (200, json!(lines))
+                } else if request.ends_with("/execute/async") {
+                    std::thread::sleep(script.delay);
+                    (script.status, script.value.clone())
+                } else {
+                    (200, Value::Null)
+                };
+                let body = serde_json::from_slice(&body).unwrap_or(Value::Null);
+                let _ = tx.send((request, body));
+                let reply = json!({ "value": value }).to_string();
+                let _ = write!(
+                    stream,
+                    "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{reply}",
+                    reply.len()
+                );
+            }
+        });
+        (port, rx)
+    }
+
+    /// A page of the scenario `lloyd` on the fake driver at `port`, whose
+    /// time limit of `limit_secs` ends at `deadline`.
+    fn fake_page(port: u16, deadline: Instant, limit_secs: u64) -> Page {
+        let out = std::env::temp_dir().join(format!("xtask-e2e-page-{}", std::process::id()));
+        std::fs::create_dir_all(&out).unwrap();
+        Page {
+            session: Session::at(port, "lloyd"),
+            _driver: None,
+            base: "http://127.0.0.1:1".to_string(),
+            t0: Instant::now(),
+            log: Vec::new(),
+            out,
+            scenario: "lloyd".to_string(),
+            failures: Vec::new(),
+            deadline,
+            limit_secs,
+        }
+    }
+
+    /// The requests that a fake driver received until now.
+    fn received(rx: &std::sync::mpsc::Receiver<Request>) -> Vec<Request> {
+        rx.try_iter().collect()
+    }
+
+    /// The script timeout in milliseconds of each `timeouts` request.
+    fn script_timeouts(requests: &[Request]) -> Vec<u64> {
+        requests
+            .iter()
+            .filter(|(request, _)| request.ends_with("/timeouts"))
+            .filter_map(|(_, body)| body["script"].as_u64())
+            .collect()
+    }
+
+    /// A deadline `secs` from now.
+    fn in_secs(secs: f64) -> Instant {
+        Instant::now() + Duration::from_secs_f64(secs)
+    }
+
+    /// Finding 4-1 of review round 4 of M3.  Asserts:
+    /// * a wait gives the first console line that matches;
+    /// * a wait with no match ends at its own end with none, before the limit;
+    /// * a wait with no match whose own end is after the limit fails at the
+    ///   limit with the limit line, which the log also holds.
+    #[test]
+    fn a_page_wait_gives_its_line_or_stops_at_the_limit() {
+        let (port, _rx) = fake_driver(&["lloyd: ready"], ScriptReply::ok(Value::Null));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let line = p
+            .wait_for(0, 5, "the app", |l| l.contains("ready"))
+            .unwrap();
+        assert!(
+            line.as_deref()
+                .is_some_and(|l| l.ends_with("] lloyd: ready")),
+            "{line:?}"
+        );
+
+        let started = Instant::now();
+        let none = p.wait_for(1, 1, "a second line", |_| true).unwrap();
+        assert_eq!(none, None);
+        assert!(started.elapsed() >= Duration::from_secs(1));
+
+        let mut p = fake_page(port, in_secs(1.0), 7);
+        let started = Instant::now();
+        let e = p
+            .wait_for(0, 60, "the stems to show", |_| false)
+            .unwrap_err();
+        let line = limit_line("lloyd", 7, "the stems to show");
+        assert_eq!(e.to_string(), line);
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_secs(30));
+        assert!(
+            p.log.last().is_some_and(|l| l.ends_with(&line)),
+            "{:?}",
+            p.log
+        );
+    }
+
+    /// Finding 4-1 of review round 4 of M3.  Asserts:
+    /// * an idle before the limit runs to its own end, and takes the
+    ///   console into the log;
+    /// * an idle whose own end is after the limit fails at the limit with
+    ///   the limit line.
+    #[test]
+    fn a_page_idle_runs_to_its_end_or_stops_at_the_limit() {
+        let (port, _rx) = fake_driver(&["lloyd: idle"], ScriptReply::ok(Value::Null));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let started = Instant::now();
+        p.idle(0.5).unwrap();
+        assert!(started.elapsed() >= Duration::from_millis(500));
+        assert!(
+            p.log.iter().any(|l| l.ends_with("] lloyd: idle")),
+            "{:?}",
+            p.log
+        );
+
+        let mut p = fake_page(port, in_secs(1.0), 7);
+        let started = Instant::now();
+        let e = p.idle(60.0).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            limit_line("lloyd", 7, "the page to run for 60 s")
+        );
+        assert!(started.elapsed() >= Duration::from_millis(900));
+        assert!(started.elapsed() < Duration::from_secs(30));
+    }
+
+    /// Finding 4-1 of review round 4 of M3.  Asserts:
+    /// * a script gives the value of the driver's reply;
+    /// * its script timeout is its own `secs`, when the limit ends later;
+    /// * its script timeout ends at the limit, when the limit ends first.
+    #[test]
+    fn a_page_script_gives_its_value_within_the_limit() {
+        let (port, rx) = fake_driver(&[], ScriptReply::ok(json!(42)));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let value = p.run_script("lloyd", json!([]), 5, "a value").unwrap();
+        assert_eq!(value, json!(42));
+        let timeouts = script_timeouts(&received(&rx));
+        assert_eq!(timeouts.len(), 1, "{timeouts:?}");
+        assert!((4_000..=5_000).contains(&timeouts[0]), "{timeouts:?}");
+
+        let mut p = fake_page(port, in_secs(2.0), 7);
+        p.run_script("lloyd", json!([]), 60, "a value").unwrap();
+        let timeouts = script_timeouts(&received(&rx));
+        assert_eq!(timeouts.len(), 1, "{timeouts:?}");
+        assert!((1_000..=2_000).contains(&timeouts[0]), "{timeouts:?}");
+    }
+
+    /// Finding 4-1 of review round 4 of M3.  Asserts:
+    /// * a driver error before the limit gives the driver's error, not the
+    ///   limit line;
+    /// * a driver error after the limit gives the limit line;
+    /// * a script that starts after the limit gives the limit line, and
+    ///   sends no script to the driver.
+    #[test]
+    fn a_page_script_error_names_the_limit_only_past_the_limit() {
+        let error = json!({ "error": "javascript error", "message": "lloyd" });
+        let (port, _rx) = fake_driver(
+            &[],
+            ScriptReply {
+                delay: Duration::ZERO,
+                status: 500,
+                value: error,
+            },
+        );
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let e = p.run_script("lloyd", json!([]), 5, "a value").unwrap_err();
+        assert!(
+            format!("{e:#}").contains("javascript error: lloyd"),
+            "{e:#}"
+        );
+        assert!(!format!("{e:#}").contains("time limit"), "{e:#}");
+
+        let timeout = json!({ "error": "script timeout", "message": "lloyd" });
+        let (port, rx) = fake_driver(
+            &[],
+            ScriptReply {
+                delay: Duration::from_millis(1_500),
+                status: 500,
+                value: timeout,
+            },
+        );
+        let mut p = fake_page(port, in_secs(1.0), 7);
+        let e = p.run_script("lloyd", json!([]), 60, "a value").unwrap_err();
+        assert_eq!(e.to_string(), limit_line("lloyd", 7, "a value"));
+        assert_eq!(script_timeouts(&received(&rx)).len(), 1);
+
+        let mut p = fake_page(port, Instant::now(), 7);
+        let e = p.run_script("lloyd", json!([]), 60, "a value").unwrap_err();
+        assert_eq!(e.to_string(), limit_line("lloyd", 7, "a value"));
+        assert_eq!(script_timeouts(&received(&rx)), Vec::<u64>::new());
+    }
+
+    /// Finding 4-19 of review round 4 of M3.  Asserts:
+    /// * a drop sends each file's URL, name and type to the page;
+    /// * a drop that the page counts in full passes;
+    /// * a drop that the page counts short fails, with the count.
+    #[test]
+    fn a_page_drop_fails_unless_the_page_has_each_file() {
+        let files = [
+            ("/lloyd.wav", "lloyd.wav", "audio/wav"),
+            ("/acme.wav", "acme.wav", "audio/wav"),
+        ];
+        let (port, rx) = fake_driver(&[], ScriptReply::ok(json!(2)));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        p.drop_files(&files).unwrap();
+        let sent: Vec<Value> = received(&rx)
+            .into_iter()
+            .filter(|(request, _)| request.ends_with("/execute/async"))
+            .map(|(_, body)| body["args"][0].clone())
+            .collect();
+        assert_eq!(sent.len(), 1, "{sent:?}");
+        let text = |file: &Value, key: &str| file[key].as_str().unwrap_or_default().to_string();
+        let sent_files: Vec<(String, String, String)> = sent[0]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|file| (text(file, "url"), text(file, "name"), text(file, "type")))
+            .collect();
+        let wanted: Vec<(String, String, String)> = files
+            .iter()
+            .map(|(url, name, kind)| (url.to_string(), name.to_string(), kind.to_string()))
+            .collect();
+        assert_eq!(sent_files, wanted);
+
+        let (port, _rx) = fake_driver(&[], ScriptReply::ok(json!(1)));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let e = p.drop_files(&files).unwrap_err();
+        assert_eq!(e.to_string(), "the drop failed: 1");
+    }
+
+    /// Finding 4-20 of review round 4 of M3.  Asserts:
+    /// * a page script's `ok` is its value;
+    /// * a page script's `error` is an error that holds its text;
+    /// * a time limit line names the place of the call.
+    #[test]
+    fn a_page_script_gives_its_ok_or_its_error() {
+        let (port, _rx) = fake_driver(&[], ScriptReply::ok(json!({ "ok": "lloyd" })));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        assert_eq!(
+            in_page(&mut p, "return 1;", json!([]), 5).unwrap(),
+            json!("lloyd")
+        );
+
+        let (port, _rx) = fake_driver(&[], ScriptReply::ok(json!({ "error": "boom" })));
+        let mut p = fake_page(port, in_secs(600.0), 7);
+        let e = in_page(&mut p, "return 1;", json!([]), 5).unwrap_err();
+        assert_eq!(e.to_string(), "in the page: boom");
+
+        let mut p = fake_page(port, Instant::now(), 7);
+        let line = line!() + 1;
+        let e = in_page(&mut p, "return 1;", json!([]), 5).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            limit_line(
+                "lloyd",
+                7,
+                &format!("the page script of {}:{line}", file!())
+            )
+        );
+    }
+
     #[test]
     fn a_run_of_the_model_may_take_four_hours() {
         assert_eq!(MODEL_RUN_SECS, 14_400);

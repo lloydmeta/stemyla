@@ -521,6 +521,7 @@ const GIT_OPTION: &str = "git option";
 const GIT_OUTPUT: &str = "git output";
 const GIT_SUB: &str = "git subcommand";
 const UNREADABLE: &str = "cannot read the command";
+const WIDE_SEARCH: &str = "wide search";
 
 /// Commands that the guard refuses, each with the label of its refusal.
 /// Each rule of the guard has a case that gives another result without it.
@@ -684,6 +685,94 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (GIT_SUB, "git --work-tree x commit"),
     (GIT_SUB, "git --namespace x commit"),
     (GIT_SUB, "git add x"),
+    // A search from the whole disk, a home folder, all users or all
+    // volumes, in each form of the path, and after each prefix.
+    (WIDE_SEARCH, "find / -name x"),
+    (WIDE_SEARCH, "find // -name x"),
+    (WIDE_SEARCH, "find ~ -name x"),
+    (WIDE_SEARCH, "find ~/ -name x"),
+    (WIDE_SEARCH, "find $HOME -name x"),
+    (WIDE_SEARCH, "find $HOME/ -name x"),
+    (WIDE_SEARCH, "find ${HOME} -name x"),
+    (WIDE_SEARCH, "find \"$HOME\" -name x"),
+    (WIDE_SEARCH, "find '/' -name x"),
+    (WIDE_SEARCH, "find \"~\" -name x"),
+    (WIDE_SEARCH, "find /Users -name x"),
+    (WIDE_SEARCH, "find /Users/ -name x"),
+    (WIDE_SEARCH, "find \"/Users/\" -name x"),
+    (WIDE_SEARCH, "find /Users/lloyd -name x"),
+    (WIDE_SEARCH, "find /Users/lloyd/ -name x"),
+    (WIDE_SEARCH, "find /users -name x"),
+    (WIDE_SEARCH, "find /Volumes -name x"),
+    (WIDE_SEARCH, "find /Volumes/ -name x"),
+    (WIDE_SEARCH, "find -L / -name x"),
+    (WIDE_SEARCH, "find -f / -name x"),
+    // Only the `-f` arm finds the second start path.
+    (WIDE_SEARCH, "find -f . -f / -name x"),
+    // Finding 4-6 of review round 4 of M3: a final `/.` or `/*`, the data
+    // volume of macOS, `~<name>`, `nice` and `sudo`.
+    (WIDE_SEARCH, "du -sh ~/*"),
+    (WIDE_SEARCH, "find /*"),
+    (WIDE_SEARCH, "find /."),
+    (WIDE_SEARCH, "find /Users/lloyd/."),
+    (WIDE_SEARCH, "find ~lloyd -name x"),
+    (WIDE_SEARCH, "find /System/Volumes/Data -name x"),
+    (WIDE_SEARCH, "find /System/Volumes/Data/Users/lloyd -name x"),
+    (WIDE_SEARCH, "nice find / -name x"),
+    (WIDE_SEARCH, "sudo find / -name x"),
+    (WIDE_SEARCH, "find /Users/lloyd/* -name x"),
+    (WIDE_SEARCH, "find $HOME/. -name x"),
+    (WIDE_SEARCH, "find ~lloyd/ -name x"),
+    (WIDE_SEARCH, "find /system/volumes/data/users -name x"),
+    (WIDE_SEARCH, "nice -n 10 find / -name x"),
+    (WIDE_SEARCH, "sudo -u lloyd du -sh ~"),
+    (GIT_SUB, "sudo git commit -m x"),
+    (WIDE_SEARCH, "find . / -name x"),
+    (WIDE_SEARCH, "find /"),
+    (WIDE_SEARCH, "FIND / -name x"),
+    (WIDE_SEARCH, "/usr/bin/find / -name x"),
+    (WIDE_SEARCH, "rtk find / -name x"),
+    (WIDE_SEARCH, "rtk proxy find / -name x"),
+    (WIDE_SEARCH, "timeout 60 find / -name x"),
+    (WIDE_SEARCH, "env find / -name x"),
+    (WIDE_SEARCH, "env FOO=1 find ~ -name x"),
+    (WIDE_SEARCH, "git log; find / -name x"),
+    (WIDE_SEARCH, "du -sh /"),
+    (WIDE_SEARCH, "du -sh ~"),
+    (WIDE_SEARCH, "du -sh ~/"),
+    (WIDE_SEARCH, "du -sh $HOME"),
+    (WIDE_SEARCH, "du -d 1 /Users"),
+    (WIDE_SEARCH, "du -sh /Volumes/"),
+    (WIDE_SEARCH, "du -sh target /"),
+    (WIDE_SEARCH, "rtk du -sh /"),
+    (WIDE_SEARCH, "timeout 60 du -sh ~"),
+    (WIDE_SEARCH, "env du -sh $HOME"),
+    (WIDE_SEARCH, "mdfind x"),
+    (WIDE_SEARCH, "mdfind -name x"),
+    (WIDE_SEARCH, "mdfind -onlyin"),
+    (WIDE_SEARCH, "mdfind -onlyin / x"),
+    (WIDE_SEARCH, "mdfind -onlyin ~ x"),
+    (WIDE_SEARCH, "mdfind -onlyin ~/ x"),
+    (WIDE_SEARCH, "mdfind -onlyin $HOME x"),
+    (WIDE_SEARCH, "mdfind -onlyin /Users x"),
+    (WIDE_SEARCH, "mdfind -onlyin \"/Users/\" x"),
+    (WIDE_SEARCH, "mdfind -onlyin /Volumes x"),
+    (
+        WIDE_SEARCH,
+        "mdfind -onlyin /Users/lloyd/Documents/rustt/stemyla -onlyin / x",
+    ),
+    (WIDE_SEARCH, "rtk mdfind x"),
+    (WIDE_SEARCH, "timeout 60 mdfind x"),
+    (WIDE_SEARCH, "env mdfind x"),
+    // Finding 5-4 of review round 5 of M3: a volume, such as
+    // `/Volumes/Macintosh HD`, which is `/`, and the volumes of the data volume.
+    (WIDE_SEARCH, "find \"/Volumes/Macintosh HD/\" -name x"),
+    (WIDE_SEARCH, "mdfind -onlyin \"/Volumes/Macintosh HD\" x"),
+    (WIDE_SEARCH, "find /System/Volumes/Data/Volumes -name x"),
+    (
+        WIDE_SEARCH,
+        "find \"/System/Volumes/Data/Volumes/Macintosh HD\" -name x",
+    ),
 ];
 
 /// Commands that the guard passes.
@@ -738,6 +827,27 @@ const GUARD_PASSES: &[&str] = &[
     "cargo test -p xtask --test clean",
     "for f in a b; do grep -n x \"$f\"; done",
     "export FOO=1",
+    // A search in the repo, or in a named folder under a home folder.
+    "find /Users/lloyd/Documents/rustt/stemyla -name x",
+    "find . -name x",
+    "find docs -name '~'",
+    "find -L . -name x -path /",
+    "find . ! -name x",
+    "find ./. -name x",
+    "find docs/* -name x",
+    "find ~/Documents/rustt/stemyla -name x",
+    "find /Users/lloyd/Documents/rustt/stemyla/. -name x",
+    "find /System/Volumes/Data/Users/lloyd/Documents -name x",
+    "nice -n 10 find . -name x",
+    "sudo -u lloyd du -sh target",
+    "rtk find . -name x",
+    "du -sh target",
+    "du -sh /Users/lloyd/Documents/rustt/stemyla/target",
+    "du -d 1 .",
+    "mdfind -onlyin /Users/lloyd/Documents/rustt/stemyla x",
+    "mdfind -onlyin . x",
+    "find \"/Volumes/Macintosh HD/Users/lloyd/Documents\" -name x",
+    "find \"/System/Volumes/Data/Volumes/Macintosh HD/Users/lloyd/Documents\" -name x",
     "",
 ];
 
@@ -868,6 +978,8 @@ fn the_bash_guard_refuses_writes() {
 /// The advice of a refusal by the guard's parse, and of each other refusal.
 const PARSE_ADVICE: &str = "This is a limit of the guard's parse.  Write the command again without a backtick or an unmatched quote, for example with `sed`.";
 const READ_ONLY_ADVICE: &str = "This agent is read only.  Do not try another form of the command.";
+/// The advice of a refusal of a wide search.
+const SEARCH_ADVICE: &str = "Search in the repo, or in the absolute folder that the brief names.";
 
 #[test]
 fn the_bash_guard_explains_each_refusal() {
@@ -904,6 +1016,14 @@ fn the_bash_guard_explains_each_refusal() {
         (
             "not json".to_string(),
             format!("read-only guard: cannot read the command.  {READ_ONLY_ADVICE}\n"),
+        ),
+        (
+            bash_call("find / -name x"),
+            format!("read-only guard: wide search: find / -name x.  {SEARCH_ADVICE}\n"),
+        ),
+        (
+            bash_call("mdfind x"),
+            format!("read-only guard: wide search: mdfind x.  {SEARCH_ADVICE}\n"),
         ),
     ];
     let failures: Vec<String> = cases
@@ -1335,7 +1455,21 @@ const REVIEW_SKILL_START: &str = "!`target/debug/xtask review start $0 $1`";
 /// `model` or `effort` ([`AGENT_CALL_RULE`]), the match of a reported
 /// repeat in step 4, item 4, and its no-fix line in step 10, and the names
 /// that `review clean` removes.
+///
+/// The maintainer's request of 2026-11-13 adds the absolute paths of each
+/// prompt template, and the check that no agent of the round still runs.
+/// Findings 4-3 and 4-4 of review round 4 of M3 of `gpu-speed.md` add the
+/// report of an agent that a team leader cannot stop, and the processes
+/// that an agent may stop.
 const REVIEW_SKILL_TEXT: &[&str] = &[
+    "Stop only a process that you can tie to your own agents.",
+    "report it to the orchestrator with SendMessage, as for a stalled subagent.  The orchestrator stops it with TaskStop.",
+    "Never stop `caffeinate`, a person's browser or driver, or a process that you cannot tie to your own agents.",
+    "* Before you say that the round's agents have ended, or give your final answer, check that none of them still runs.",
+    "An agent's final report does not stop its background commands.",
+    "Each prompt template below names a path only through a slot that holds an absolute path, such as `<target>`.",
+    "Fill in each slot before you start the agent.  The text that the agent gets holds no unfilled slot.",
+    "* First, check that no agent of the round still runs, as \"Before the steps\" says.",
     AGENT_CALL_RULE,
     "* From round 4, also find each row of `<run>/log.md` whose Action is `reported, not fixed`.",
     "* Do not fix a reported repeat (step 4, item 4).  Its action is `reported, not fixed`.",
@@ -1481,10 +1615,12 @@ fn claude_md_commands() -> Vec<String> {
         .collect()
 }
 
-/// Decision 0026: tier `push` runs the fmt, clippy, test, `docs-check` and
-/// Trunk build lines of `CLAUDE.md`'s Commands, and only those.  So a line
-/// that one of them adds or drops fails here.  Each line that no tier runs
-/// (`never_run`) is also a line of the Commands.
+/// Decision 0026: the lines of `lines` are the fmt, clippy, test,
+/// `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands, and only
+/// those.  Tier `push` runs them, and the perf gate of decision 0031,
+/// which is not one of them.  So a line that one side adds or drops fails
+/// here.  Each line that no tier runs (`never_run`) is also a line of the
+/// Commands.
 #[test]
 fn the_push_tier_runs_the_lines_of_claude_md() {
     let commands = claude_md_commands();
@@ -1686,7 +1822,20 @@ const SIZING_SIGNALS: &[&str] = &[
 /// correction of 2026-11-01 adds the list of choices that hinge on the
 /// maintainer, each with its options and a recommendation.
 /// M7 adds the PR body steps and the attention review (decision 0027).
+/// The maintainer's request of 2026-11-13 adds the absolute paths of each
+/// brief and template, and the check that no subagent still runs.
+/// Findings 4-3 and 4-4 of review round 4 of M3 of `gpu-speed.md` add the
+/// report of an agent that a team leader cannot stop, and the processes
+/// that an agent may stop.
 const ORCHESTRATE_SKILL_TEXT: &[&str] = &[
+    "Stop only a process that you can tie to your own agents.",
+    "report it to the orchestrator with SendMessage, as for a stalled subagent.  The orchestrator stops it with TaskStop.",
+    "Never stop `caffeinate`, a person's browser or driver, or a process that you cannot tie to your own agents.",
+    "A slot that names a path gets an absolute path.  The text that the agent gets holds no unfilled slot.",
+    "* Before you say that your agents have ended, or give a final report, check that none of them still runs.",
+    "Fill in each slot that names a path with an absolute path.  The text holds no unfilled slot:",
+    "the absolute path of the scratchpad folder `m<n>/`",
+    "Before each report, check that none of your agents still runs.",
     "name: orchestrate",
     AGENT_CALL_RULE,
     "Never start a fork, because a fork gets your context.",
@@ -1798,6 +1947,25 @@ fn the_orchestrate_skill_keeps_its_key_lines() {
         "{} orchestrate skill problem(s):\n{}",
         problems.len(),
         problems.join("\n")
+    );
+}
+
+/// * Neither skill holds the placeholder `<scratchpad>`, which an agent can
+///   read as a path.
+#[test]
+fn the_skills_name_no_scratchpad_placeholder() {
+    let root = xtask::workspace_root();
+    let holding: Vec<&str> = [REVIEW_SKILL, ORCHESTRATE_SKILL]
+        .into_iter()
+        .filter(|skill| {
+            std::fs::read_to_string(root.join(skill))
+                .unwrap_or_else(|e| panic!("reading {skill}: {e}"))
+                .contains("<scratchpad>")
+        })
+        .collect();
+    assert!(
+        holding.is_empty(),
+        "{holding:?} hold `<scratchpad>`.  Fix: name the slot as an absolute path, such as `<the absolute path of the scratchpad folder>`.  On 2026-11-13 a reviewer ran `find /` from such a placeholder for 3.6 hours."
     );
 }
 

@@ -16,6 +16,8 @@ use super::*;
 use encode::{EncodeOut, FLAC_BLOCK, MP3_BLOCK, OutFile, alac_end};
 use js_sys::{Object, Reflect};
 use m4a::FRAMES_PER_PACKET;
+use roformer::{BandGroup, band_groups};
+use roformer_gpu::net::normalise_bands;
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::{Cell, RefCell};
 use stem_protocol::{Encode, Encoded};
@@ -114,30 +116,6 @@ export function next_fetch_sends_views() {
   };
 }
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-// Records what each OPFS write gets, in call order: "blob", "whole" (a
-// typed array that is its whole buffer) or "view".  A simpler copy of
-// the spy in app/src/store.rs.
-let record = null;
-let real_write = null;
-export function start_spy() {
-  if (real_write) throw new Error("a spy is already on write");
-  const proto = FileSystemWritableFileStream.prototype;
-  real_write = proto.write;
-  record = [];
-  proto.write = function (data) {
-    if (data instanceof Blob) record.push("blob");
-    else if (ArrayBuffer.isView(data))
-      record.push(data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? "whole" : "view");
-    else record.push(typeof data);
-    return real_write.call(this, data);
-  };
-}
-// Restores `write` and returns the record, joined by spaces.
-export function stop_spy() {
-  FileSystemWritableFileStream.prototype.write = real_write;
-  real_write = null;
-  return record.join(" ");
-}
 async function folder_at(path, create) {
   let d = await navigator.storage.getDirectory();
   for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p, { create });
@@ -215,6 +193,26 @@ export function stop_sync_spy() {
   FileSystemSyncAccessHandle.prototype.write = sync_real;
   sync_real = null;
   return sync_record.join(" ");
+}
+// Counts the calls of `createWritable` (TD-103: Safari keeps the swap file
+// of each write stream that closes).
+let writables = null;
+let writable_real = null;
+export function start_writable_spy() {
+  if (writable_real) throw new Error("a spy is already on createWritable");
+  const proto = FileSystemFileHandle.prototype;
+  writable_real = proto.createWritable;
+  writables = 0;
+  proto.createWritable = function (...args) {
+    writables++;
+    return writable_real.apply(this, args);
+  };
+}
+// Restores `createWritable` and returns the count of its calls.
+export function stop_writable_spy() {
+  FileSystemFileHandle.prototype.createWritable = writable_real;
+  writable_real = null;
+  return writables;
 }
 // Records the bytes of each blob that FileReaderSync reads as an
 // ArrayBuffer, in call order.
@@ -310,8 +308,6 @@ extern "C" {
     fn record_next_fetch();
     fn last_redirect() -> Option<String>;
     fn hide_gpu() -> js_sys::Function;
-    fn start_spy();
-    fn stop_spy() -> String;
     async fn plant_folder(path: &str);
     #[wasm_bindgen(js_name = remove_at)]
     async fn remove_at_js(path: &str) -> JsValue;
@@ -323,6 +319,8 @@ extern "C" {
     async fn names_in_js(path: &str) -> JsValue;
     fn start_sync_spy(fail_at: u32);
     fn stop_sync_spy() -> String;
+    fn start_writable_spy();
+    fn stop_writable_spy() -> u32;
     fn refuse_sync_handle(n: u32) -> js_sys::Function;
     fn start_read_spy();
     fn stop_read_spy() -> Vec<f64>;
@@ -652,16 +650,46 @@ async fn a_picked_file_the_gpu_failed_to_load_is_not_stored() {
     assert_eq!(stored_bytes().await, [7]);
 }
 
+/// TD-103: Safari keeps the swap file of each write stream that closes,
+/// 350 MB for each model save.  So the model's writes open no write
+/// stream: a sync access handle writes the file in place.
+#[wasm_bindgen_test]
+async fn the_model_writes_open_no_write_stream() {
+    fresh().await;
+    let body = [4u8, 5, 6];
+    let progress = Closure::<dyn FnMut(f64, f64)>::new(|_: f64, _: f64| {});
+    next_fetch_sends_views();
+    start_writable_spy();
+    let from_blob = opfs_write("model", &blob(&body).into()).await;
+    let from_bytes = opfs_write("model", &Uint8Array::from(&body[..]).into()).await;
+    let put = cache_put(CACHE_NAME, &Uint8Array::from(&body[..])).await;
+    let downloaded = download_to_opfs(
+        "/weights/m",
+        DOWNLOAD_NAME,
+        progress.as_ref().unchecked_ref(),
+        false,
+    )
+    .await;
+    let opened = stop_writable_spy();
+    assert_eq!(opened, 0, "write streams opened");
+    assert_eq!(
+        (from_blob.as_bool(), from_bytes.as_bool(), put.as_bool()),
+        (Some(true), Some(true), Some(true))
+    );
+    assert_eq!(downloaded.ok().and_then(|n| n.as_f64()), Some(9.0));
+    assert_eq!(stored_bytes().await, body);
+}
+
 /// Chunks that are views of larger buffers, which Safari 27 would write
 /// whole (see `whole` in the worker).  Chrome writes just the view, so the
-/// read-back fails only in Safari without that copy; the spy on `write`
-/// fails in any browser (MEM-5).
+/// read-back fails only in Safari without that copy; the spy on the sync
+/// access handle's `write` fails in any browser (MEM-5).
 #[wasm_bindgen_test]
 async fn a_download_holds_only_the_bytes_of_its_chunks() {
     fresh().await;
     next_fetch_sends_views();
     let progress = Closure::<dyn FnMut(f64, f64)>::new(|_: f64, _: f64| {});
-    start_spy();
+    start_sync_spy(0);
     let got = download_to_opfs(
         "/weights/m",
         DOWNLOAD_NAME,
@@ -669,7 +697,7 @@ async fn a_download_holds_only_the_bytes_of_its_chunks() {
         false,
     )
     .await;
-    assert_eq!(stop_spy(), "whole whole");
+    assert_eq!(stop_sync_spy(), "whole whole");
     assert_eq!(got.ok().and_then(|n| n.as_f64()), Some(9.0));
     let stored = cache_get(DOWNLOAD_NAME).await.expect("no error");
     assert_eq!(stored.unchecked_into::<Uint8Array>().to_vec(), b"lloydacme");
@@ -683,16 +711,11 @@ async fn opfs_write_writes_more_than_one_slice() {
         ("a blob", blob(&body).into()),
         ("bytes", JsValue::from(Uint8Array::from(&body[..]))),
     ] {
-        start_spy();
+        start_sync_spy(0);
         let written = opfs_write("model", &src).await;
-        let record = stop_spy();
+        let record = stop_sync_spy();
         assert_eq!(written.as_bool(), Some(true));
-        let whole_slices = if what == "a blob" {
-            "blob blob"
-        } else {
-            "whole whole"
-        };
-        assert_eq!(record, whole_slices, "{what}");
+        assert_eq!(record, "whole whole", "{what}: whole arrays (MEM-5)");
         let got = cache_get("model")
             .await
             .expect("no error")
@@ -2731,11 +2754,19 @@ struct FakeNetwork {
 }
 
 impl Network for FakeNetwork {
-    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+    async fn stems(
+        &mut self,
+        index: usize,
+        x: Stereo,
+        mut each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String> {
         if self.fail_at == Some(index) {
             return Err(format!("the fake network failed at chunk {index}"));
         }
-        Ok(fake_stems_of(x))
+        for (stem, stereo) in fake_stems_of(&x).into_iter().enumerate() {
+            each(stem, stereo);
+        }
+        Ok(())
     }
 
     fn so_far(&self) -> String {
@@ -3197,6 +3228,238 @@ async fn a_stored_mix_keeps_the_worker_memory_flat() {
     );
 }
 
+/// The peak of the Rust heap since the last call, which starts the next
+/// peak at the live bytes now.
+fn close_phase() -> usize {
+    let peak = PEAK.get();
+    PEAK.set(LIVE.get());
+    peak
+}
+
+/// The measured peaks of each phase of each chunk, in live heap bytes, in
+/// the order of the chunks.
+#[derive(Default)]
+struct PhasePeaks {
+    upload: Vec<usize>,
+    masks: Vec<usize>,
+    between: Vec<usize>,
+}
+
+/// A fake GPU half that holds in WebAssembly memory what the real one
+/// holds: one band of the normalised input during the upload, made by the
+/// real normalisation (`normalise_bands`), and each mask of
+/// `[T, FEATURES]` floats, as `Gpu::read` copies it.  As a network, it
+/// runs the real CPU half ([`chunk_stems`]), and closes a phase at each
+/// boundary that it sees.  The upload phase runs from the chunk's start
+/// to the upload's end.  The masks phase runs to the last stem.  The
+/// between phase runs to the next chunk's start.
+struct FakeGpu {
+    frames: usize,
+    /// The band groups, and gains of 1: `FEATURES` of them, as many as the
+    /// model has.  Each group takes its first `count x width`.
+    groups: Vec<BandGroup>,
+    gains: Vec<f32>,
+    peaks: Rc<RefCell<PhasePeaks>>,
+}
+
+impl GpuHalf for FakeGpu {
+    fn upload(&mut self, features: &[f32]) {
+        let frames = features.len() / FEATURES;
+        self.frames = frames;
+        // As `Job::set_input`: `normalise_bands` holds one band at a time.
+        // The groups and their gains are in the model, not in the chunk's
+        // working set, so they are made before the separation.
+        let groups = self
+            .groups
+            .iter()
+            .map(|g| (g, &self.gains[..g.count * g.width]));
+        normalise_bands(features, groups, |_, rows| {
+            std::hint::black_box(rows);
+        });
+        let peak = close_phase();
+        self.peaks.borrow_mut().upload.push(peak);
+    }
+
+    async fn mask(&mut self, _stem: usize) -> Result<Vec<f32>, String> {
+        Ok(vec![0.5; self.frames * FEATURES])
+    }
+}
+
+impl Network for FakeGpu {
+    async fn stems(
+        &mut self,
+        index: usize,
+        x: Stereo,
+        each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String> {
+        let peak = close_phase();
+        if index > 0 {
+            self.peaks.borrow_mut().between.push(peak);
+        }
+        let out = chunk_stems(self, x, each).await;
+        let peak = close_phase();
+        self.peaks.borrow_mut().masks.push(peak);
+        out
+    }
+
+    fn so_far(&self) -> String {
+        "the fake GPU half".into()
+    }
+
+    fn finish(&self) {}
+}
+
+/// The bytes by which a measured phase may differ from the function's.
+/// They are the small buffers that `roformer::separate::working_set` does
+/// not name:
+/// * the FFT plan and the buffers of `stft` or `istft`: an input of 2,048
+///   floats (8,192 bytes), an output of 1,025 complex values (8,200),
+///   the scratch, and the plan's twiddles and the planner's cache, each
+///   under 16,384 bytes;
+/// * the two `hann` windows of 2,048 floats (8,192 bytes each);
+/// * the log strings of each chunk (under 1,024 bytes);
+/// * the `Segment` and `Vec` headers: 6 stems of 2 channels of 12 bytes,
+///   and the `Vec` of 6 stems (under 1,024 bytes).
+///
+/// Their sum is under 128 KiB.  On 2026-11-12, in Chrome, the phases held
+/// at most 37,420 bytes more than the function gives (the masks phase).
+const SMALL: usize = 128 << 10;
+
+/// MEM-4.  It separates a stored mix of 5 chunks at `CHUNK` and overlap
+/// 2, with the real CPU half and a fake GPU half.  It asserts:
+/// * for each phase of chunks 2 and 3, the peak that it holds is within
+///   `SMALL` of what `roformer::separate::working_set` gives for that
+///   phase, on both sides.
+#[wasm_bindgen_test]
+async fn a_chunk_of_the_default_length_holds_its_working_set() {
+    let frames = 3 * CHUNK / OVERLAP;
+    let chunks = Demixer::new(mix_of(frames), CHUNK, OVERLAP, STEMS.len()).num_chunks();
+    assert_eq!(chunks, 5, "the mix has 5 chunks");
+    fresh().await;
+    plant_at(MIX_PATH, &mix_file(&mix_of(frames))).await;
+    let peaks = Rc::new(RefCell::new(PhasePeaks {
+        upload: Vec::with_capacity(chunks),
+        masks: Vec::with_capacity(chunks),
+        between: Vec::with_capacity(chunks),
+    }));
+    let fake = FakeGpu {
+        frames: 0,
+        groups: band_groups(),
+        gains: vec![1.0; FEATURES],
+        peaks: Rc::clone(&peaks),
+    };
+    SENT.with_borrow_mut(|sent| {
+        sent.clear();
+        sent.reserve(8 * chunks);
+    });
+    let start = LIVE.get();
+    PEAK.set(start);
+    separate_mix(
+        stored_mix(frames),
+        Some(SESSION),
+        CHUNK,
+        OVERLAP,
+        |_| fake,
+        now_s(),
+    )
+    .await
+    .expect("separated");
+    assert_eq!(reply_types().last().map(String::as_str), Some("done"));
+    let want = roformer::separate::working_set(CHUNK, OVERLAP);
+    let peaks = peaks.borrow();
+    for (phase, measured) in [
+        (&want.upload, &peaks.upload),
+        (&want.masks, &peaks.masks),
+        (&want.between, &peaks.between),
+    ] {
+        // Chunks 2 and 3.  The between phase of chunk k ends at chunk
+        // k + 1's start, so its list too starts at chunk 1.
+        let after_warm_up = &measured[1..3];
+        let parts: Vec<String> = phase
+            .largest()
+            .parts
+            .iter()
+            .map(|p| format!("{} {}", p.name, p.bytes))
+            .collect();
+        web_sys::console::log_1(
+            &format!(
+                "working set: {} phase: measured {:?} bytes above the start for chunks 1 to {chunks}; the function gives {} at {}: {}",
+                phase.name,
+                measured.iter().map(|m| m - start).collect::<Vec<_>>(),
+                phase.bytes(),
+                phase.largest().at,
+                parts.join(", ")
+            )
+            .into(),
+        );
+        for (k, &peak) in after_warm_up.iter().enumerate() {
+            let held = peak - start;
+            assert!(
+                held.abs_diff(phase.bytes()) <= SMALL,
+                "the {} phase of chunk {} holds {held} bytes, and the function gives {} ({}): more than {SMALL} apart",
+                phase.name,
+                k + 2,
+                phase.bytes(),
+                phase.largest().at
+            );
+        }
+    }
+}
+
+/// M1 of `plans/active/gpu-speed.md`.  The mix is in memory, so a read is
+/// two channels of `min(chunk, frames)` floats.  The cases put the last
+/// chunks on the reflection path and on the zero path.  It asserts:
+/// * the peak that each `Demixer::next_input` holds is the span that it
+///   reads plus the two channels of the chunk's input, each of `chunk`
+///   floats.
+#[wasm_bindgen_test]
+fn a_chunk_input_holds_only_its_span_and_its_two_channels() {
+    // (frames, chunk, overlap): padded, with a last chunk of each path;
+    // unpadded and shorter than a chunk, the same.
+    for (frames, chunk, overlap) in [(5003, 1000, 2), (700, 1000, 2)] {
+        let mut d = Demixer::new(mix_of(frames), chunk, overlap, STEMS.len());
+        let span = chunk.min(frames);
+        let step = chunk / overlap;
+        let border = chunk - step;
+        let total = if frames > 2 * border {
+            frames + 2 * border
+        } else {
+            frames
+        };
+        let mut paths = (false, false);
+        let mut lengths = Vec::new();
+        loop {
+            // The unpadded part of the next chunk: reflected, or zeros.
+            let unpadded = total.saturating_sub(d.chunk_index() * step).min(chunk);
+            if unpadded < chunk && unpadded > chunk / 2 + 1 {
+                paths.0 = true;
+            } else if unpadded > 0 && unpadded <= chunk / 2 + 1 {
+                paths.1 = true;
+            }
+            let start = LIVE.get();
+            PEAK.set(start);
+            let Some(x) = d.next_input().expect("a read from memory") else {
+                break;
+            };
+            let held = PEAK.get() - start;
+            assert_eq!(
+                held,
+                4 * (2 * span + 2 * chunk),
+                "frames={frames} chunk={chunk}: chunk {} holds its span and its two channels",
+                d.chunk_index()
+            );
+            lengths.push(x[0].len());
+            d.accept(&fake_stems_of(&x));
+        }
+        assert!(lengths.iter().all(|&n| n == chunk), "{lengths:?}");
+        assert_eq!(
+            paths,
+            (true, true),
+            "frames={frames}: a chunk pads by reflection, and one with zeros"
+        );
+    }
+}
+
 #[wasm_bindgen_test]
 async fn a_missing_mix_file_ends_with_unstored() {
     fresh().await;
@@ -3386,7 +3649,12 @@ struct RewritingNetwork {
 }
 
 impl Network for RewritingNetwork {
-    async fn stems(&mut self, _index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
+    async fn stems(
+        &mut self,
+        _index: usize,
+        x: Stereo,
+        mut each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String> {
         self.calls += 1;
         if self.calls == self.last {
             // Over a second, so that Safari's `lastModified`, in whole
@@ -3395,7 +3663,10 @@ impl Network for RewritingNetwork {
             let other: Stereo = fake_mix().map(|c| c.iter().map(|v| 0.5 * v).collect());
             plant_at(MIX_PATH, &mix_file(&other)).await;
         }
-        Ok(fake_stems_of(x))
+        for (stem, stereo) in fake_stems_of(&x).into_iter().enumerate() {
+            each(stem, stereo);
+        }
+        Ok(())
     }
 
     fn so_far(&self) -> String {

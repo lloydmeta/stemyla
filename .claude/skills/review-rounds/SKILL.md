@@ -26,6 +26,7 @@ The lines above are the output of `xtask review start`.  This skill runs one rev
 * The notices of the background reviewers and of the mutants run start new turns.  So in the default permission mode, `review check` of step 8 asks for approval once in each round.  A late `review mutants` can also ask for approval.  `review log-check` and `review clean` of step 11 also ask once in each round.  They run after the findings file, so the counts of the round do not include them.  Approve each one once.  Do not approve with "don't ask again".  That changes the local settings file of Claude Code, and then `review check` fails the round.
 * In an agent-run phase, "the person" in this skill is the orchestrator.
 * If you are a subagent, do not give your final answer before the last step that you do.  Your run ends with your final answer, and a nested agent or a background command then has no reader.
+* Before you say that the round's agents have ended, or give your final answer, check that none of them still runs.  Each agent has given its final report, and no background command of it runs.  An agent's final report does not stop its background commands.  To find a command, read the process list, for example with `ps -A -o pid,etime,command`.  Stop only a process that you can tie to your own agents.  Tie it by its task ID or PID from a background notice.  Or tie it by a command line that holds the agent's worktree path (`target/review/<round>-`).  Stop an agent with TaskStop, and a command with `kill <pid>`.  If you cannot stop an agent, as a team leader cannot, report it to the orchestrator with SendMessage, as for a stalled subagent.  The orchestrator stops it with TaskStop.  Never stop `caffeinate`, a person's browser or driver, or a process that you cannot tie to your own agents.  Report it instead.  Say what you stopped in your final answer.
 * Do not pass `model` or `effort` to the Agent tool.  The agent file decides them (decision 0025).
 * If the Write tool refuses a file of this skill to a subagent, do not write it in another way.  Give the path and the whole text of each such file in your final answer.  Also say at which step you stopped.
 * In that case, keep the text of each refused file, and go on.  Do the fixes and the commit of step 10.  Do step 11 up to the log, and write the log's text.  Leave the approvals fields as step 9 wrote them.  If you can write a scratch file, run `target/debug/xtask review log-check` on a copy of the log there.  Then stop.  With `--review-only`, stop after step 9.
@@ -42,6 +43,8 @@ Take each value from the lines of `review start`.  Do not make a path from the b
 * The branch route: the reviewer lines below the line `branch <base>..<head>:`.
 * The since route: the reviewer lines below the line `since <since>..<head>:`.  The line "no changes" means that the since range is empty.
 * The reasons of a reviewer: the text after its name and the colon on its line of a route, in `<run>/$1/route.txt`.  That file holds the lines of the two routes with all their reasons.  The lines above show at most 5 paths of a reviewer, then "(+n more)".
+
+Each prompt template below names a path only through a slot that holds an absolute path, such as `<target>`.  Fill in each slot before you start the agent.  The text that the agent gets holds no unfilled slot.
 
 The round's folder is `<run>/$1`.  `review start` wrote `branch.diff`, `since.diff`, `route.txt` and `state.json` there.  The mutants run writes `mutants.txt`, `missed.txt`, `known.txt` and `mutants.out/` there.  Step 9 writes the findings file `<run>/$1/findings.md`.  The log of the branch is `<run>/log.md`.
 
@@ -380,6 +383,7 @@ Then check the log:
 
 Then remove the worktrees and folders of the round:
 
+* First, check that no agent of the round still runs, as "Before the steps" says.
 * Run `target/debug/xtask review clean $1`.  It removes each worktree or folder under `target/review/` whose name starts with `$1-`, also with changes.
 * It runs after the findings file, where the count of approvals of this step ends.  So the counts of the round do not include its approval.
 * If auto mode or a person refuses it, give the command to the person, and go on.

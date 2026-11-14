@@ -53,6 +53,8 @@ A "team" is a team leader and its subagents.  It is not the agent-teams feature 
 * One team runs at a time.  The teams share one branch and one working tree.
 * The deepest agents are two layers below the main session.
 * Keep the turn open until each background command and each nested agent has ended.  A subagent's final answer ends its run.
+* Give each agent absolute paths.  Fill in each slot of a brief or a prompt template before you start the agent.  A slot that names a path gets an absolute path.  The text that the agent gets holds no unfilled slot.
+* Before you say that your agents have ended, or give a final report, check that none of them still runs.  Each agent has given its final report, and no background command or agent of it runs.  To find a command, read the process list, for example with `ps -A -o pid,etime,command`.  Stop only a process that you can tie to your own agents.  Tie it by its task ID or PID from a background notice.  Or tie it by a command line that holds the agent's worktree path (`target/review/<round>-`).  Stop an agent with TaskStop, and a command with `kill <pid>`.  If you cannot stop an agent, as a team leader cannot, report it to the orchestrator with SendMessage, as for a stalled subagent.  The orchestrator stops it with TaskStop.  Never stop `caffeinate`, a person's browser or driver, or a process that you cannot tie to your own agents.  Report it instead.  Say what you stopped in your report.
 * Commit only signed, with `git commit -S`.  If signing fails, stop and report.
 * Before each commit, run `cargo run -p xtask -- check --tier commit` (GIT-2).
 * Before each review round and each push, run `cargo run -p xtask -- check --tier push`.
@@ -93,7 +95,7 @@ Record the session's model and effort in the plan's Surprises.  A subagent with 
 
 ### 1. Start the team leader
 
-Start a new `general-purpose` subagent with the brief of "The brief of a team leader".  Give it the milestone's name, the plan's path, the decisions so far, the scratchpad folder `m<n>/` and the review base.  The review base is the commit before the milestone's first commit.
+Start a new `general-purpose` subagent with the brief of "The brief of a team leader".  Give it the milestone's name, the plan's path, the decisions so far, the absolute path of the scratchpad folder `m<n>/`, and the review base.  The review base is the commit before the milestone's first commit.
 
 ### 2. The milestone plan and the work
 
@@ -190,10 +192,10 @@ After the last milestone, with CI green:
 
 ## The brief of a team leader
 
-Fill in this template, and give the team leader only that text:
+Fill in each slot of this template, and give the team leader only that text.  Fill in each slot that names a path with an absolute path.  The text holds no unfilled slot:
 
 ```text
-You are the team leader for milestone <M<n>: name> of <plan>.  The repo is <path>, on branch <branch> at <commit>.  The orchestrator is the main session.
+You are the team leader for milestone <M<n>: name> of <plan>.  The repo is <the absolute path of the repo>, on branch <branch> at <commit>.  The orchestrator is the main session.  Each path below that is not absolute is in the repo.
 
 Read first: CLAUDE.md; the plan's Purpose, the <M<n>> section, "How the work runs", Surprises and Decision log; docs/plans/PLANS.md; .claude/skills/review-rounds/SKILL.md; .claude/skills/orchestrate/SKILL.md.
 
@@ -202,10 +204,12 @@ Decisions so far: <the maintainer's answers and the agent decisions that this mi
 Your job:
 1. Write docs/plans/active/<plan>-m<n>.md by PLANS.md, and its line in docs/README.md.  Have a new Plan agent review it, at most 2 rounds.  The reviewer also checks proportion (docs/plans/PLANS.md).  Commit, signed.
 2. Start an implementer with that plan's path.  Each new test fails first, on an assert.
-3. Give the orchestrator each change of .claude/**, CLAUDE.md or the plan as a file or a unified diff in <scratchpad>/m<n>/.  `git apply --check` must pass on HEAD.  A change of CLAUDE.md or .claude/rules/** that a step or a review-round fix needs: give a step checkpoint before that commit, and wait until the orchestrator applies it.  Then that commit adds it by name.
+3. Give the orchestrator each change of .claude/**, CLAUDE.md or the plan as a file or a unified diff in <the absolute path of the scratchpad folder>/m<n>/.  `git apply --check` must pass on HEAD.  A change of CLAUDE.md or .claude/rules/** that a step or a review-round fix needs: give a step checkpoint before that commit, and wait until the orchestrator applies it.  Then that commit adds it by name.
 4. Give a checkpoint before review round 1, with each other diff.  Then wait.
 5. Run /review-rounds <base> <round> "<criteria>" from round 1, as the orchestrate skill says ("The review rounds").  Give a checkpoint after each round.
 6. After the last round, move the milestone plan to completed/, and give a close-out file.
+
+Give each agent that you start absolute paths.  Its text holds no unfilled slot.  Before each report, check that none of your agents still runs.  Each agent has given its final report, and no background command of it runs.
 
 Run `cargo run -p xtask -- check --tier commit` before each commit.  Sign each commit (`git commit -S`).  Write in ASD-STE100.  Never push, merge or run xtask publish.  Start each report with one line that says what you need.
 ```

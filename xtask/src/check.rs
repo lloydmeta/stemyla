@@ -4,13 +4,18 @@
 //! Tier `commit` reads the changed paths of one commit, and picks the
 //! checks that those paths need.  Tier `push` runs the fmt, clippy, test,
 //! `docs-check` and Trunk build lines of `CLAUDE.md`'s Commands.  A commit
-//! that touches a strict path ([`STRICT_PATHS`]) runs tier `push`.  No
-//! check is a browser test or `publish`, and CI stays the authority.
+//! that touches a strict path ([`STRICT_PATHS`]) runs tier `push`.  When
+//! tier `push` is asked and `STEMYLA_PERF_WEIGHTS` names the model, it
+//! also runs the perf gate, `e2e perf --gate`, in Chrome and Safari
+//! (decision 0031).  It does so for a path in `roformer/`, `roformer-gpu/`
+//! or `worker/`, a workspace file, or no known path.  No other check is a
+//! browser test, no check is `publish`, and CI stays the authority.
 //!
 //! The code has parts, so the tests can check the rules without a run.
 //! [`plan`] is a pure function of the tier, the paths and the workspace
 //! graph.  [`with_gpu_require`] gives the GPU test line the caller's
-//! `STEMYLA_REQUIRE` when it names a GPU need.  [`changed_paths`] and
+//! `STEMYLA_REQUIRE` when it names a GPU need.  [`with_perf_gate`] adds
+//! the perf gate.  [`changed_paths`] and
 //! [`graph`] read the repo.
 //! [`run_checks`] runs a plan with a runner that the caller gives, and
 //! [`run_command`] is the real runner.
@@ -63,12 +68,14 @@ impl Check {
 
     /// The command as `CLAUDE.md`'s Commands gives it: the environment and
     /// the argv, joined by spaces, in `(cd <folder> && ...)` for a folder.
+    /// A word or a value with whitespace is in single quotes
+    /// ([`shell_word`]).
     pub fn line(&self) -> String {
         let words: Vec<String> = self
             .env
             .iter()
-            .map(|(key, value)| format!("{key}={value}"))
-            .chain(self.argv.iter().cloned())
+            .map(|(key, value)| format!("{key}={}", shell_word(value)))
+            .chain(self.argv.iter().map(|word| shell_word(word)))
             .collect();
         let words = words.join(" ");
         if self.folder.is_empty() {
@@ -76,6 +83,16 @@ impl Check {
         } else {
             format!("(cd {} && {words})", self.folder)
         }
+    }
+}
+
+/// `word`, in single quotes when it holds whitespace, so a copied line
+/// keeps it as one shell word.
+fn shell_word(word: &str) -> String {
+    if word.chars().any(char::is_whitespace) {
+        format!("'{}'", word.replace('\'', "'\\''"))
+    } else {
+        word.to_string()
     }
 }
 
@@ -95,10 +112,11 @@ const GPU_TESTS: usize = 11;
 const TRUNK: usize = 12;
 
 /// The packages of the wasm32 clippy line.
-const WASM_PACKAGES: [&str; 5] = [
+const WASM_PACKAGES: [&str; 6] = [
     "app",
     "stem-worker",
     "decode-worker",
+    "write-worker",
     "stem-protocol",
     "engine",
 ];
@@ -165,6 +183,7 @@ pub const DOC_NIGHTLY: &str = "nightly-2026-10-30";
 pub fn never_run() -> Vec<(Check, &'static str)> {
     const BROWSER: &str =
         "CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026)";
+    const E2E: &str = "CI runs the browser tests; run a scenario by hand only when CI failed it (decision 0026).  Tier push, when asked, runs the perf gate, e2e perf --gate, with STEMYLA_PERF_WEIGHTS set (decision 0031).  It needs a path in roformer/, roformer-gpu/ or worker/, a workspace file, or no path known";
     vec![
         (
             Check::root("cargo run -p xtask -- setup"),
@@ -175,7 +194,7 @@ pub fn never_run() -> Vec<(Check, &'static str)> {
             BROWSER,
         ),
         (Check::root("cargo run -p xtask -- web-test"), BROWSER),
-        (Check::root("cargo run -p xtask -- e2e <scenario>"), BROWSER),
+        (Check::root("cargo run -p xtask -- e2e <scenario>"), E2E),
         (
             Check::root(&format!("cargo +{DOC_NIGHTLY} test -p roformer-gpu --doc")),
             "CI runs it; it needs the pinned nightly, and the stable doctest line runs the same doctests",
@@ -250,8 +269,10 @@ pub const STRICT_PATHS: &[(&str, &[&str])] = &[
             "protocol/src/**",
             "app/src/separator.rs",
             "app/src/decoder/client.rs",
+            "app/src/writer/client.rs",
             "worker/src/web.rs",
             "decoder/src/web.rs",
+            "writer/src/web.rs",
         ],
     ),
     (
@@ -280,6 +301,7 @@ pub const STRICT_PATHS: &[(&str, &[&str])] = &[
             "worker/src/web/encode.rs",
             "worker/src/web/stems.rs",
             "decoder/src/web.rs",
+            "writer/src/web.rs",
         ],
     ),
     (
@@ -745,6 +767,93 @@ pub fn with_gpu_require(mut plan: Plan, require: Option<&str>) -> Plan {
     plan
 }
 
+/// The variable that names the model file for the perf gate (decision
+/// 0031).
+pub const PERF_WEIGHTS: &str = "STEMYLA_PERF_WEIGHTS";
+
+/// The folders whose changes the perf gate measures.
+const PERF_FOLDERS: [&str; 3] = ["roformer/", "roformer-gpu/", "worker/"];
+
+/// The browsers of the perf gate, in the order that it runs them.
+const PERF_BROWSERS: [&str; 2] = ["chrome", "safari"];
+
+/// The perf gate in `browser`, with the model file `weights`.  The argv is
+/// a list, so a path with spaces stays one word.
+fn perf_gate(browser: &str, weights: &str) -> Check {
+    let argv = [
+        "cargo",
+        "run",
+        "-p",
+        "xtask",
+        "--",
+        "e2e",
+        "perf",
+        "--gate",
+        "--browser",
+        browser,
+        "--weights",
+        weights,
+    ];
+    Check {
+        argv: argv.iter().map(|word| word.to_string()).collect(),
+        env: Vec::new(),
+        folder: String::new(),
+    }
+}
+
+/// `plan` with the perf gate of decision 0031.  `asked` is the tier that
+/// `check` was asked for, and `weights` is [`PERF_WEIGHTS`].  The gate
+/// comes after the Trunk line, which builds the page.
+/// * `asked` is `Tier::Commit`: no line, also when a strict path moves
+///   the plan up to tier `push`.
+/// * A path in [`PERF_FOLDERS`], a workspace file, or no path known, and
+///   `weights` set: a run line in Chrome, then one in Safari.
+/// * The same paths and no `weights`: one skip line.
+/// * Else: one skip line with the reason of the paths.
+pub fn with_perf_gate(
+    mut plan: Plan,
+    asked: Tier,
+    paths: &[String],
+    weights: Option<&str>,
+) -> Plan {
+    if asked == Tier::Commit {
+        return plan;
+    }
+    let measured = paths.is_empty()
+        || paths.iter().any(|path| {
+            is_workspace_file(path) || PERF_FOLDERS.iter().any(|folder| path.starts_with(folder))
+        });
+    let weights = weights.map(str::trim).filter(|w| !w.is_empty());
+    let named = perf_gate("chrome|safari", &format!("${PERF_WEIGHTS}"));
+    let gate: Vec<Choice> = match (measured, weights) {
+        (true, Some(weights)) => PERF_BROWSERS
+            .iter()
+            .map(|browser| {
+                run(
+                    perf_gate(browser, weights),
+                    "tier push was asked, a path is in roformer/, roformer-gpu/ or worker/, or is a workspace file, or no path is known, and STEMYLA_PERF_WEIGHTS names the model (decision 0031)",
+                )
+            })
+            .collect(),
+        (true, None) => vec![skip(
+            named,
+            "the perf gate did not run: STEMYLA_PERF_WEIGHTS does not name the model",
+        )],
+        (false, _) => vec![skip(
+            named,
+            "the paths change no code that the perf gate measures: nothing in roformer/, roformer-gpu/ or worker/, and no workspace file",
+        )],
+    };
+    let trunk = &lines()[TRUNK];
+    let at = plan
+        .choices
+        .iter()
+        .position(|choice| choice.check == *trunk)
+        .map_or(plan.choices.len(), |index| index + 1);
+    plan.choices.splice(at..at, gate);
+    plan
+}
+
 /// The root of the worktree that holds `dir`
 /// (`git rev-parse --show-toplevel`).
 pub fn repo_root(dir: &Path) -> Result<PathBuf> {
@@ -1071,7 +1180,13 @@ pub fn main(args: &[String]) -> i32 {
         None
     };
     let require = std::env::var(REQUIRE).ok();
-    let plan = with_gpu_require(plan(tier, &paths, graph.as_ref()), require.as_deref());
+    let weights = std::env::var(PERF_WEIGHTS).ok();
+    let plan = with_perf_gate(
+        with_gpu_require(plan(tier, &paths, graph.as_ref()), require.as_deref()),
+        tier,
+        &paths,
+        weights.as_deref(),
+    );
     for (rule, path) in &plan.strict {
         println!("check: strict {rule}: {path}");
     }
@@ -1101,7 +1216,7 @@ mod tests {
     const SYNTH: &str = "cargo clippy -p synth --all-targets -- -D warnings";
     const APP: &str = "cargo clippy -p app -- -D warnings";
     const APP_ALL: &str = "cargo clippy -p app --all-targets -- -D warnings";
-    const WASM: &str = "cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings";
+    const WASM: &str = "cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p write-worker -p stem-protocol -p engine --all-targets -- -D warnings";
     const XTASK_REPO: &str = "cargo test -p xtask --lib --test rules --test docs --test review";
     const TESTS: &str = "cargo test --workspace --exclude roformer-gpu";
     const ENGINE: &str = "cargo test -p engine";
@@ -1116,7 +1231,7 @@ mod tests {
     const NIGHTLY_DOC: &str = "cargo +nightly-2026-10-30 test -p roformer-gpu --doc";
     const PUBLISH: &str = "cargo run -p xtask --release -- publish";
 
-    /// The 12 members of this repo and their real edges, of all kinds.
+    /// The 13 members of this repo and their real edges, of all kinds.
     fn fixture() -> Graph {
         Graph::new(&[
             (
@@ -1152,6 +1267,7 @@ mod tests {
                     "test-support",
                 ],
             ),
+            ("writer", "write-worker", &["stem-protocol"]),
             (
                 "xtask",
                 "xtask",
@@ -1756,13 +1872,28 @@ mod tests {
         assert_eq!(GPU_WORDS, ["gpu", "f16", "timestamps"]);
     }
 
+    /// Asserts that `shell_word`:
+    /// * keeps a word with no whitespace;
+    /// * puts a word with a space or a tab in single quotes;
+    /// * writes a single quote in such a word as `'\''`.
+    #[test]
+    fn a_word_with_whitespace_is_quoted() {
+        assert_eq!(shell_word("--weights"), "--weights");
+        assert_eq!(shell_word("/models/a b/m"), "'/models/a b/m'");
+        assert_eq!(shell_word("a\tb"), "'a\tb'");
+        assert_eq!(shell_word("lloyd's m"), "'lloyd'\\''s m'");
+    }
+
     /// A value replaces `gpu,f16` when one of its words, trimmed, is
     /// `gpu`, `f16` or `timestamps`.
     #[test]
     fn a_stemyla_require_with_a_gpu_word_replaces_gpu_f16() {
         let before = plan(Tier::Push, &[], None);
         for given in ["gpu,fixtures", "fixtures, f16", "timestamps"] {
-            let line = format!("STEMYLA_REQUIRE={given} cargo test -p roformer-gpu --release");
+            let line = format!(
+                "STEMYLA_REQUIRE={} cargo test -p roformer-gpu --release",
+                shell_word(given)
+            );
             let after = with_gpu_require(before.clone(), Some(given));
             assert_eq!(decisions(&after), push_list(run(&line)), "{given:?}");
             assert_eq!(
@@ -1891,31 +2022,234 @@ mod tests {
         assert!(workspace_at < engine_at, "the workspace tests come first");
     }
 
+    /// A model path with a space, as `STEMYLA_PERF_WEIGHTS` can give it.
+    const MODEL: &str = "/models/a b/bs_roformer_sw.f16.safetensors";
+
+    /// The argv of the perf gate in `browser` with [`MODEL`].
+    fn gate_argv(browser: &str) -> Vec<String> {
+        [
+            "cargo",
+            "run",
+            "-p",
+            "xtask",
+            "--",
+            "e2e",
+            "perf",
+            "--gate",
+            "--browser",
+            browser,
+            "--weights",
+            MODEL,
+        ]
+        .iter()
+        .map(|word| word.to_string())
+        .collect()
+    }
+
+    /// The choices after the Trunk line of `plan`.
+    fn after_trunk(plan: &Plan) -> &[Choice] {
+        let trunk = plan
+            .choices
+            .iter()
+            .position(|choice| choice.check == lines()[super::TRUNK])
+            .map_or(plan.choices.len(), |index| index + 1);
+        &plan.choices[trunk..]
+    }
+
+    /// The choices of `plan` whose line holds `e2e perf`.
+    fn perf_choices(plan: &Plan) -> Vec<&Choice> {
+        plan.choices
+            .iter()
+            .filter(|choice| choice.check.line().contains("e2e perf"))
+            .collect()
+    }
+
+    /// Asserts, for tier `push` asked with the model named, for a path in
+    /// `roformer/`, `roformer-gpu/` or `worker/`, for `Cargo.lock`, and for
+    /// no path:
+    /// * the first line after the Trunk line runs
+    ///   `cargo run -p xtask -- e2e perf --gate --browser chrome --weights <model>`;
+    /// * the second runs the same with `--browser safari`;
+    /// * the model path, which holds a space, is one word of each argv;
+    /// * no other line holds `e2e perf`.
     #[test]
-    fn check_never_runs_the_browser_or_publish() {
+    fn the_push_tier_runs_the_perf_gate_in_chrome_then_safari() {
+        let given: [&[&str]; 5] = [
+            &["roformer/src/x.rs"],
+            &["roformer-gpu/src/x.rs"],
+            &["worker/src/web.rs"],
+            &["Cargo.lock"],
+            &[],
+        ];
+        for given in given {
+            let paths = paths(given);
+            let gated = with_perf_gate(
+                plan(Tier::Push, &paths, None),
+                Tier::Push,
+                &paths,
+                Some(MODEL),
+            );
+            let next: Vec<(Decision, Vec<String>)> = after_trunk(&gated)
+                .iter()
+                .take(2)
+                .map(|choice| (choice.decision, choice.check.argv.clone()))
+                .collect();
+            let want = [
+                (Decision::Run, gate_argv("chrome")),
+                (Decision::Run, gate_argv("safari")),
+            ];
+            assert_eq!(next, want, "{given:?}");
+            assert_eq!(perf_choices(&gated).len(), 2, "{given:?}");
+        }
+    }
+
+    /// Asserts, for tier `push` asked with a path in `roformer-gpu/`, with
+    /// no model named and with an empty name:
+    /// * the first line after the Trunk line is a skip of `e2e perf`;
+    /// * its reason is "the perf gate did not run: STEMYLA_PERF_WEIGHTS
+    ///   does not name the model";
+    /// * no other line holds `e2e perf`.
+    #[test]
+    fn without_the_model_the_perf_gate_is_one_skip_line() {
+        let paths = paths(&["roformer-gpu/src/x.rs"]);
+        for weights in [None, Some(""), Some("  ")] {
+            let gated = with_perf_gate(plan(Tier::Push, &paths, None), Tier::Push, &paths, weights);
+            let first = after_trunk(&gated).first().cloned();
+            let reason = first.as_ref().map(|choice| choice.reason.as_str());
+            assert_eq!(
+                reason,
+                Some("the perf gate did not run: STEMYLA_PERF_WEIGHTS does not name the model"),
+                "{weights:?}"
+            );
+            let line = first.map(|choice| (choice.decision, choice.check.line()));
+            assert!(
+                line.as_ref().is_some_and(
+                    |(decision, line)| *decision == Decision::Skip && line.contains("e2e perf")
+                ),
+                "{weights:?}: {line:?}"
+            );
+            assert_eq!(perf_choices(&gated).len(), 1, "{weights:?}");
+        }
+    }
+
+    /// Asserts, for tier `push` asked with the model named and only
+    /// `docs/x.md` changed:
+    /// * the first line after the Trunk line is a skip of `e2e perf`;
+    /// * its reason names `roformer/`, `roformer-gpu/` and `worker/`;
+    /// * no other line holds `e2e perf`.
+    #[test]
+    fn a_docs_change_skips_the_perf_gate_for_its_paths() {
+        let paths = paths(&["docs/x.md"]);
+        let gated = with_perf_gate(
+            plan(Tier::Push, &paths, None),
+            Tier::Push,
+            &paths,
+            Some(MODEL),
+        );
+        let first = after_trunk(&gated).first().cloned();
+        let skipped = first.as_ref().is_some_and(|choice| {
+            choice.decision == Decision::Skip && choice.check.line().contains("e2e perf")
+        });
+        assert!(skipped, "{first:?}");
+        let reason = first.map(|choice| choice.reason).unwrap_or_default();
+        for folder in ["roformer/", "roformer-gpu/", "worker/"] {
+            assert!(reason.contains(folder), "{folder}: {reason}");
+        }
+        assert_eq!(perf_choices(&gated).len(), 1);
+    }
+
+    /// Asserts, for tier `commit` asked with the model named, for a strict
+    /// path (`roformer-gpu/src/lib.rs`) and for a path in `worker/`, with
+    /// and without a graph:
+    /// * the plan equals the plan without the gate;
+    /// * no line holds `e2e perf`.
+    #[test]
+    fn tier_commit_adds_no_perf_gate_line() {
         let graph = fixture();
+        for given in [&["roformer-gpu/src/lib.rs"][..], &["worker/src/web.rs"]] {
+            for graph in [Some(&graph), None] {
+                let paths = paths(given);
+                let plain = plan(Tier::Commit, &paths, graph);
+                let gated = with_perf_gate(plain.clone(), Tier::Commit, &paths, Some(MODEL));
+                assert_eq!(gated, plain, "{given:?}");
+                assert!(perf_choices(&gated).is_empty(), "{given:?}");
+            }
+        }
+    }
+
+    /// The run lines of `plan` with the word `serve`, `web-test`, `e2e` or
+    /// `publish` in their argv.
+    fn browser_runs(plan: &Plan) -> Vec<Vec<String>> {
+        plan.choices
+            .iter()
+            .filter(|choice| choice.decision == Decision::Run)
+            .filter(|choice| {
+                choice
+                    .check
+                    .argv
+                    .iter()
+                    .any(|word| ["serve", "web-test", "e2e", "publish"].contains(&word.as_str()))
+            })
+            .map(|choice| choice.check.argv.clone())
+            .collect()
+    }
+
+    /// Asserts, for each tier, with and without a graph, for each path set
+    /// of `ALL_PATHS` and for `worker/src/web.rs`:
+    /// * the plan runs at least one check;
+    /// * no run line of `plan` has the word `serve`, `web-test`, `e2e` or
+    ///   `publish`;
+    /// * with no model named, no run line of `with_perf_gate` has one;
+    /// * with the model named, each run line of `with_perf_gate` that has
+    ///   one is the perf gate in Chrome or in Safari.
+    ///
+    /// Asserts that tier `push`, asked with a path in `worker/` and the
+    /// model named, runs the perf gate in Chrome and in Safari.
+    #[test]
+    fn only_the_perf_gate_runs_a_browser_test() {
+        let graph = fixture();
+        let worker: &[&str] = &["worker/src/web.rs"];
         for tier in [Tier::Commit, Tier::Push] {
             for graph in [Some(&graph), None] {
-                for given in ALL_PATHS {
-                    let plan = plan(tier, &paths(given), graph);
-                    let runs: Vec<&Choice> = plan
+                for given in ALL_PATHS.iter().copied().chain([worker]) {
+                    let paths = paths(given);
+                    let plain = plan(tier, &paths, graph);
+                    let runs = plain
                         .choices
                         .iter()
                         .filter(|c| c.decision == Decision::Run)
-                        .collect();
-                    assert!(!runs.is_empty(), "{tier:?} {given:?} runs a check");
-                    for choice in runs {
-                        for word in &choice.check.argv {
-                            assert!(
-                                !["serve", "web-test", "e2e", "publish"].contains(&word.as_str()),
-                                "{tier:?} {given:?} runs {}",
-                                choice.check.line()
-                            );
-                        }
+                        .count();
+                    assert!(runs > 0, "{tier:?} {given:?} runs a check");
+                    assert_eq!(
+                        browser_runs(&plain),
+                        Vec::<Vec<String>>::new(),
+                        "{tier:?} {given:?}"
+                    );
+                    let unnamed = with_perf_gate(plain.clone(), tier, &paths, None);
+                    assert_eq!(
+                        browser_runs(&unnamed),
+                        Vec::<Vec<String>>::new(),
+                        "{tier:?} {given:?}"
+                    );
+                    let named = with_perf_gate(plain, tier, &paths, Some(MODEL));
+                    for argv in browser_runs(&named) {
+                        let gate = [gate_argv("chrome"), gate_argv("safari")];
+                        assert!(gate.contains(&argv), "{tier:?} {given:?} runs {argv:?}");
                     }
                 }
             }
         }
+        let paths = paths(worker);
+        let named = with_perf_gate(
+            plan(Tier::Push, &paths, None),
+            Tier::Push,
+            &paths,
+            Some(MODEL),
+        );
+        assert_eq!(
+            browser_runs(&named),
+            [gate_argv("chrome"), gate_argv("safari")]
+        );
     }
 
     #[test]
@@ -2152,10 +2486,16 @@ mod tests {
                 "protocol/src/decode.rs",
                 "app/src/separator.rs",
                 "app/src/decoder/client.rs",
+                "app/src/writer/client.rs",
                 "worker/src/web.rs",
                 "decoder/src/web.rs",
+                "writer/src/web.rs",
             ],
-            &["app/src/decoder/x.rs", "decoder/src/pass.rs"],
+            &[
+                "app/src/decoder/x.rs",
+                "decoder/src/pass.rs",
+                "writer/src/lib.rs",
+            ],
         );
     }
 
@@ -2197,11 +2537,13 @@ mod tests {
                 "worker/src/web/encode.rs",
                 "worker/src/web/stems.rs",
                 "decoder/src/web.rs",
+                "writer/src/web.rs",
             ],
             &[
                 "app/src/reset.rs",
                 "app/src/lib.rs",
                 "worker/src/web/tests.rs",
+                "writer/src/lib.rs",
             ],
         );
     }

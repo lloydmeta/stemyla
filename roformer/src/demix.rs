@@ -79,6 +79,8 @@ pub struct Demixer<S: MixSource> {
     base: usize,
     result: Vec<Stereo>,
     counter: Vec<f32>,
+    /// Which stems of the chunk in progress [`Self::accept_stem`] took.
+    accepted: Vec<bool>,
 }
 
 /// `torch.linspace(start, end, n)` in f32.
@@ -99,16 +101,18 @@ fn linspace(start: f32, end: f32, n: usize) -> Vec<f32> {
         .collect()
 }
 
-/// Reflect padding on the right, numpy/torch `reflect` mode.
-fn reflect_right(x: &[f32], to: usize) -> Vec<f32> {
+/// Reflect padding on the right to `to` samples, numpy/torch `reflect`
+/// mode, in place.  `x` grows within its capacity when it holds `to`.
+fn reflect_right_in_place(x: &mut Vec<f32>, to: usize) {
     let n = x.len();
     assert!(
         to - n < n,
         "reflect padding must be shorter than the signal"
     );
-    (0..to)
-        .map(|j| if j < n { x[j] } else { x[2 * (n - 1) - j] })
-        .collect()
+    for j in n..to {
+        let mirrored = x[2 * (n - 1) - j];
+        x.push(mirrored);
+    }
 }
 
 impl<S: MixSource> Demixer<S> {
@@ -141,6 +145,7 @@ impl<S: MixSource> Demixer<S> {
             base: 0,
             result: (0..stems).map(|_| [Vec::new(), Vec::new()]).collect(),
             counter: Vec::new(),
+            accepted: vec![false; stems],
         }
     }
 
@@ -195,6 +200,19 @@ impl<S: MixSource> Demixer<S> {
         lo..hi + 1
     }
 
+    /// `span`, widened inside the song to a chunk of frames, or to the
+    /// whole song if it is shorter.  So each read, the last chunks' too,
+    /// takes buffers of the same size, and leaves no new holes in the
+    /// heap (M1 of `plans/active/gpu-speed.md`).
+    fn whole(&self, span: Range<usize>) -> Range<usize> {
+        let want = self.chunk.min(self.frames);
+        if span.end - span.start >= want {
+            return span;
+        }
+        let start = span.start.min(self.frames - want);
+        start..start + want
+    }
+
     /// Samples in each output stem: the song's length.
     pub fn output_len(&self) -> usize {
         self.frames
@@ -211,47 +229,72 @@ impl<S: MixSource> Demixer<S> {
 
     /// The next chunk, padded to `chunk` samples, or `None` when done.  It
     /// reads one span of the song from the source, and gives the source's
-    /// error if that read fails.
+    /// error if that read fails.  The span is a chunk of frames, or the
+    /// whole song if it is shorter: it holds the frames that the chunk
+    /// reads.
     pub fn next_input(&mut self) -> Result<Option<Stereo>, S::Error> {
         let total = self.total();
         if self.pos >= total {
             return Ok(None);
         }
         let end = (self.pos + self.chunk).min(total);
-        let span = self.span(self.pos..end);
+        let span = self.whole(self.span(self.pos..end));
         let frames = self.source.read(span.start, span.end)?;
+        // Each channel is made at the chunk's size and padded in place.
+        // So the last chunks, which are shorter, take buffers of the
+        // same size as the others, and leave no new holes in the heap.
         let part = |c: usize| {
-            let x: Vec<f32> = (self.pos..end)
-                .map(|i| frames[c][self.frame(i) - span.start])
-                .collect();
-            if x.len() == self.chunk {
-                x
-            } else if x.len() > self.chunk / 2 + 1 {
-                reflect_right(&x, self.chunk)
+            let mut x = Vec::with_capacity(self.chunk);
+            x.extend((self.pos..end).map(|i| frames[c][self.frame(i) - span.start]));
+            if x.len() > self.chunk / 2 + 1 {
+                reflect_right_in_place(&mut x, self.chunk);
             } else {
-                let mut v = x;
-                v.resize(self.chunk, 0.0);
-                v
+                x.resize(self.chunk, 0.0);
             }
+            x
         };
         Ok(Some([part(0), part(1)]))
     }
 
     /// Adds the network output for the chunk last returned by
     /// [`Self::next_input`]; each stem must have at least as many samples
-    /// as the unpadded part of the chunk.
+    /// as the unpadded part of the chunk.  It is [`Self::accept_stem`] for
+    /// each stem in turn, then [`Self::end_chunk`].
     pub fn accept(&mut self, out: &[Stereo]) {
         assert_eq!(out.len(), self.result.len());
-        let total = self.total();
-        let i = self.pos;
-        let length = (total - i).min(self.chunk);
-        let mut window = self.window.clone();
-        if i == 0 {
-            window[..self.fade].fill(1.0);
-        } else if i + self.chunk >= total {
-            window[self.chunk - self.fade..].fill(1.0);
+        for (stem, x) in out.iter().enumerate() {
+            self.accept_stem(stem, x);
         }
-        let off = i - self.base;
+        self.end_chunk();
+    }
+
+    /// The samples of the chunk in progress that its stems add to: the
+    /// unpadded part of the chunk.
+    fn length(&self) -> usize {
+        (self.total() - self.pos).min(self.chunk)
+    }
+
+    /// The weight of sample `k` of the chunk in progress: the window, with
+    /// no fade-in on the first chunk, else no fade-out on the last.
+    fn weight(&self, k: usize) -> f32 {
+        if self.pos == 0 {
+            if k < self.fade { 1.0 } else { self.window[k] }
+        } else if self.pos + self.chunk >= self.total() && k >= self.chunk - self.fade {
+            1.0
+        } else {
+            self.window[k]
+        }
+    }
+
+    /// Adds stem `stem` of the chunk last returned by [`Self::next_input`],
+    /// weighted by the window.  It must have at least as many samples as
+    /// the unpadded part of the chunk.  Each stem comes once in a chunk,
+    /// in any order; then [`Self::end_chunk`] ends the chunk.
+    pub fn accept_stem(&mut self, stem: usize, x: &Stereo) {
+        assert!(!self.accepted[stem], "stem {stem} came twice in a chunk");
+        self.accepted[stem] = true;
+        let length = self.length();
+        let off = self.pos - self.base;
         let need = off + length;
         if self.counter.len() < need {
             self.counter.resize(need, 0.0);
@@ -261,16 +304,30 @@ impl<S: MixSource> Demixer<S> {
                 }
             }
         }
-        for (acc, x) in self.result.iter_mut().zip(out) {
-            for c in 0..CHANNELS {
-                assert!(x[c].len() >= length, "stem shorter than the chunk");
-                for k in 0..length {
-                    acc[c][off + k] += x[c][k] * window[k];
-                }
+        for c in 0..CHANNELS {
+            assert!(x[c].len() >= length, "stem shorter than the chunk");
+            for k in 0..length {
+                let w = self.weight(k);
+                self.result[stem][c][off + k] += x[c][k] * w;
             }
         }
+    }
+
+    /// Ends the chunk last returned by [`Self::next_input`], after
+    /// [`Self::accept_stem`] took each of its stems: it adds the window to
+    /// the summed weights and moves on to the next chunk.  So the next
+    /// chunk cannot be read before every stem of this one is taken.
+    pub fn end_chunk(&mut self) {
+        assert!(
+            self.accepted.iter().all(|&a| a),
+            "a chunk ended before each of its stems came"
+        );
+        self.accepted.fill(false);
+        let length = self.length();
+        let off = self.pos - self.base;
         for k in 0..length {
-            self.counter[off + k] += window[k];
+            let w = self.weight(k);
+            self.counter[off + k] += w;
         }
         self.pos += self.step;
     }
@@ -382,6 +439,15 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Reflect padding on the right, numpy/torch `reflect` mode, into a
+    /// new buffer: the padding of the reference.
+    fn reflect_right(x: &[f32], to: usize) -> Vec<f32> {
+        let n = x.len();
+        (0..to)
+            .map(|j| if j < n { x[j] } else { x[2 * (n - 1) - j] })
+            .collect()
     }
 
     /// The previous implementation: song-length running sums over a padded
@@ -521,7 +587,10 @@ mod tests {
     /// Short (unpadded), just over two chunks, and long songs; chunk sizes
     /// with and without a remainder; overlaps 1 (no padding), 2 and 4.  In
     /// (15, 10, 2) and (5000, 1000, 2), a chunk starts at `border + n`, one
-    /// frame after the right reflection turns at `border + n - 1`.
+    /// frame after the right reflection turns at `border + n - 1`.  At
+    /// overlap 1, (5000, 1000, 1) and (4950, 1000, 1) end with a chunk
+    /// whose unpadded part reaches into its fade-out, which the last chunk
+    /// does not apply.
     const STREAM_CASES: &[(usize, usize, usize)] = &[
         (15, 10, 2),
         (700, 1000, 2),
@@ -532,6 +601,8 @@ mod tests {
         (12345, 1000, 4),
         (9999, 640, 2),
         (5003, 1000, 1),
+        (5000, 1000, 1),
+        (4950, 1000, 1),
     ];
 
     #[test]
@@ -577,6 +648,248 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// The running sums of `d`, as bits, to compare them exactly.
+    fn sums_of<S: MixSource>(d: &Demixer<S>) -> (usize, Vec<u32>) {
+        let bits = d
+            .result
+            .iter()
+            .flat_map(|stem| stem.iter().flatten())
+            .chain(&d.counter)
+            .map(|v| v.to_bits())
+            .collect();
+        (d.base, bits)
+    }
+
+    /// The bits of each sample of each stem of `seg`.
+    fn bits_of(seg: &Option<Segment>) -> Option<(usize, Vec<u32>)> {
+        seg.as_ref().map(|seg| {
+            let bits = seg
+                .stems
+                .iter()
+                .flat_map(|stem| stem.iter().flatten())
+                .map(|v| v.to_bits())
+                .collect();
+            (seg.start, bits)
+        })
+    }
+
+    /// `Demixer::accept` as it was before cut 1 of M1: it cloned the window
+    /// and set its fades to 1 on the first and the last chunk.  The
+    /// reference for `accept_stem` and `end_chunk`.
+    fn accept_with_a_window_clone<S: MixSource>(d: &mut Demixer<S>, out: &[Stereo]) {
+        assert_eq!(out.len(), d.result.len());
+        let total = d.total();
+        let i = d.pos;
+        let length = (total - i).min(d.chunk);
+        let mut window = d.window.clone();
+        if i == 0 {
+            window[..d.fade].fill(1.0);
+        } else if i + d.chunk >= total {
+            window[d.chunk - d.fade..].fill(1.0);
+        }
+        let off = i - d.base;
+        let need = off + length;
+        if d.counter.len() < need {
+            d.counter.resize(need, 0.0);
+            for acc in &mut d.result {
+                for ch in acc.iter_mut() {
+                    ch.resize(need, 0.0);
+                }
+            }
+        }
+        for (acc, x) in d.result.iter_mut().zip(out) {
+            for c in 0..CHANNELS {
+                for k in 0..length {
+                    acc[c][off + k] += x[c][k] * window[k];
+                }
+            }
+        }
+        for k in 0..length {
+            d.counter[off + k] += window[k];
+        }
+        d.pos += d.step;
+    }
+
+    /// Cut 1 of M1 of `plans/active/gpu-speed.md`: each stem goes to the
+    /// demixer as it is made.  `accept_stem` for each stem, then
+    /// `end_chunk`, give the sums and the segments of the old `accept`
+    /// (`accept_with_a_window_clone`), bit for bit, also at the first and
+    /// the last chunk, whose fades are 1.  The stems come in reverse
+    /// order, to show that the order does not change a sum.
+    #[test]
+    fn stems_one_at_a_time_give_the_sums_of_a_whole_chunk_exactly() {
+        for &(n, chunk, overlap) in STREAM_CASES {
+            let mut whole = Demixer::new(song(n), chunk, overlap, 3);
+            let mut each = Demixer::new(song(n), chunk, overlap, 3);
+            let mut index = 0;
+            while let Some(x) = whole.next_input().unwrap() {
+                assert_eq!(each.next_input().unwrap().as_ref(), Some(&x));
+                let out = fake(&x);
+                accept_with_a_window_clone(&mut whole, &out);
+                for (stem, y) in out.iter().enumerate().rev() {
+                    each.accept_stem(stem, y);
+                }
+                each.end_chunk();
+                assert_eq!(
+                    sums_of(&each),
+                    sums_of(&whole),
+                    "n={n} chunk={chunk} overlap={overlap}: the sums after chunk {index}"
+                );
+                assert_eq!(
+                    bits_of(&each.take_ready()),
+                    bits_of(&whole.take_ready()),
+                    "n={n} chunk={chunk} overlap={overlap}: the segment after chunk {index}"
+                );
+                index += 1;
+            }
+            assert_eq!(each.next_input().unwrap(), None);
+            let bits = |stems: Vec<Stereo>| bits_of(&Some(Segment { start: 0, stems }));
+            assert_eq!(bits(each.finish()), bits(whole.finish()), "n={n}: the end");
+        }
+    }
+
+    /// `accept` and `accept_stem` take stems of the unpadded length of
+    /// each chunk, as their docs say: the last chunks' stems may be
+    /// shorter than a chunk.  The result is that of whole stems, bit for
+    /// bit.
+    #[test]
+    fn stems_of_the_unpadded_length_are_enough() {
+        let mut shorter = 0;
+        for &(n, chunk, overlap) in STREAM_CASES {
+            let step = chunk / overlap;
+            let border = chunk - step;
+            let total = if n > 2 * border && border > 0 {
+                n + 2 * border
+            } else {
+                n
+            };
+            let mut whole = Demixer::new(song(n), chunk, overlap, 3);
+            let mut cut = Demixer::new(song(n), chunk, overlap, 3);
+            let mut k = 0;
+            while let Some(x) = whole.next_input().unwrap() {
+                cut.next_input().unwrap();
+                let out = fake(&x);
+                let unpadded = (total - k * step).min(chunk);
+                shorter += usize::from(unpadded < chunk);
+                let short: Vec<Stereo> = out
+                    .iter()
+                    .map(|stem| {
+                        stem.clone().map(|mut c| {
+                            c.truncate(unpadded);
+                            c
+                        })
+                    })
+                    .collect();
+                whole.accept(&out);
+                if k % 2 == 0 {
+                    cut.accept(&short);
+                } else {
+                    for (stem, y) in short.iter().enumerate() {
+                        cut.accept_stem(stem, y);
+                    }
+                    cut.end_chunk();
+                }
+                k += 1;
+            }
+            let bits = |stems: Vec<Stereo>| bits_of(&Some(Segment { start: 0, stems }));
+            assert_eq!(
+                bits(cut.finish()),
+                bits(whole.finish()),
+                "n={n} chunk={chunk} overlap={overlap}"
+            );
+        }
+        assert!(shorter > 9, "the cases have short chunks: {shorter}");
+    }
+
+    /// The song reflect-padded by `border` on both sides, numpy/torch
+    /// `reflect` mode, worked out again.
+    fn reflect_both(x: &[f32], border: usize) -> Vec<f32> {
+        let last = x.len() as isize - 1;
+        (-(border as isize)..x.len() as isize + border as isize)
+            .map(|i| x[i.abs().min(2 * last - i) as usize])
+            .collect()
+    }
+
+    /// Each chunk's input is the padded song at its position, padded on
+    /// the right by reflection when more than half of it plus one frame is
+    /// song, and with zeros else.  The song lengths put the last chunks at
+    /// each length around that boundary.
+    #[test]
+    fn each_chunk_input_is_the_padded_song_at_its_position() {
+        let (chunk, overlap) = (1000, 2);
+        let step = chunk / overlap;
+        let border = chunk - step;
+        let mut paths = [0; 3];
+        for n in 2000..2600 {
+            let mix = song(n);
+            let padded = [0, 1].map(|c| reflect_both(&mix[c], border));
+            let total = n + 2 * border;
+            let mut d = Demixer::new(mix, chunk, overlap, 1);
+            let mut k = 0;
+            while let Some(x) = d.next_input().unwrap() {
+                let pos = k * step;
+                for c in 0..2 {
+                    let part = &padded[c][pos..(pos + chunk).min(total)];
+                    let len = part.len();
+                    let want: Vec<f32> = if len == chunk {
+                        paths[0] += 1;
+                        part.to_vec()
+                    } else if 2 * len > chunk + 2 {
+                        paths[1] += 1;
+                        (0..chunk)
+                            .map(|j| part[if j < len { j } else { 2 * (len - 1) - j }])
+                            .collect()
+                    } else {
+                        paths[2] += 1;
+                        (0..chunk)
+                            .map(|j| if j < len { part[j] } else { 0.0 })
+                            .collect()
+                    };
+                    assert!(
+                        x[c].iter()
+                            .zip(&want)
+                            .all(|(a, b)| a.to_bits() == b.to_bits()),
+                        "n={n}: chunk {k} channel {c}, {len} frames of song"
+                    );
+                }
+                d.accept(&[x]);
+                k += 1;
+            }
+        }
+        assert!(
+            paths.iter().all(|&p| p > 0),
+            "each path is taken: {paths:?}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "reflect padding must be shorter than the signal")]
+    fn a_reflection_longer_than_its_signal_is_refused() {
+        let mut x = vec![1.0, 2.0, 3.0, 4.0];
+        reflect_right_in_place(&mut x, 8);
+    }
+
+    #[test]
+    #[should_panic(expected = "a chunk ended before each of its stems came")]
+    fn a_chunk_cannot_end_before_each_stem_comes() {
+        let mut d = Demixer::new(song(5000), 1000, 2, 3);
+        let x = d.next_input().unwrap().expect("a chunk");
+        let out = fake(&x);
+        d.accept_stem(0, &out[0]);
+        d.accept_stem(2, &out[2]);
+        d.end_chunk();
+    }
+
+    #[test]
+    #[should_panic(expected = "stem 1 came twice in a chunk")]
+    fn a_stem_cannot_come_twice_in_a_chunk() {
+        let mut d = Demixer::new(song(5000), 1000, 2, 3);
+        let x = d.next_input().unwrap().expect("a chunk");
+        let out = fake(&x);
+        d.accept_stem(1, &out[1]);
+        d.accept_stem(1, &out[1]);
     }
 
     /// A source that keeps only the song, and records the frames of each
@@ -657,10 +970,14 @@ mod tests {
                 let frames: Vec<usize> = (pos..(pos + chunk).min(total)).map(frame).collect();
                 let lo = *frames.iter().min().unwrap();
                 let hi = *frames.iter().max().unwrap() + 1;
+                assert!(
+                    read.0 <= lo && hi <= read.1,
+                    "n={n} chunk={chunk} overlap={overlap}: read {k} {read:?} holds the frames {lo}..{hi} that its chunk reads"
+                );
                 assert_eq!(
-                    read,
-                    (lo, hi),
-                    "n={n} chunk={chunk} overlap={overlap}: read {k} is the frames that its chunk reads"
+                    read.1 - read.0,
+                    chunk.min(n),
+                    "n={n} chunk={chunk} overlap={overlap}: read {k} {read:?} is a chunk of frames, or the song"
                 );
             }
             for &(start, end) in &reads {
@@ -684,6 +1001,27 @@ mod tests {
                         );
                     }
                 }
+            }
+        }
+    }
+
+    /// M1 of `plans/active/gpu-speed.md`: each chunk's input has the
+    /// chunk's size and capacity, the last chunks' too, so their buffers
+    /// leave no new holes in the heap.
+    #[test]
+    fn each_chunk_input_has_the_capacity_of_a_chunk() {
+        for &(n, chunk, overlap) in STREAM_CASES {
+            let mut d = Demixer::new(song(n), chunk, overlap, 3);
+            while let Some(x) = d.next_input().unwrap() {
+                for c in &x {
+                    assert_eq!(
+                        (c.len(), c.capacity()),
+                        (chunk, chunk),
+                        "n={n} chunk={chunk} overlap={overlap}: chunk {}",
+                        d.chunk_index()
+                    );
+                }
+                d.accept(&fake(&x));
             }
         }
     }
