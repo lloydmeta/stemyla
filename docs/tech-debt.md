@@ -784,7 +784,7 @@ It breaks no rule.  It concerns the run rule of `plans/active/gpu-speed.md`: one
 
 * Evidence: in M5.1 review round 2, two validators ran browser tests at once, in Chrome and in Safari.  In round 4, three reviewers' `web-test` runs overlapped, though each prompt said to start none while another ran (`plans/active/gpu-speed-m51.md`, Surprises).  No run lost its session.
 * What guards it: a line in each review prompt.  Agents run in parallel, so a line does not order their runs.
-* Fix: a lock that `xtask web-test` and `xtask e2e` hold for the whole browser run, for example a file lock in the target folder.  A second run then waits, or fails with a clear error.  Not planned.
+* Fix: a lock that `xtask web-test` and `xtask e2e` hold for the whole browser run, at one fixed path for the whole machine, such as `/tmp/stemyla-browser.lock`.  Not in a target folder: each worktree has its own.  A second run then waits, or fails with a clear error.  Not planned.
 
 ## Legibility for agents
 
