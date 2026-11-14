@@ -389,8 +389,10 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * 3-1: `the_run_and_calibration_share_one_budget` reads the worker's source with its whitespace collapsed, and needs `KEEP_PER_GPU, budget, ) else`.  With `roformer_gpu::net::BUDGET` in place of `budget`: `KEEP_PER_GPU, budget, ) else in worker/src/web.rs`.
   * 3-6: `the_stored_stems_checks_pass_a_good_reply_and_fail_wrong_ones` has a case of `attn` `fused` and a reply that names `fused`.  With `split` fixed in the check: `attn fused: ["the worker runs attention fused, not the asked split"]`.
   * 3-7: `vfused_waits_between_its_row_writes_and_reads` (no GPU) needs a `workgroupBarrier()` between each write of `buf[ty * 16u + tx]` and the next read of that region.  Without the barrier after the maxima, or after the sums in `FINISH`: `no barrier between the write at 9090 and its read`, and `... at 14067 ...`.
-  * Docs: 3-2 (TD-8 and TD-102: a known gap; `check --tier push` and GPU-2's command set `gpu,f16`, and `timestamps` runs these tests as evidence), 3-3 (six `timestamp-query` tests), 3-4 (`xtask/src/e2e.rs`), 3-5 (`attention_label`, ARCHITECTURE.md).
+  * Docs: 3-2 (TD-8 and TD-102: a known gap; `check --tier push` and GPU-2's command set `gpu,f16`, and `timestamps` makes a skip of these tests fail), 3-3 (six `timestamp-query` tests), 3-4 (`xtask/src/e2e.rs`), 3-5 (`attention_label`, ARCHITECTURE.md).
   * `STEMYLA_REQUIRE=gpu,f16,timestamps cargo test -p roformer-gpu --release`, `cargo test -p xtask` and `check --tier commit` pass.
+* [x] Review round 4 fixes (2026-11-14): 4-1, a doc fix.  TD-102 and TD-8 now say that the timestamps tests run on an adapter with `timestamp-query`, and that `timestamps` in `STEMYLA_REQUIRE` makes a skip of them fail; item 3-2 above says the same.  The 4 nits of round 4 are reported, not fixed (late rule).
+
 ## Surprises and discoveries
 
 * 2026-11-13, Step 3: the check at the page of `ab40862`, base `attn=fused`, head `attn=freq`, the same page on both sides.  Each figure is a chunk lower quartile, in seconds, in the order B H H B.
