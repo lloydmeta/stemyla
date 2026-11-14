@@ -118,9 +118,19 @@ extern "C" {
     async fn write_end(within: &str, rel: &str, size: &JsValue) -> JsValue;
 }
 
+/// The failure that ends a message that cannot be read.
+const UNREADABLE: &str = "a request could not be read (messageerror)";
+
+/// A message from the page: a request, or a message that could not be
+/// read (a `messageerror` event).
+enum Queued {
+    Request(JsValue),
+    Unreadable,
+}
+
 thread_local! {
-    /// The requests not yet taken, in the order sent.
-    static QUEUE: RefCell<VecDeque<JsValue>> = const { RefCell::new(VecDeque::new()) };
+    /// The messages not yet taken, in the order sent.
+    static QUEUE: RefCell<VecDeque<Queued>> = const { RefCell::new(VecDeque::new()) };
     /// Whether a request runs now.
     static RUNNING: Cell<bool> = const { Cell::new(false) };
 }
@@ -142,20 +152,28 @@ fn send(reply: WriteReply) {
     }
 }
 
-/// Installs the message handler and tells the page that the worker
-/// listens.
+/// Installs the message handlers and tells the page that the worker
+/// listens.  A message that cannot be read takes its place in the queue
+/// and ends with a failure, so each request gets exactly one reply.
 pub fn start() {
-    let handler = Closure::<dyn FnMut(MessageEvent)>::new(|e: MessageEvent| enqueue(e.data()));
+    let handler = Closure::<dyn FnMut(MessageEvent)>::new(|e: MessageEvent| {
+        enqueue(Queued::Request(e.data()));
+    });
+    let unreadable = Closure::<dyn FnMut(MessageEvent)>::new(|_: MessageEvent| {
+        enqueue(Queued::Unreadable);
+    });
     let scope: DedicatedWorkerGlobalScope = js_sys::global().unchecked_into();
     scope.set_onmessage(Some(handler.as_ref().unchecked_ref()));
+    scope.set_onmessageerror(Some(unreadable.as_ref().unchecked_ref()));
     handler.forget();
+    unreadable.forget();
     send(WriteReply::Ready);
 }
 
-/// Queues the request `msg`, and starts the queue if it is not running.
+/// Queues the message `msg`, and starts the queue if it is not running.
 /// One request at a time: a second sync access handle of a file that one
 /// request holds would be refused.
-fn enqueue(msg: JsValue) {
+fn enqueue(msg: Queued) {
     QUEUE.with_borrow_mut(|queue| queue.push_back(msg));
     if !RUNNING.replace(true) {
         wasm_bindgen_futures::spawn_local(drain());
@@ -165,7 +183,13 @@ fn enqueue(msg: JsValue) {
 /// Runs the queued requests one at a time, in the order sent.
 async fn drain() {
     while let Some(msg) = QUEUE.with_borrow_mut(VecDeque::pop_front) {
-        let reply = handle(&msg).await;
+        let reply = match msg {
+            Queued::Request(msg) => handle(&msg).await,
+            Queued::Unreadable => WriteReply::Done {
+                outcome: Outcome::Failed(UNREADABLE.into()),
+                bytes: None,
+            },
+        };
         send(reply);
     }
     RUNNING.set(false);

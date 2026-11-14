@@ -18,7 +18,7 @@ WebKit at `c526785513`, the last change of `FileSystemStorageHandle.cpp` (2026-1
 
 * FileSystemStorageHandle.cpp in WebKit's Source/WebKit/NetworkProcess/storage, lines 262 to 295 (`createWritable`): `FileSystem::createTemporaryFile("FileSystemWritableStream"_s)` makes the swap file ([source](https://github.com/WebKit/WebKit/blob/c526785513/Source/WebKit/NetworkProcess/storage/FileSystemStorageHandle.cpp#L262-L295)).
 * The same file, lines 297 to 321 (`closeWritable`): with the reason `Aborted`, it deletes the swap file.  Else it copies the swap file onto the stored file with `FileSystem::copyFile`, and the swap file stays ([source](https://github.com/WebKit/WebKit/blob/c526785513/Source/WebKit/NetworkProcess/storage/FileSystemStorageHandle.cpp#L297-L321)).
-* The same file, lines 85 to 100 (`close`): it closes each open stream with the reason `Aborted`, so only an open stream's swap file goes ([source](https://github.com/WebKit/WebKit/blob/c526785513/Source/WebKit/NetworkProcess/storage/FileSystemStorageHandle.cpp#L85-L100)).
+* The same file, lines 85 to 100 (`close`): it closes each open stream with the reason `Aborted`.  So only an open stream's swap file goes ([source](https://github.com/WebKit/WebKit/blob/c526785513/Source/WebKit/NetworkProcess/storage/FileSystemStorageHandle.cpp#L85-L100)).
 
 ## Test case
 
@@ -48,4 +48,4 @@ Counted runs on 2026-11-14 (the folder was listed before and after each run):
 
 ## Workaround
 
-In a dedicated worker, `createSyncAccessHandle()` writes the file in place, with no temporary file.  The main thread of a page has no such handle, so a page sends its large writes to a dedicated worker.  This app does that for the model, the songs, the mix, the stems and the save files (M5.1).  Its small files stay on write streams, since `close()` replaces such a file in one step, and they still leave a few hundred bytes for each song.
+In a dedicated worker, `createSyncAccessHandle()` writes the file in place, with no temporary file.  The main thread of a page has no such handle, so a page sends its large writes to a dedicated worker.  This app does that for the model, the songs, the mix, the stems and the save files (M5.1).  Its small files stay on write streams, since `close()` replaces such a file in one step.  They still leave a few hundred bytes for each song.

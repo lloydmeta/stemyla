@@ -753,9 +753,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             .output()
             .expect("cargo tree runs");
         let tree = String::from_utf8_lossy(&out.stdout);
+        let errors = String::from_utf8_lossy(&out.stderr);
         assert!(
             out.status.success() && tree.contains("app feature \"default\""),
-            "{tree}"
+            "cargo tree ({}): {tree}\n{errors}",
+            out.status
         );
         assert!(!tree.contains("app feature \"fake-writer\""), "{tree}");
     }

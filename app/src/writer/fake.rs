@@ -26,7 +26,9 @@ function split(path) {
   return i < 0 ? ["", path] : [path.slice(0, i), path.slice(i + 1)];
 }
 // A port that serves each request with `serve`, one at a time, in order.
-export function fake_new(serve, ready, ready_transfer) {
+// A request that `serve` rejects ends with the reply `failed(text)`, and
+// the queue goes on, so each request gets exactly one reply.
+export function fake_new(serve, ready, ready_transfer, failed) {
   const port = { onmessage: null };
   let tail = Promise.resolve();
   const deliver = (msg, transfer) => {
@@ -35,10 +37,13 @@ export function fake_new(serve, ready, ready_transfer) {
   };
   port.postMessage = (msg, transfer) => {
     const data = structuredClone(msg, { transfer });
-    tail = tail.then(async () => {
-      const [reply, back] = await serve(data);
-      deliver(reply, back);
-    });
+    tail = tail
+      .then(() => serve(data))
+      .then(
+        ([reply, back]) => deliver(reply, back),
+        (e) => deliver(failed(`the fake could not serve the request: ${e}`), []),
+      )
+      .catch((e) => console.error("writer fake: a reply was lost:", e));
   };
   setTimeout(() => deliver(ready, ready_transfer), 0);
   return port;
@@ -111,7 +116,12 @@ export async function fake_end(within, rel, size) {
 }
 "#)]
 extern "C" {
-    fn fake_new(serve: &js_sys::Function, ready: &Object, ready_transfer: &Array) -> JsValue;
+    fn fake_new(
+        serve: &js_sys::Function,
+        ready: &Object,
+        ready_transfer: &Array,
+        failed: &js_sys::Function,
+    ) -> JsValue;
     async fn fake_block(within: &str, rel: &str, at: f64, bytes: &Uint8Array) -> JsValue;
     async fn fake_end(within: &str, rel: &str, size: &JsValue) -> JsValue;
 }
@@ -121,11 +131,27 @@ pub fn port() -> JsValue {
     let serve = Closure::<dyn FnMut(JsValue) -> js_sys::Promise>::new(|data: JsValue| {
         wasm_bindgen_futures::future_to_promise(async move { Ok(serve(data).await) })
     });
-    let (ready, transfer) = WriteReply::Ready.to_js();
-    let port = fake_new(serve.as_ref().unchecked_ref(), &ready, &transfer);
+    let port = port_with(serve.as_ref().unchecked_ref());
     // One closure for each port, which lives as long as the port.
     serve.forget();
     port
+}
+
+/// A new fake port that serves each request with the JS function `serve`.
+/// A test of the fake's queue gives its own `serve`.
+pub(super) fn port_with(serve: &js_sys::Function) -> JsValue {
+    let (ready, transfer) = WriteReply::Ready.to_js();
+    // One closure for each port, which lives as long as the port.
+    let failed = Closure::<dyn Fn(String) -> Object>::new(|text: String| {
+        WriteReply::Done {
+            outcome: Outcome::Failed(text),
+            bytes: None,
+        }
+        .to_js()
+        .0
+    })
+    .into_js_value();
+    fake_new(serve, &ready, &transfer, failed.unchecked_ref())
 }
 
 /// The outcome from `st_write`'s or `fake_block`'s answer.

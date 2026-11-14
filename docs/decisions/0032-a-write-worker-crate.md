@@ -2,7 +2,7 @@
 
 Status: accepted (2026-11-14, by the maintainer, through the orchestrator)
 
-The maintainer chose option c) of M5.1 Step 5, a write worker for this one purpose, and its form, a Rust crate built by Trunk (parent plan `plans/active/gpu-speed.md`, Decision log, commits `bd40598` and `00668a1`).  This record states that choice.
+The maintainer chose option c) of M5.1 Step 5: a write worker for this one purpose.  The maintainer also chose its form: a Rust crate built by Trunk.  The parent plan `plans/active/gpu-speed.md` records both choices (Decision log, commits `bd40598` and `00668a1`).  This record states that choice.
 
 ## Context
 
@@ -16,7 +16,7 @@ Safari keeps the swap file of each OPFS write stream that closes (`references/br
 
 ## Decision
 
-Option c), as a Rust crate: `write-worker`, in `writer/`.  It writes the files as dropped, the mix, the stems of the memory path and the save files through sync access handles.  Its messages are in `stem_protocol::write`, so PROTO-1 holds as it is.  The small files (`meta`, `current`) stay on write streams: a `close()` replaces such a file in one step, and the page reads `meta` with no lock.
+Option c), as a Rust crate: `write-worker`, in `writer/`.  It writes the files as dropped, the mix, the stems of the memory path and the save files through sync access handles.  Its messages are in `stem_protocol::write`, so PROTO-1 holds as it is.  The small files (`meta`, `current`) stay on write streams.  A `close()` replaces such a file in one step, and the page reads `meta` with no lock.
 
 ## Consequences
 

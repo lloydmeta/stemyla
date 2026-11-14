@@ -55,6 +55,21 @@ export async function exists(path) {
 export function blob_of(bytes) { return new Blob([bytes]); }
 export function post(msg, transfer) { return structuredClone(msg, { transfer }); }
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// Calls `start`, sends a `messageerror` event to this worker, then puts
+// back the test runner's handlers.  Gives whether `start` set a handler
+// of `messageerror`.
+export function start_then_messageerror(start) {
+  const saved = [self.onmessage, self.onmessageerror];
+  try {
+    start();
+    const set = typeof self.onmessageerror === "function";
+    self.dispatchEvent(new MessageEvent("messageerror"));
+    return set;
+  } finally {
+    self.onmessage = saved[0];
+    self.onmessageerror = saved[1];
+  }
+}
 // Records what each FileSystemSyncAccessHandle.write gets: "whole", or
 // "view" for a view into a larger buffer.
 let record = null;
@@ -102,6 +117,7 @@ export function lloyd_in_a_larger_buffer(at) {
 }
 "#)]
 extern "C" {
+    fn start_then_messageerror(start: &JsValue) -> bool;
     async fn wipe();
     async fn make_folder(path: &str);
     async fn plant(path: &str, bytes: &Uint8Array);
@@ -146,7 +162,7 @@ async fn run(requests: Vec<WriteRequest>) -> Vec<(Outcome, Option<Vec<u8>>)> {
     let want = SENT.with_borrow(Vec::len) + requests.len();
     for request in &requests {
         let (msg, transfer) = request.to_js();
-        enqueue(post(&msg, &transfer));
+        enqueue(Queued::Request(post(&msg, &transfer)));
     }
     for _ in 0..2_000 {
         if SENT.with_borrow(Vec::len) >= want {
@@ -373,7 +389,7 @@ async fn a_request_that_cannot_be_read_ends_with_a_failure() {
     let want = SENT.with_borrow(Vec::len) + 1;
     let bad = js_sys::Object::new();
     js_sys::Reflect::set(&bad, &"type".into(), &kind::BLOCK.into()).unwrap();
-    enqueue(bad.into());
+    enqueue(Queued::Request(bad.into()));
     for _ in 0..200 {
         if SENT.with_borrow(Vec::len) >= want {
             break;
@@ -390,6 +406,43 @@ async fn a_request_that_cannot_be_read_ends_with_a_failure() {
             }))
         ),
         "{reply:?}"
+    );
+}
+
+/// Finding 2-10 of review round 2: a message that cannot be read (a
+/// `messageerror` event) still gets exactly one reply, a failure, so the
+/// page's oldest request does not wait for ever.
+#[wasm_bindgen_test]
+async fn a_message_that_cannot_be_read_ends_with_a_failure() {
+    fresh().await;
+    let want = SENT.with_borrow(Vec::len) + 2;
+    let set = start_then_messageerror(&Closure::once_into_js(start));
+    for _ in 0..200 {
+        if SENT.with_borrow(Vec::len) >= want {
+            break;
+        }
+        sleep(5).await;
+    }
+    sleep(50).await;
+    let replies: Vec<_> = SENT.with_borrow(|sent| {
+        sent.iter()
+            .skip(want - 2)
+            .map(|msg| WriteReply::from_js(msg).map_err(|bad| bad.text))
+            .collect()
+    });
+    assert!(set, "start sets a handler of messageerror");
+    assert!(
+        matches!(
+            &replies[..],
+            [
+                Ok(WriteReply::Ready),
+                Ok(WriteReply::Done {
+                    outcome: Outcome::Failed(text),
+                    bytes: None
+                })
+            ] if text == UNREADABLE
+        ),
+        "write-ready, then one failure: {replies:?}"
     );
 }
 

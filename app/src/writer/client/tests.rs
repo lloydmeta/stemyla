@@ -40,6 +40,29 @@ export function writer_throwing_port() {
     postMessage() { throw new DOMException("refused by the test", "DataCloneError"); },
   };
 }
+// A port that records its posts, and whose `postMessage` throws for a
+// request whose `rel` ends in "x", so a test picks the posts that fail.
+export function writer_recording_port() {
+  const port = { onmessage: null, onerror: null, onmessageerror: null, posts: [] };
+  port.postMessage = (data) => {
+    if (String(data.rel).endsWith("x")) {
+      throw new DOMException("refused by the test", "DataCloneError");
+    }
+    port.posts.push(data);
+  };
+  return port;
+}
+export function writer_posts(port) { return port.posts.length; }
+// A `serve` for the fake that rejects a request whose `rel` ends in "x",
+// and answers each other one with `reply`.
+export function writer_serve_refusing(reply) {
+  return async (data) => {
+    if (String(data.rel).endsWith("x")) throw new Error("refused by the test");
+    return [reply, []];
+  };
+}
+export function writer_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+export function writer_fail(port) { port.onerror({ message: "failed by the test" }); }
 export function writer_tell(port, data) { port.onmessage({ data }); }
 // Counts the calls of `Worker.prototype.terminate` until the stop.
 let terminated = null;
@@ -61,6 +84,11 @@ extern "C" {
     fn writer_spy_on_post(port: &JsValue) -> js_sys::Array;
     fn writer_deliver(port: &JsValue, data: &JsValue);
     fn writer_throwing_port() -> JsValue;
+    fn writer_recording_port() -> JsValue;
+    fn writer_posts(port: &JsValue) -> u32;
+    fn writer_serve_refusing(reply: &JsValue) -> js_sys::Function;
+    async fn writer_sleep(ms: u32);
+    fn writer_fail(port: &JsValue);
     fn writer_tell(port: &JsValue, data: &JsValue);
     fn writer_terminates_start();
     fn writer_terminates_stop() -> u32;
@@ -342,4 +370,126 @@ async fn a_post_that_throws_fails_its_request() {
         );
     }
     assert_eq!(waiting, 0, "no request waits");
+}
+
+fn done(outcome: Outcome) -> JsValue {
+    sent(WriteReply::Done {
+        outcome,
+        bytes: None,
+    })
+}
+
+/// The outcomes of `ends`, after `client` stops: a request that still
+/// waits then ends with "the write worker stopped".
+async fn outcomes(
+    client: &WriteClient,
+    ends: Vec<Pin<Box<dyn Future<Output = Done>>>>,
+) -> Vec<Result<Outcome, String>> {
+    client.stopped("the test ended");
+    let mut outcomes = Vec::new();
+    for end in ends {
+        outcomes.push(end.await.map(|(outcome, _)| outcome));
+    }
+    outcomes
+}
+
+fn refused(ended: &Result<Outcome, String>) -> bool {
+    matches!(ended, Err(reason) if reason.contains("DataCloneError"))
+}
+
+/// Finding 2-1 of review round 2: held posts that throw fail their own
+/// requests, and each reply ends its own request.  Two posts throw, so
+/// the order of the removals counts.
+#[wasm_bindgen_test]
+async fn held_posts_that_throw_fail_their_own_requests() {
+    let client = WriteClient::new(|| Ok(writer_recording_port()));
+    let port = client.port().expect("the port");
+    let ends = ["a", "bx", "cx", "d"]
+        .into_iter()
+        .map(|rel| client.write(&block(rel, 0, b"lloyd")))
+        .collect();
+    writer_tell(&port, &sent(WriteReply::Ready));
+    writer_tell(&port, &done(Outcome::Written));
+    writer_tell(&port, &done(Outcome::Gone));
+    let waiting = client.0.borrow().waiting.len();
+    let posted = writer_posts(&port);
+    let got = outcomes(&client, ends).await;
+    assert_eq!(got[0], Ok(Outcome::Written), "a: its own reply");
+    assert!(refused(&got[1]), "bx fails: {:?}", got[1]);
+    assert!(refused(&got[2]), "cx fails: {:?}", got[2]);
+    assert_eq!(got[3], Ok(Outcome::Gone), "d: its own reply");
+    assert_eq!(waiting, 0, "no request waits");
+    assert_eq!(posted, 2, "a and d are posted");
+}
+
+/// Finding 2-1 of review round 2: a post that throws after `write-ready`
+/// fails its own request, not an earlier one that waits for its reply.
+#[wasm_bindgen_test]
+async fn a_post_that_throws_after_ready_fails_its_own_request() {
+    let client = WriteClient::new(|| Ok(writer_recording_port()));
+    let port = client.port().expect("the port");
+    writer_tell(&port, &sent(WriteReply::Ready));
+    let ends = vec![
+        client.write(&block("a", 0, b"lloyd")),
+        client.write(&block("bx", 0, b"acme")),
+    ];
+    writer_tell(&port, &done(Outcome::Written));
+    let waiting = client.0.borrow().waiting.len();
+    let got = outcomes(&client, ends).await;
+    assert_eq!(got[0], Ok(Outcome::Written), "a: its own reply");
+    assert!(refused(&got[1]), "bx fails: {:?}", got[1]);
+    assert_eq!(waiting, 0, "no request waits");
+}
+
+/// Finding 2-2 of review round 2: a failed port drops its held posts, so
+/// the new port posts only its own requests.
+#[wasm_bindgen_test]
+async fn a_new_port_posts_none_of_the_failed_ports_held_requests() {
+    let client = WriteClient::new(|| Ok(writer_recording_port()));
+    let old = client.port().expect("the port");
+    let failed = client.write(&block("a", 0, b"lloyd"));
+    writer_fail(&old);
+    let failed = failed.await.map(|(outcome, _)| outcome);
+    let next = client.write(&block("b", 0, b"acme"));
+    let port = client.port().expect("a new port");
+    let new_port = !js_sys::Object::is(&port, &old);
+    writer_tell(&port, &sent(WriteReply::Ready));
+    let posted = writer_posts(&port);
+    writer_tell(&port, &done(Outcome::Written));
+    let got = outcomes(&client, vec![next]).await;
+    assert!(
+        matches!(&failed, Err(reason) if reason.starts_with("the write worker stopped: ")),
+        "{failed:?}"
+    );
+    assert!(new_port, "a new port");
+    assert_eq!(posted, 1, "only the new port's request");
+    assert_eq!(got[0], Ok(Outcome::Written), "the reply ends the new write");
+}
+
+/// Finding 2-11 of review round 2: a request that the fake cannot serve
+/// ends with a failure, and the fake serves the requests after it.
+#[wasm_bindgen_test]
+async fn a_request_that_the_fake_cannot_serve_does_not_stall_the_next() {
+    let serve = writer_serve_refusing(&done(Outcome::Written));
+    let client = WriteClient::new(move || Ok(super::super::fake::port_with(&serve)));
+    let ends: Vec<_> = ["a", "bx", "c"]
+        .into_iter()
+        .map(|rel| client.write(&block(rel, 0, b"lloyd")))
+        .collect();
+    for _ in 0..100 {
+        if client.0.borrow().waiting.is_empty() {
+            break;
+        }
+        writer_sleep(10).await;
+    }
+    let waiting = client.0.borrow().waiting.len();
+    let got = outcomes(&client, ends).await;
+    assert_eq!(waiting, 0, "no request waits: {got:?}");
+    assert_eq!(got[0], Ok(Outcome::Written), "a");
+    assert!(
+        matches!(&got[1], Ok(Outcome::Failed(text)) if text.contains("refused by the test")),
+        "bx fails: {:?}",
+        got[1]
+    );
+    assert_eq!(got[2], Ok(Outcome::Written), "c is served");
 }

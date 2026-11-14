@@ -1164,10 +1164,13 @@ pub(super) const HEAP_MARGIN_BYTES: u64 = 2_000_000;
 
 /// D10: the most that a save's JS heap measure may be, in bytes, whatever
 /// the song's length (finding 5-1 of review round speed 5 of M8).  These
-/// are the write's array, the browser's copy of the write in flight, the
-/// reads in flight and a margin.  The end stage comes after the last read
-/// ends, so its own array of the last write never lies beside the reads in
-/// flight.  Its 3 arrays of 2 MiB (6.29 MB) take 0.52 MB of the margin.
+/// are two arrays of [`SAVE_WRITE_BYTES`], the reads in flight and a
+/// margin.  The first array is the write's array, which the page keeps
+/// between writes.  While a write is in flight, the write worker holds it
+/// by transfer (M5.1).  The second array is the last block's own array.
+/// The end stage makes it on the page before its transfer, while the page
+/// keeps the first array.  The end stage comes after the last read ends,
+/// so the second array never lies beside the reads in flight.
 pub(super) fn heap_budget() -> f64 {
     (2 * SAVE_WRITE_BYTES + READS_IN_FLIGHT_BYTES + HEAP_MARGIN_BYTES) as f64
 }

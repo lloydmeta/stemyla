@@ -367,19 +367,21 @@ fn bytes_in(folder: &Path) -> u64 {
 pub struct SafariData {
     folder: PathBuf,
     before: Vec<Entry>,
-    /// Where the line goes: stdout, or a test's record.
-    print: fn(&str),
+    /// Where the line goes: stdout, or a test's buffer.
+    out: Box<dyn std::io::Write>,
 }
 
 impl Drop for SafariData {
     fn drop(&mut self) {
         let left = left_behind(&self.before, &list_folder(&self.folder));
-        (self.print)(&left_line(&left, &self.folder));
+        print_line(&mut *self.out, &left_line(&left, &self.folder));
     }
 }
 
-fn print_line(line: &str) {
-    println!("{line}");
+/// Writes `line` and a newline to `out`.  A write that fails loses only
+/// this report, so a drop does not panic.
+fn print_line(out: &mut dyn std::io::Write, line: &str) {
+    let _ = writeln!(out, "{line}");
 }
 
 /// Lists Safari's folder for a Safari run on macOS, and gives the
@@ -401,7 +403,7 @@ pub fn watch_safari_data(
     Some(SafariData {
         before: list_folder(&folder),
         folder,
-        print: print_line,
+        out: Box::new(std::io::stdout()),
     })
 }
 
@@ -771,12 +773,28 @@ mod tests {
         std::fs::remove_dir_all(d).unwrap();
     }
 
-    thread_local! {
-        static PRINTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    /// A buffer that a test keeps a handle to after the writer moves.
+    #[derive(Clone, Default)]
+    struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+
+    impl std::io::Write for Shared {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.borrow_mut().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
     }
 
-    fn record(line: &str) {
-        PRINTED.with_borrow_mut(|lines| lines.push(line.to_string()));
+    /// Finding 2-13 of review round 2: the line goes out whole, with its
+    /// newline.
+    #[test]
+    fn print_line_writes_the_line_and_a_newline() {
+        let mut out = Vec::new();
+        print_line(&mut out, "browser data: lloyd");
+        assert_eq!(String::from_utf8_lossy(&out), "browser data: lloyd\n");
     }
 
     /// The drop of a [`SafariData`] lists the folder again and gives the
@@ -784,10 +802,11 @@ mod tests {
     #[test]
     fn the_drop_gives_the_line_of_what_the_run_left() {
         let d = temp_dir("safari-drop");
+        let printed = Shared::default();
         let watch = SafariData {
             folder: d.clone(),
             before: list_folder(&d),
-            print: record,
+            out: Box::new(printed.clone()),
         };
         std::fs::write(
             d.join("FileSystemWritableStreamlloyd"),
@@ -796,7 +815,10 @@ mod tests {
         .unwrap();
         drop(watch);
         std::fs::remove_dir_all(&d).unwrap();
-        let printed = PRINTED.with_borrow(Clone::clone);
+        let printed: Vec<String> = String::from_utf8_lossy(&printed.0.borrow())
+            .lines()
+            .map(str::to_string)
+            .collect();
         assert_eq!(printed.len(), 1, "{printed:?}");
         assert!(
             printed[0]
