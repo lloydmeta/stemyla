@@ -2407,10 +2407,15 @@ fn softmax_label(rows: usize, len: usize) -> String {
 }
 
 /// The profile label of a fused attention: the tokens of each sequence
-/// and the number of sequences.  `profile_groups` in
+/// and the number of sequences, and `vfused` for the vec4 kernel (the
+/// tiled kernel's labels stay as they were).  `profile_groups` in
 /// `xtask/src/e2e/perf.rs` reads it.
-fn attention_label(seq: usize, nseq: usize) -> String {
-    format!("attention seq {seq} x{nseq}")
+fn attention_label(seq: usize, nseq: usize, kernel: FusedKernel) -> String {
+    let variant = match kernel {
+        FusedKernel::Tiled => "",
+        FusedKernel::Vec4 => " vfused",
+    };
+    format!("attention seq {seq} x{nseq}{variant}")
 }
 
 /// Dispatches recorded for one submission.  Holds the borrows of the
@@ -2719,7 +2724,7 @@ impl<'g> Rec<'g> {
             groups,
         );
         if let Some(label) = self.labels.last_mut() {
-            *label = attention_label(seq, nseq);
+            *label = attention_label(seq, nseq, kernel);
         }
     }
 
@@ -4054,11 +4059,14 @@ mod tests {
     /// Asserts:
     /// * a softmax of 9208 rows of 1151 has the label `softmax 9208x1151`;
     /// * a fused attention of 4 sequences of 1151 tokens has the label
-    ///   `attention seq 1151 x4`.
+    ///   `attention seq 1151 x4` with the tiled kernel, and
+    ///   `attention seq 1151 x4 vfused` with `vfused`.
     #[test]
     fn attention_labels_name_their_shapes() {
         assert_eq!(softmax_label(9208, 1151), "softmax 9208x1151");
-        assert_eq!(attention_label(1151, 4), "attention seq 1151 x4");
+        let label = |kernel| attention_label(1151, 4, kernel);
+        assert_eq!(label(FusedKernel::Tiled), "attention seq 1151 x4");
+        assert_eq!(label(FusedKernel::Vec4), "attention seq 1151 x4 vfused");
     }
 
     /// Values compare by their bits, except that `+0` equals `-0`: WGSL

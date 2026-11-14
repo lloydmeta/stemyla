@@ -73,7 +73,8 @@
 //!   file there (`--weights`).  Each stem file equals the memory path's stem as
 //!   a 16-bit WAV, byte for byte.  It prints the SHA-256 of each stem, and
 //!   checks them against `--hashes`.  It runs `mm=s64` at a chunk of 16,384
-//!   samples, with `attn=split` unless `--query` sets `attn`.
+//!   samples, with `attn=split` unless `--query` sets `attn`.  It fails
+//!   when the worker does not run the asked `attn` (`auto` asks for none).
 //! * `weights`: f16 weights against f32 weights, from a blank page
 //!   (`--weights`; M9 of `docs/plans/completed/stream-from-storage.md`).  The
 //!   stems of the two formats must be equal bit for bit, with M3's kernels
@@ -129,7 +130,8 @@
 //!   the end (`perf::side_query`).  The output gives the query of each
 //!   side before the first run.  A comparison refuses `attn=split` and
 //!   `attn=time` in `--query` or `--head-query`, since both split the
-//!   frequency axis.  `perf` refuses `--head-query` without
+//!   frequency axis.  It fails a run whose `kernels:` line does not name
+//!   the `attn` that its side's query forces (`attn=auto` forces none).  `perf` refuses `--head-query` without
 //!   `--base-dist`.  It refuses `--gate`, `--update-baselines` and
 //!   `--swiftshader`.  It refuses a run on a fallback or a software adapter
 //!   (GPU-3).  It refuses a run whose chunk times have 1 decimal: the
@@ -2517,6 +2519,12 @@ impl<T> CompareSites<T> {
         }
     }
 
+    /// The page queries of the base and the head, in that order, as
+    /// `perf::run_comparison` takes them.
+    fn queries(&self) -> [&str; 2] {
+        [&self.base_query, &self.head_query]
+    }
+
     /// The page query of `side`.
     fn query(&self, side: perf::Side) -> &str {
         match side {
@@ -2546,7 +2554,7 @@ fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
     perf::run_comparison(
         browser,
         o.runs,
-        [sites.query(perf::Side::Base), sites.query(perf::Side::Head)],
+        sites.queries(),
         |side, _n, name| {
             let (p, result) = perf_run(o, sites.of(side), sites.query(side), name)
                 .map_err(|e| format!("run {name}: {e:#}"))?;
@@ -2641,8 +2649,12 @@ fn stored_stems_attn(query: Option<&str>) -> String {
 
 /// Why the worker of `stored-stems` did not take the attention policy
 /// `attn`, from the text of its reply to the model message (which names
-/// its policy as `; attention <policy>,`), or `None`.
+/// its policy as `; attention <policy>,`), or `None`.  `auto` asks for no
+/// policy, so any policy passes it, as in `perf::forced_attn_problem`.
 fn stored_stems_attention_problem(model_reply: &str, attn: &str) -> Option<String> {
+    if attn == "auto" {
+        return None;
+    }
     let ran = model_reply
         .split_once("; attention ")
         .and_then(|(_, rest)| rest.split([',', ')']).next());
@@ -2683,12 +2695,15 @@ fn stem_wavs(stems: &Value, names: &[&str]) -> Result<Vec<Vec<u8>>> {
 type Checks = Vec<(bool, String)>;
 
 /// The checks of `stored-stems` on what its page script returns (`r`),
-/// for a clip of `frames`, and the memory path's SHA-256s.  With `hashes`
+/// for a clip of `frames` and the asked attention policy `attn`, and the
+/// memory path's SHA-256s.  The worker's reply to the model message must
+/// name `attn` ([`stored_stems_attention_problem`]).  With `hashes`
 /// (`--hashes`), the SHA-256s must equal them.
 fn stored_stems_checks(
     r: &Value,
     frames: usize,
     hashes: Option<&str>,
+    attn: &str,
 ) -> Result<(Checks, Vec<String>)> {
     let mut checks = vec![
         (
@@ -2704,6 +2719,12 @@ fn stored_stems_checks(
             format!("the song is {frames} frames"),
         ),
     ];
+    let model_reply = r["replies"][0]["text"].as_str().unwrap_or_default();
+    let problem = stored_stems_attention_problem(model_reply, attn);
+    checks.push((
+        problem.is_none(),
+        problem.unwrap_or_else(|| format!("the worker runs attention {attn}")),
+    ));
     let segments = r["segments"].as_u64().unwrap_or(0);
     checks.push((segments > 1, format!("several segments ({segments})")));
     checks.push((
@@ -2836,13 +2857,7 @@ fn stored_stems(o: &Opts) -> Result<()> {
     )?;
     p.note(&format!("replies: {:?}", texts(&r["replies"])));
     p.note(&format!("stored-stems: attention {attn}"));
-    let (mut checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref())?;
-    let reply = r["replies"][0]["text"].as_str().unwrap_or_default();
-    let problem = stored_stems_attention_problem(reply, &attn);
-    checks.push((
-        problem.is_none(),
-        problem.unwrap_or_else(|| format!("the worker runs attention {attn}")),
-    ));
+    let (checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref(), &attn)?;
     for (name, hash) in roformer::STEMS.iter().zip(&hashes) {
         p.note(&format!("stored-stems: memory path: {name} sha256 {hash}"));
     }
@@ -3140,7 +3155,7 @@ mod tests {
             |frames: usize| json!({ "frames": frames, "len": 4, "stems": roformer::STEMS });
         json!({
             "replies": [
-                { "type": "model", "ok": true },
+                { "type": "model", "ok": true, "text": "model loaded in 0.4 s (apple metal-3, fallback adapter no; own WGSL kernels; matmul s64, checked OK: i64 s64; attention split, fused attention checked OK, vfused checked OK)" },
                 { "type": "done" },
                 { "type": "done" },
             ],
@@ -3155,7 +3170,7 @@ mod tests {
 
     /// The names of the checks that fail.
     fn failing(r: &Value, hashes: Option<&str>) -> Vec<String> {
-        let (checks, _) = stored_stems_checks(r, 4, hashes).unwrap();
+        let (checks, _) = stored_stems_checks(r, 4, hashes, "split").unwrap();
         checks
             .into_iter()
             .filter(|(ok, _)| !ok)
@@ -3166,8 +3181,8 @@ mod tests {
     #[test]
     fn the_stored_stems_checks_pass_a_good_reply_and_fail_wrong_ones() {
         let good = stored_stems_reply();
-        let (checks, hashes) = stored_stems_checks(&good, 4, None).unwrap();
-        assert_eq!(checks.len(), 15, "nine checks, and one for each stem");
+        let (checks, hashes) = stored_stems_checks(&good, 4, None, "split").unwrap();
+        assert_eq!(checks.len(), 16, "ten checks, and one for each stem");
         assert_eq!(failing(&good, None), Vec::<String>::new());
         let all = hashes.join(",");
         assert_eq!(failing(&good, Some(&all)), Vec::<String>::new());
@@ -3177,8 +3192,13 @@ mod tests {
             failing(&good, Some(&wrong_hashes.join(","))),
             ["the memory path's stems equal the hashes given"]
         );
-        let cases: [(&str, Value, &str); 10] = [
+        let cases: [(&str, Value, &str); 11] = [
             ("/replies/0/ok", json!(false), "the worker loads the model"),
+            (
+                "/replies/0/text",
+                json!("model loaded (matmul s64; attention fused, fused attention checked OK)"),
+                "the worker runs attention",
+            ),
             (
                 "/replies/1/type",
                 json!("error"),
@@ -3712,7 +3732,8 @@ mod tests {
     /// Asserts that `CompareSites::start`, with the options of `perf
     /// --base-dist /tmp/base/dist --query mm=v64k8,v64k8&attn=fused
     /// --head-query attn=freq`, gives the base `--query` and the head
-    /// `--query` with `attn=freq`.
+    /// `--query` with `attn=freq`, alone and as the pair (base, head) that
+    /// `perf_compare` gives `run_comparison`.
     #[test]
     fn each_side_of_a_comparison_runs_its_own_query() {
         let o = Opts::parse(&args(
@@ -3722,6 +3743,10 @@ mod tests {
         let sites = CompareSites::start(&o, |dist| Ok(dist.to_path_buf())).expect("sites");
         assert_eq!(sites.query(perf::Side::Base), "mm=v64k8,v64k8&attn=fused");
         assert_eq!(sites.query(perf::Side::Head), "mm=v64k8,v64k8&attn=freq");
+        assert_eq!(
+            sites.queries(),
+            ["mm=v64k8,v64k8&attn=fused", "mm=v64k8,v64k8&attn=freq"]
+        );
     }
 
     /// Asserts that `stored_stems_attn` gives `split` with no `--query` and
@@ -3739,7 +3764,7 @@ mod tests {
     /// Asserts that `stored_stems_attention_problem` passes a model reply
     /// that names the asked policy (`fused`, `vfused`), and fails one that
     /// names another (`split` when `fused` was asked) or none, with a
-    /// reason that names both.
+    /// reason that names both.  `auto` passes any policy.
     #[test]
     fn stored_stems_checks_the_workers_policy() {
         let reply = |attn: &str| {
@@ -3761,6 +3786,10 @@ mod tests {
             "{problem:?}"
         );
         assert!(stored_stems_attention_problem("model loaded", "split").is_some());
+        assert_eq!(
+            stored_stems_attention_problem(&reply("vfused"), "auto"),
+            None
+        );
     }
 
     /// Asserts that the page script of `stored-stems` takes `attn` from its

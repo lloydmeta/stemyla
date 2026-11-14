@@ -652,7 +652,8 @@ fn calibration_frees_its_buffers() {
 /// The profile labels of one time-transformer step of 28 bands of 9
 /// frames with `i64`, and each label's count, for `policy`: the norms,
 /// q/k/v, rope, the gates, the attention, the output product and the
-/// feed-forward products.
+/// feed-forward products.  The label of `vfused`'s dispatch ends in
+/// `vfused`, so the list names the fused kernel that runs.
 fn labels_of(policy: AttentionPolicy) -> Vec<(String, usize)> {
     let mut labels = vec![
         ("matmul 252x1024x256 x1 i64", 1),
@@ -663,7 +664,9 @@ fn labels_of(policy: AttentionPolicy) -> Vec<(String, usize)> {
         ("rmsnorm", 2),
         ("rope", 1),
     ];
-    if policy.time().is_some() {
+    if policy == AttentionPolicy::VFused {
+        labels.push(("attention seq 9 x28 vfused", 1));
+    } else if policy.time().is_some() {
         labels.push(("attention seq 9 x28", 1));
     } else {
         labels.extend([
@@ -682,9 +685,11 @@ fn labels_of(policy: AttentionPolicy) -> Vec<(String, usize)> {
 
 /// Asserts, on a profiling device, that calibration's step (`TimeStep`)
 /// records the dispatches that `Job::run` records for `Step::Time`, for
-/// split attention, the tiled fused kernel and `vfused`: the same labels
-/// (kernel and shape), each as many times, and the labels of
-/// `labels_of`.  A step that records nothing, or another shape, fails.
+/// split attention, the tiled fused kernel and `vfused`: the same profile
+/// labels, each as many times, and the labels of `labels_of`.  A label
+/// names a matmul's kernel and shape, and which fused kernel runs.  A
+/// step that records nothing, another shape or another fused kernel
+/// fails.
 /// The net has zero weights of the model's shapes; 9 frames and a budget
 /// of 400,000 give steps of 28 bands.
 #[test]

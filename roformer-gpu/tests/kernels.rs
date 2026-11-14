@@ -1237,9 +1237,10 @@ fn profile_labels_dispatches() {
 }
 
 /// Asserts, on a profiling device, for one fused attention of 3
-/// sequences of 62 tokens with each fused kernel (tiled and `vfused`):
-/// * the profile has the label `attention seq 62 x3`, with 2 dispatches,
-///   so `profile_groups` counts both kernels as attention;
+/// sequences of 62 tokens with each fused kernel:
+/// * the tiled kernel's label is `attention seq 62 x3`, and `vfused`'s
+///   `attention seq 62 x3 vfused`, each with 1 dispatch, so the profile
+///   names the kernel, and `profile_groups` counts both as attention;
 /// * no WebGPU error.
 ///
 /// Skips when the adapter has no `timestamp-query`.
@@ -1265,11 +1266,9 @@ fn profile_labels_attention_by_its_shape() {
     let errors = g.take_errors();
     assert!(errors.is_empty(), "{errors:?}");
     let totals = g.take_profile();
-    assert_eq!(
-        totals.get("attention seq 62 x3").map(|v| v.0),
-        Some(2),
-        "{totals:?}"
-    );
+    for label in ["attention seq 62 x3", "attention seq 62 x3 vfused"] {
+        assert_eq!(totals.get(label).map(|v| v.0), Some(1), "{totals:?}");
+    }
 }
 
 /// The usual device never asks for optional features.

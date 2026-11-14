@@ -17,7 +17,8 @@ use test_support::{Need, skip};
 
 /// Asserts, with a clock that moves 0.01 s at each read, no warm-up, no
 /// round length and 2 rounds, that `time_axis_per_chunk` gives each policy
-/// 2 rounds of:
+/// that this GPU can run 2 rounds of the figures below, and a kernel that
+/// failed its check none:
 /// * split: 0.02 s for each step x 744 steps = 14.88 s;
 /// * each fused kernel: 0.02 s x (180 + 12) steps = 3.84 s.
 ///
@@ -32,7 +33,7 @@ fn the_time_axis_adds_up_one_wait_for_each_step() {
     };
     pollster::block_on(g.check_kernels()).unwrap();
     pollster::block_on(g.check_attention());
-    assert!(g.fused_ok.get() && g.vfused_ok.get());
+    let (fused_ok, vfused_ok) = (g.fused_ok.get(), g.fused_ok.get() && g.vfused_ok.get());
     let clock = Cell::new(0.0);
     let now = || {
         clock.set(clock.get() + 0.01);
@@ -47,12 +48,13 @@ fn the_time_axis_adds_up_one_wait_for_each_step() {
         2,
         &now,
     ));
-    for (name, timing, want) in [
-        ("split", &t.split, 14.88),
-        ("fused", &t.fused, 3.84),
-        ("vfused", &t.vfused, 3.84),
+    for (name, timing, want, ok) in [
+        ("split", &t.split, 14.88, true),
+        ("fused", &t.fused, 3.84, fused_ok),
+        ("vfused", &t.vfused, 3.84, vfused_ok),
     ] {
-        assert_eq!(timing.rounds.len(), 2, "{name}");
+        let rounds = if ok { 2 } else { 0 };
+        assert_eq!(timing.rounds.len(), rounds, "{name}");
         for r in &timing.rounds {
             assert!((r - want).abs() < 1e-9, "{name}: {r}, want {want}");
         }

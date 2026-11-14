@@ -2025,8 +2025,9 @@ enum Chosen {
 /// kernels and this format, or else about half a minute of
 /// `roformer_gpu::bench::calibrate` at the run's `budget` (about 33 s on
 /// the M2 Pro).  The result is kept only at the default budget
-/// (`roformer_gpu::bench::keep_choice`), since the stored key names no
-/// budget; see `roformer_gpu::bench::store_choice` for which lines stay.
+/// (`roformer_gpu::bench::choices_to_store`), since the stored key names
+/// no budget; see `roformer_gpu::bench::store_choice` for which lines
+/// stay.
 async fn choose_kernels(gpu: &Gpu, format: WeightFormat, budget: usize) -> Chosen {
     let pref = STATE.with_borrow(|s| s.power);
     // The key's separators (tab, newline, `|`) must not occur in the name,
@@ -2078,11 +2079,17 @@ async fn choose_kernels(gpu: &Gpu, format: WeightFormat, budget: usize) -> Chose
         ));
         return Chosen::Calibrated;
     }
-    if !roformer_gpu::bench::keep_choice(budget) {
+    let Some(text) = roformer_gpu::bench::choices_to_store(
+        &text,
+        &adapter,
+        &key,
+        &c.name(),
+        KEEP_PER_GPU,
+        budget,
+    ) else {
         log("this choice is not kept: it was timed at the budget of ?max_elems=, not the default");
         return Chosen::Calibrated;
-    }
-    let text = roformer_gpu::bench::store_choice(&text, &adapter, &key, &c.name(), KEEP_PER_GPU);
+    };
     cache_put(KERNEL_CHOICE, &Uint8Array::from(text.as_bytes())).await;
     Chosen::Calibrated
 }

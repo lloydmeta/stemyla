@@ -870,6 +870,19 @@ pub struct TimeAxis {
     pub vfused: Timing,
 }
 
+impl TimeAxis {
+    /// The timings of each policy, by the index of [`StepTiming::policy`]:
+    /// 0 split, 1 the tiled fused kernel, 2 `vfused`.
+    pub fn of_policies(timings: [Timing; 3]) -> Self {
+        let [split, fused, vfused] = timings;
+        Self {
+            split,
+            fused,
+            vfused,
+        }
+    }
+}
+
 /// Seconds per chunk of the time transformer with split attention, with
 /// the tiled fused kernel and with `vfused`, as the separation runs it:
 /// each step of [`time_steps`] at `budget`, for each of the [`DEPTH`]
@@ -911,12 +924,7 @@ pub async fn time_axis_per_chunk(
         }
     }
     gpu.set_recording(recording);
-    let [split, fused, vfused] = timings;
-    TimeAxis {
-        split,
-        fused,
-        vfused,
-    }
+    TimeAxis::of_policies(timings)
 }
 
 /// Kernel indices named in a comma-separated list (`"s64,i64"`); `None`
@@ -1011,6 +1019,21 @@ pub fn choice_key(adapter: &str, kernels_id: u64, format: WeightFormat) -> Strin
 /// only, and a later run at the default budget calibrates again.
 pub fn keep_choice(budget: usize) -> bool {
     budget == crate::net::BUDGET
+}
+
+/// The stored kernel choices with this run's choice (`value` for `key`)
+/// added by [`store_choice`], or `None` when a choice calibrated at
+/// `budget` is not kept ([`keep_choice`]).  The worker stores what this
+/// gives, and nothing when it gives `None`.
+pub fn choices_to_store(
+    text: &str,
+    adapter: &str,
+    key: &str,
+    value: &str,
+    keep_per_gpu: usize,
+    budget: usize,
+) -> Option<String> {
+    keep_choice(budget).then(|| store_choice(text, adapter, key, value, keep_per_gpu))
 }
 
 /// The line a worker logs for the kernel choice it uses, and where it came
@@ -1577,6 +1600,29 @@ mod tests {
         );
     }
 
+    /// Asserts that `TimeAxis::of_policies` puts the timings of policy 0 in
+    /// `split`, of 1 in `fused` and of 2 in `vfused`, as
+    /// `time_axis_round` numbers them: policy 1 runs the tiled kernel and
+    /// policy 2 `vfused`.
+    #[test]
+    fn each_timing_goes_to_its_policy() {
+        let t = |secs: f64| Timing { rounds: vec![secs] };
+        let axis = TimeAxis::of_policies([t(1.0), t(2.0), t(3.0)]);
+        assert_eq!(
+            [axis.split.rounds, axis.fused.rounds, axis.vfused.rounds],
+            [vec![1.0], vec![2.0], vec![3.0]]
+        );
+        let kernels: Vec<(usize, Option<FusedKernel>)> =
+            time_axis_round(0, crate::net::BUDGET, true, true, 0.0)
+                .iter()
+                .map(|s| (s.policy, s.kernel))
+                .collect();
+        for (policy, kernel) in kernels {
+            let want = [None, Some(FusedKernel::Tiled), Some(FusedKernel::Vec4)][policy];
+            assert_eq!(kernel, want, "policy {policy}");
+        }
+    }
+
     /// Asserts that `per_chunk_total` sums each call's seconds times its
     /// calls for each chunk: 0.004 s x 744 = 2.976 s; 0.02 s x 180 +
     /// 0.01 s x 12 = 3.72 s; nothing gives 0.
@@ -1626,6 +1672,22 @@ mod tests {
         );
     }
 
+    /// Asserts that `choices_to_store` gives the text of `store_choice` at
+    /// the default budget, and `None` at another budget.
+    #[test]
+    fn a_choice_is_stored_only_at_the_default_budget() {
+        let text = "amd|a|5\ti64;split\n";
+        let budget = crate::net::BUDGET;
+        assert_eq!(
+            choices_to_store(text, "apple", "apple|b|6", "v64;vfused", 3, budget),
+            Some(store_choice(text, "apple", "apple|b|6", "v64;vfused", 3))
+        );
+        assert_eq!(
+            choices_to_store(text, "apple", "apple|b|6", "v64;vfused", 3, budget / 2),
+            None
+        );
+    }
+
     /// Asserts that a choice is kept only when it was calibrated at the
     /// default budget: `BUDGET` is kept; half of it, twice it and 1 are
     /// not.
@@ -1641,7 +1703,7 @@ mod tests {
     /// Asserts that the worker and calibration use one budget: the
     /// worker's `budget` falls back to `net::BUDGET`, the worker has no
     /// budget of its own, and it gives calibration the budget of the run.
-    /// The worker stores a choice only by `keep_choice`.
+    /// The worker stores a choice only by `choices_to_store`.
     #[test]
     fn the_run_and_calibration_share_one_budget() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/src/web.rs");
@@ -1650,10 +1712,14 @@ mod tests {
             "s.max_elems.unwrap_or(roformer_gpu::net::BUDGET)",
             "choose_kernels(g, format, budget(s))",
             "roformer_gpu::bench::calibrate(gpu, format, budget, ",
-            "!roformer_gpu::bench::keep_choice(budget)",
+            "roformer_gpu::bench::choices_to_store(",
         ] {
             assert!(worker.contains(want), "{want} in worker/src/web.rs");
         }
+        assert!(
+            !worker.contains("bench::store_choice("),
+            "the worker stores only what choices_to_store gives"
+        );
         assert!(
             !worker.contains("const BUDGET"),
             "no budget of the worker's own"

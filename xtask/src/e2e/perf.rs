@@ -362,7 +362,7 @@ pub(super) fn profile_groups(log: &[String], frames: usize, bands: usize) -> Opt
                 }
             },
             ["softmax", shape] => dims::<2>(shape).and_then(|[_, len]| axis(&[len], frames, bands)),
-            ["attention", "seq", seq, _] => seq
+            ["attention", "seq", seq, _, ..] => seq
                 .parse()
                 .ok()
                 .and_then(|seq: usize| axis(&[seq], frames, bands)),
@@ -1446,7 +1446,8 @@ mod tests {
 
     /// Asserts, for one profile line of each kind:
     /// * the time-axis group holds the scores matmul, the P.v matmul, the
-    ///   softmax and the fused attention of 1,151 tokens;
+    ///   softmax and the fused attention of 1,151 tokens, with the tiled
+    ///   kernel and with `vfused` (whose label ends in `vfused`);
     /// * the frequency-axis group holds the same four of 62 tokens;
     /// * the linear group holds a linear product, the gates' matmul
     ///   (1151x8x256), and a matmul of 62 rows that is not attention
@@ -1472,18 +1473,19 @@ mod tests {
             profile_line("matmul 62x8x256 x1151 v64 f16", 4096.0),
             profile_line("rmsnorm", 1024.0),
             profile_line("rope", 2048.0),
+            profile_line("attention seq 1151 x4 vfused", 8192.0),
         ];
-        log.push("[72.6s] separator: profile: total GPU time 8191.000 s".into());
+        log.push("[72.6s] separator: profile: total GPU time 16383.000 s".into());
         log.push("[72.6s] separator: profile: GPU busy 8191.00 s of 8200.00 s of step wall time (0% waiting, submitting or between dispatches); one pass per dispatch while profiling".into());
         log.push(
             "[2.0s] separator: profile: this adapter has no timestamp-query; no GPU times".into(),
         );
         let g = profile_groups(&log, FRAMES, BANDS).unwrap();
-        assert_eq!(g.time_attention, 15.0);
+        assert_eq!(g.time_attention, 8207.0);
         assert_eq!(g.freq_attention, 240.0);
         assert_eq!(g.linear, 4864.0);
         assert_eq!(g.other, 3072.0);
-        assert_eq!(g.total, 8191.0);
+        assert_eq!(g.total, 16383.0);
         assert_eq!(
             g.time_attention + g.freq_attention + g.linear + g.other,
             g.total
