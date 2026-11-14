@@ -1,6 +1,6 @@
 # WebKit bug text: a write stream keeps its swap file after close()
 
-This is a bug text for the maintainer to file at [bugs.webkit.org](https://bugs.webkit.org), component Website Storage.  It is not filed yet (2026-11-14).  M5.1 of `plans/active/gpu-speed.md` measured it (`plans/active/gpu-speed-m51.md`, Step 3).  `browser-quirks.md` gives the quirk and what the code here does about it.  TD-103 records what still leaks.
+This is a bug text for the maintainer to file at [bugs.webkit.org](https://bugs.webkit.org), component Website Storage.  It is not filed yet (2026-11-14).  M5.1 of `plans/active/gpu-speed.md` measured it (`plans/completed/gpu-speed-m51.md`, Step 3).  `browser-quirks.md` gives the quirk and what the code here does about it.  TD-103 records what still leaks.
 
 Title: OPFS: FileSystemWritableFileStream.close() leaves its FileSystemWritableStream temporary file in the network process's temporary folder
 

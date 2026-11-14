@@ -323,6 +323,9 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * [x] 2026-11-14: the fixes of review round 1 (findings 1-1 to 1-19, and the missed mutants 1-21 to 1-39), each test that the findings ask for failing first on an assert, but 1-19's, whose first run failed on the uncaught `DataCloneError` (`m51/r1/`).  Decision 0032 records the write worker.
 * [x] 2026-11-14: the fixes of review round 2 (findings 2-1 to 2-13).  Each new test failed first on an assert (`m51/r2/`).  The client tests fail under 5 mutants of the client's index logic and `held.clear()`.  The write worker answers a `messageerror` with a failure, and the fake goes on after a request that it cannot serve.
 * [x] 2026-11-14: the fixes of review round 3 (findings 3-1 to 3-6).  The new test of a `messageerror` between two requests failed first on an assert (`m51/r3/3-1-fail.log`).
+* [x] 2026-11-14: the doc commit `e0562e0` (orchestrator): a browser test runs through `xtask web-test`.  Review round 4 (late rule) fixed 4-1 in `a6f4aea`: the Chrome profiles of a direct run get their own entry, TD-104.
+* [x] 2026-11-14: `549e561`: TD-105, nothing orders the agents' browser runs.  Review round 5 fixed 5-1 in `de3cf42`: the lock of TD-105 is at one path for the whole machine.
+* [x] 2026-11-15: review round 6 found 2 nits and no should-fix, so it is the last round (decision 0024).  Six rounds: 46 agents, 3,063,897 tokens, 70.3 wall minutes, 0 interventions.  Rounds 4 to 6 fixed 2 findings, both in TD text.
 
 ## Surprises and discoveries
 
@@ -439,4 +442,26 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 
 ## Outcomes and retrospective
 
-Not yet.
+Done on 2026-11-15, from `8b16df7` to `de3cf42`, in 6 review rounds.
+
+What M5.1 achieved, by case:
+
+* Case 1: each Chrome run of `xtask web-test` and `xtask e2e` on macOS keeps its profiles in its own folder `/tmp/stemyla-chrome/<pid>-<n>`, and removes the folder.  The counted runs left 0 new profiles in `$TMPDIR`.
+* Cases 2 and 5: WebKit keeps the swap file of each `createWritable` stream that closes (TD-103, the quirk entry, and the draft WebKit bug).  Each WebDriver session leaves one empty blob folder.  No cause was in the app.
+* Case 4: the stem worker writes the model through a sync access handle, so a model save no longer leaves 349.5 MB.  The maintainer then chose a write worker crate (`write-worker`, decision 0032).  It writes the page's song-sized files through sync access handles.  A song open now leaves 327 bytes, against 52.9 MB for 5 stems of 30 s.
+* Case 6: each Safari run prints a `browser data:` line with what it left.  `xtask` removes no Safari file.
+* `check --tier push` passed at each review round, with both perf gates near the baselines (Chrome 3.59 to 3.65 s, Safari 5.54 to 5.64 s).
+
+What M5.1 did not achieve:
+
+* The page's small writes (`meta`, `current`) still leave swap files in Safari, a few hundred bytes for each song open (TD-103).
+* A whole Safari `web-test` still leaves about 1.7 GB, from the test helpers and the fake write worker (TD-103).
+* A browser test that runs outside `xtask` still leaves Chrome profiles (TD-104).  Review agents did that in rounds 2 and 3.
+* Nothing orders the agents' browser runs (TD-105).  Runs overlapped in rounds 2 and 4, with no lost session.
+
+What to do differently:
+
+* Ask the maintainer the form of a new component (a crate or an inline script) with the choice of the component.  The JavaScript form cost two Plan review rounds before the maintainer chose a crate.
+* Measure the leak of each test run that a change touches, before review round 1.  The fake write worker raised a Safari `web-test` from 1.7 to 8.9 GB, and only a counted run showed it.
+* Give review agents a rule that a tool enforces, not a prompt line, for shared resources such as a browser (TD-105).
+* Keep late-round fixes to the finding.  New TD text in rounds 4 and 5 brought new findings in rounds 5 and 6.
