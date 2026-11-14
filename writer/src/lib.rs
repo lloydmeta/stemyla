@@ -12,7 +12,7 @@
 #[cfg(target_arch = "wasm32")]
 mod web;
 
-/// Installs the message handler (wasm32); nothing natively.
+/// Installs the message handlers (wasm32); nothing natively.
 pub fn start() {
     #[cfg(target_arch = "wasm32")]
     web::start();

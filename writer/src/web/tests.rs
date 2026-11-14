@@ -55,15 +55,17 @@ export async function exists(path) {
 export function blob_of(bytes) { return new Blob([bytes]); }
 export function post(msg, transfer) { return structuredClone(msg, { transfer }); }
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-// Calls `start`, sends a `messageerror` event to this worker, then puts
-// back the test runner's handlers.  Gives whether `start` set a handler
-// of `messageerror`.
-export function start_then_messageerror(start) {
+// Calls `start`, then `before`, sends a `messageerror` event to this
+// worker, calls `after`, and puts back the test runner's handlers.  Gives
+// whether `start` set a handler of `messageerror`.
+export function start_around_messageerror(start, before, after) {
   const saved = [self.onmessage, self.onmessageerror];
   try {
     start();
     const set = typeof self.onmessageerror === "function";
+    before();
     self.dispatchEvent(new MessageEvent("messageerror"));
+    after();
     return set;
   } finally {
     self.onmessage = saved[0];
@@ -117,7 +119,7 @@ export function lloyd_in_a_larger_buffer(at) {
 }
 "#)]
 extern "C" {
-    fn start_then_messageerror(start: &JsValue) -> bool;
+    fn start_around_messageerror(start: &JsValue, before: &JsValue, after: &JsValue) -> bool;
     async fn wipe();
     async fn make_folder(path: &str);
     async fn plant(path: &str, bytes: &Uint8Array);
@@ -409,14 +411,24 @@ async fn a_request_that_cannot_be_read_ends_with_a_failure() {
     );
 }
 
-/// Finding 2-10 of review round 2: a message that cannot be read (a
-/// `messageerror` event) still gets exactly one reply, a failure, so the
-/// page's oldest request does not wait for ever.
+/// Findings 2-10 and 3-1 of review rounds 2 and 3: a message that cannot
+/// be read (a `messageerror` event) gets exactly one reply, a failure, in
+/// its place in the queue.  So each later reply still ends its own request.
 #[wasm_bindgen_test]
-async fn a_message_that_cannot_be_read_ends_with_a_failure() {
+async fn a_message_that_cannot_be_read_ends_with_a_failure_in_its_place() {
     fresh().await;
-    let want = SENT.with_borrow(Vec::len) + 2;
-    let set = start_then_messageerror(&Closure::once_into_js(start));
+    let want = SENT.with_borrow(Vec::len) + 4;
+    let queue = |rel: &'static str| {
+        Closure::once_into_js(move || {
+            let (msg, transfer) = block("", rel, 0, b"lloyd").to_js();
+            enqueue(Queued::Request(post(&msg, &transfer)));
+        })
+    };
+    let set = start_around_messageerror(
+        &Closure::once_into_js(start),
+        &queue("unreadable/a.bin"),
+        &queue("unreadable/b.bin"),
+    );
     for _ in 0..200 {
         if SENT.with_borrow(Vec::len) >= want {
             break;
@@ -426,24 +438,34 @@ async fn a_message_that_cannot_be_read_ends_with_a_failure() {
     sleep(50).await;
     let replies: Vec<_> = SENT.with_borrow(|sent| {
         sent.iter()
-            .skip(want - 2)
-            .map(|msg| WriteReply::from_js(msg).map_err(|bad| bad.text))
+            .skip(want - 4)
+            .map(|msg| match WriteReply::from_js(msg) {
+                Ok(WriteReply::Ready) => "ready".to_string(),
+                Ok(WriteReply::Done { outcome, bytes }) => {
+                    format!(
+                        "{outcome:?}, {} bytes back",
+                        bytes.map_or(0, |b| b.length())
+                    )
+                }
+                Err(bad) => bad.text,
+            })
             .collect()
     });
+    let a = read_at("unreadable/a.bin").await;
+    let b = read_at("unreadable/b.bin").await;
     assert!(set, "start sets a handler of messageerror");
-    assert!(
-        matches!(
-            &replies[..],
-            [
-                Ok(WriteReply::Ready),
-                Ok(WriteReply::Done {
-                    outcome: Outcome::Failed(text),
-                    bytes: None
-                })
-            ] if text == UNREADABLE
-        ),
-        "write-ready, then one failure: {replies:?}"
+    assert_eq!(
+        replies,
+        [
+            "ready".to_string(),
+            "Written, 5 bytes back".into(),
+            format!("{:?}, 0 bytes back", Outcome::Failed(UNREADABLE.into())),
+            "Written, 5 bytes back".into(),
+        ],
+        "write-ready, A, the failure, then B"
     );
+    assert_eq!(a.as_deref(), Some(&b"lloyd"[..]), "A");
+    assert_eq!(b.as_deref(), Some(&b"lloyd"[..]), "B");
 }
 
 fn end(within: &str, rel: &str, size: Option<u64>) -> WriteRequest {

@@ -322,6 +322,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * [x] 2026-11-14: the fix of the Safari `web-test` regression (option A): `write-end` in `stem_protocol::write`, the worker's size check and removal, the store's ends, and the fake's one stream for each file.  Each new test failed first on an assert (`m51/end-fail-*.log`, `m51/end-fail2-*.log`).  A whole Safari `web-test` left 1,320 swap files, 1,697.2 MB (s15), against 8,898.9 MB before the fix and 1,697.2 MB before Step 5c.
 * [x] 2026-11-14: the fixes of review round 1 (findings 1-1 to 1-19, and the missed mutants 1-21 to 1-39), each test that the findings ask for failing first on an assert, but 1-19's, whose first run failed on the uncaught `DataCloneError` (`m51/r1/`).  Decision 0032 records the write worker.
 * [x] 2026-11-14: the fixes of review round 2 (findings 2-1 to 2-13).  Each new test failed first on an assert (`m51/r2/`).  The client tests fail under 5 mutants of the client's index logic and `held.clear()`.  The write worker answers a `messageerror` with a failure, and the fake goes on after a request that it cannot serve.
+* [x] 2026-11-14: the fixes of review round 3 (findings 3-1 to 3-6).  The new test of a `messageerror` between two requests failed first on an assert (`m51/r3/3-1-fail.log`).
 
 ## Surprises and discoveries
 
@@ -432,6 +433,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * 2026-11-14, agent (implementer), Step 5c: no open block: a save and the mix start with their first block at 0, which cuts the file and finds a gone session, so the fake's spies see the same writes as before.  `save_close` has no write: the last block ends the file.  The page's write streams of the stream form (`st_open`, `st_put`, `st_close`, `st_abort`) are gone, with no caller left.  A stem whose move fails after a reset gives "browser storage is being reset", as the next write did before.  The tests that change: `a_wav_save_of_a_stored_mix_writes_whole_blocks_through_one_array` counts the arrays made (`arrays_made`, 1), not the identity of each written object, since a transfer makes a new object on each side; `sources_are_saved_from_their_files` records `blob` for the source, a structured clone of the dropped `Blob`, not `same`.
 * 2026-11-14, orchestrator: `write-end` (option A).  It fixes the regression at its cause, and gives the shipped worker a size check that it lacks.  It stays inside the maintainer's design.  B changes more tests for a gain in tests only.
 * 2026-11-14, agent (implementer), `write-end`: an abandoned write is `size: null`, not a `complete` flag: one field, and a missing `size` is an error (TD-16).  Its reply is the `write-done` of every request, not a reply of its own: the worker ends each request with one reply in the order sent, and the client matches each reply to the oldest request.
+* 2026-11-14, orchestrator: from review round 3, each validator prompt ends with the line 'Start no browser run while another browser run of this round goes on.'  Why: two validators of round 2 ran browser tests at the same time (Surprises).
 
 ## Outcomes and retrospective
 

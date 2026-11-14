@@ -2,7 +2,7 @@
 
 Status: accepted (2026-11-14, by the maintainer, through the orchestrator)
 
-The maintainer chose option c) of M5.1 Step 5: a write worker for this one purpose.  The maintainer also chose its form: a Rust crate built by Trunk.  The parent plan `plans/active/gpu-speed.md` records both choices (Decision log, commits `bd40598` and `00668a1`).  This record states that choice.
+The maintainer chose option c) of M5.1 Step 5: a write worker for this one purpose.  The maintainer also chose its form: a Rust crate built by Trunk.  The parent plan `plans/active/gpu-speed.md` records both choices (Decision log, commits `bd40598` and `00668a1`).  This record states both choices.
 
 ## Context
 
