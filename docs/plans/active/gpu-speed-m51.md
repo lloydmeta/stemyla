@@ -131,7 +131,7 @@ Run each, one at a time, with the counts of Step 2 and a manual count of the sam
 | A write that fails mid-way.  `st_write` (`app/src/store.rs`) and `write_file` (`worker/src/web.rs`) call `abort()` on an error, so the abort row below covers it.  If Step 3's code check finds a path that does not, add a row for it | the same as the abort row |
 | The same, for one test that opens a writable, writes, then calls `abort()`.  `refuse_next_writable` does not serve: it refuses in JavaScript before WebKit makes a swap file.  If no such test exists, the implementer adds one | an abort leaves no swap file |
 | `e2e weights` in Safari, with `--weights` | the model save through `opfs_write`: expected one swap file of 349,521,256 bytes |
-| `e2e weights` in Safari, with `--download` | the model save through `download_to_opfs`, the users' path: the same |
+| `e2e worker-check --download` in Safari | the model save through `download_to_opfs`, the users' path: the same |
 | `e2e storage` in Safari | the page's song writes: the count and the bytes |
 | The counts after the driver ends, and 5 minutes after | if Safari deletes swap files later |
 | Blob folders in each run above | which run makes a new blob folder, and what is in it |
@@ -154,7 +154,7 @@ The cheapest workaround for the largest leak, if Step 3 confirms that `close()` 
 * Each other `createWritable` in the production code of `worker/` and `decoder/` moves to a sync access handle too.
 * Tests that fail first: `worker` web tests spy on `FileSystemFileHandle.prototype.createWritable`, call `opfs_write` and `download_to_opfs`, and assert no call.
 * The tests of MEM-5 for these writes move with them.  `opfs_write_writes_more_than_one_slice` and `a_download_holds_only_the_bytes_of_its_chunks` (`worker/src/web/tests.rs`) spy on `FileSystemWritableFileStream.prototype.write` (`start_spy`).  They spy on `FileSystemSyncAccessHandle.prototype.write` instead, as the tests of a refused `createSyncAccessHandle` do.  A `Blob` source then expects only whole arrays.  MEM-5's "Enforced by" line in `docs/invariants.md` names the changed tests.  The other tests of `opfs_write` and `cache_put` still pass, with a read-back of the written bytes.
-* Acceptance: counted `e2e weights` runs in Safari, with `--weights` and with `--download`, leave no swap file of 349,521,256 bytes.  `e2e weights` passes in Chrome and Safari.  `check --tier push` passes, with both perf gates (the worker's paths change).
+* Acceptance: a counted `e2e weights --weights` run (`opfs_write`) and a counted `e2e worker-check --download` run (`download_to_opfs`; `e2e weights` does not read `--download`) in Safari leave no swap file of 349,521,256 bytes.  Both scenarios run in Chrome and Safari.  On this Mac, `e2e weights` fails one check, "part 1: the f32 stems have M3's six hashes", also before Step 4 (Surprises, c2 and s3).  Each of its other checks passes.  `check --tier push` passes, with both perf gates (the worker's paths change).
 
 ### Step 5: the page's writes (decision point)
 
@@ -187,7 +187,7 @@ If the cause is in WebKit:
 * Case 1: Step 1's tests fail before the change and pass after it.  The counted Chrome runs of Steps 1 and 7 leave 0 new profiles in `$TMPDIR`, and no run's Chrome folder.
 * Cases 2 and 5: Surprises gives the cause of the swap files and of the blob folders, each with counted runs.
 * Case 3, if Step 3 ties a leak to the app: Step 3a's test fails first and passes after.  A counted Safari run (`e2e weights` or `perf`) leaves no new swap file and no new blob folder from that path.
-* Case 4, if the cause is WebKit: Step 4's tests fail first and pass after.  Counted Safari `e2e weights` runs (`--weights` and `--download`) leave no model-sized swap file.  The quirk entry, the draft bug and the new TD exist.
+* Case 4, if the cause is WebKit: Step 4's tests fail first and pass after.  Counted Safari runs of `e2e weights --weights` and `e2e worker-check --download` leave no model-sized swap file.  The quirk entry, the draft bug and the new TD exist.
 * Case 6: each Safari `e2e` and `web-test` run prints the line of Step 2, and its tests pass.  Chrome meets case 6 by Step 1: each run removes its own folder, and a failed removal prints its path.
 * `check --tier push` passes, with both perf gates where the paths need them.
 
@@ -255,6 +255,8 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * 2026-11-14, agent (implementer), Step 1: the start sweep reads the current user from `/usr/bin/id -u`, since the standard library gives no user ID and `xtask` has no `libc`.  It reads each process's command line from `ps -A -ww -o pid=,command=` (`drivers::command_lines`), since `drivers::processes()` gives the executable only, and an orphan Chrome names the folder in its arguments.  A process of another user counts as live too, which keeps more.  `/tmp/stemyla-chrome` must be a folder of the current user, not a link, or the run stops with an error that tells the person to remove it.  The folders get mode 700.
 * 2026-11-14, agent (implementer), Step 2: the listing is of `getconf DARWIN_USER_TEMP_DIR`, not `TMPDIR`, since a tool can set `TMPDIR` to another folder, and WebKit uses the user's temporary folder.  The line also gives the growth of the swap files and blob folders that were there before, since a blob folder of a Safari that runs can grow in place.  TD-103 is added in Step 2, since the line names it; Step 6 completes it.
 * 2026-11-14, agent (implementer), Step 3: `e2e weights` has no download path: it reads no `--download` (s3b shows it).  The download path of the model runs in `e2e worker-check --download`, so s4 uses it.  Step 4's acceptance names `e2e weights --download`; it needs `worker-check --download` too, or a `--download` in `weights`.  The abort row uses the existing test `a_dropped_wav_save_leaves_no_file_and_no_stream`: its two save streams reach WebKit's `createWritable`, and one has a write in flight before its abort.  So no new test.  Rows s6 and s7 give the bytes of one song open and one save.
+
+* 2026-11-14, agent (team leader), after Step 3: Step 3a is not needed; the cause is WebKit (Surprises, s1 to s7).  The download path is checked with `e2e worker-check --download`, since `e2e weights` does not read `--download`.  The failed hash check of `e2e weights` on this Mac is not a check of Step 4.  The implementer records it under "Known local failures" in `references/local-browser-testing.md`, with the evidence.
 
 ## Outcomes and retrospective
 
