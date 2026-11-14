@@ -9,7 +9,9 @@
 //! A Safari run on macOS checks the screen lock first, and holds
 //! `caffeinate -u` while it runs.  It ends each stale `safaridriver`
 //! before each `e2e` session start, and before each `web-test` crate run
-//! (TD-96).
+//! (TD-96).  It lists Safari's folder in the user's temporary folder at
+//! its start and at its end, and prints what the run left there (TD-103).
+//! It removes nothing there.
 
 use anyhow::{Result, bail};
 use std::path::{Path, PathBuf};
@@ -207,6 +209,201 @@ pub fn end_stale_safari_sessions(ps: Option<&str>, mut run: impl FnMut(Command))
         kill.arg(pid.to_string());
         run(kill);
     }
+}
+
+/// The folder of Safari's network process in the user's temporary folder
+/// (`getconf DARWIN_USER_TEMP_DIR`).  WebKit keeps a write stream's swap
+/// file (`FileSystemWritableStream*`) and each blob folder
+/// (`BlobRegistryFiles-*`) there.
+const SAFARI_FOLDER: &str = "com.apple.WebKit.Networking+com.apple.Safari";
+
+/// The start of a swap file's name.
+const SWAP_FILE: &str = "FileSystemWritableStream";
+
+/// The start of a blob folder's name.
+const BLOB_FOLDER: &str = "BlobRegistryFiles-";
+
+/// The kind of an entry of Safari's folder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EntryKind {
+    File,
+    Folder,
+    /// A symbolic link or another kind, which the report does not count.
+    Other,
+}
+
+/// One entry of Safari's folder: its name, its kind, and its bytes.  The
+/// bytes of a folder are the bytes of the files in it, at any depth.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub name: String,
+    pub kind: EntryKind,
+    pub bytes: u64,
+}
+
+/// What a run left in Safari's folder: the new swap files and blob
+/// folders, with their bytes, and the growth of the old ones.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Left {
+    pub swap_files: u64,
+    pub swap_bytes: u64,
+    pub blob_folders: u64,
+    pub blob_bytes: u64,
+    /// The bytes that the swap files and blob folders of `before` grew by.
+    pub grown_bytes: u64,
+}
+
+/// What is new in the listing `after` against the listing `before`.  An
+/// entry that `after` does not have counts for nothing.
+pub fn left_behind(before: &[Entry], after: &[Entry]) -> Left {
+    let mut left = Left::default();
+    for entry in after {
+        let swap = entry.kind == EntryKind::File && entry.name.starts_with(SWAP_FILE);
+        let blob = entry.kind == EntryKind::Folder && entry.name.starts_with(BLOB_FOLDER);
+        if !swap && !blob {
+            continue;
+        }
+        let old = before
+            .iter()
+            .find(|old| old.name == entry.name && old.kind == entry.kind);
+        match (old, swap) {
+            (Some(old), _) => left.grown_bytes += entry.bytes.saturating_sub(old.bytes),
+            (None, true) => {
+                left.swap_files += 1;
+                left.swap_bytes += entry.bytes;
+            }
+            (None, false) => {
+                left.blob_folders += 1;
+                left.blob_bytes += entry.bytes;
+            }
+        }
+    }
+    left
+}
+
+/// `count` with its noun, in the singular for 1.
+fn counted(count: u64, noun: &str) -> String {
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {noun}{plural}")
+}
+
+/// `bytes` in megabytes (10^6 bytes), with 1 decimal.
+fn megabytes(bytes: u64) -> String {
+    format!("{:.1} MB", bytes as f64 / 1e6)
+}
+
+/// The line that a Safari run prints about what it left in `folder`.
+pub fn left_line(left: &Left, folder: &Path) -> String {
+    let grown = if left.grown_bytes > 0 {
+        format!(
+            ", and its older ones grew by {}",
+            megabytes(left.grown_bytes)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "browser data: Safari left {} ({}) and {} ({}) in {}{grown}; xtask does not remove them (TD-103)",
+        counted(left.swap_files, "swap file"),
+        megabytes(left.swap_bytes),
+        counted(left.blob_folders, "blob folder"),
+        megabytes(left.blob_bytes),
+        folder.display()
+    )
+}
+
+/// The entries of `folder`, and no others.  A folder that is not there
+/// gives none.  It follows no symbolic link.
+pub fn list_folder(folder: &Path) -> Vec<Entry> {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            // `DirEntry::metadata` does not follow a symbolic link.
+            let meta = entry.metadata().ok()?;
+            let (kind, bytes) = if meta.is_file() {
+                (EntryKind::File, meta.len())
+            } else if meta.is_dir() {
+                (EntryKind::Folder, bytes_in(&entry.path()))
+            } else {
+                (EntryKind::Other, 0)
+            };
+            Some(Entry {
+                name: entry.file_name().to_string_lossy().into_owned(),
+                kind,
+                bytes,
+            })
+        })
+        .collect()
+}
+
+/// The bytes of the files in `folder`, at any depth.  It follows no
+/// symbolic link.
+fn bytes_in(folder: &Path) -> u64 {
+    let Ok(entries) = std::fs::read_dir(folder) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            Some(if meta.is_file() {
+                meta.len()
+            } else if meta.is_dir() {
+                bytes_in(&entry.path())
+            } else {
+                0
+            })
+        })
+        .sum()
+}
+
+/// The listing of Safari's folder at the start of a Safari run on macOS.
+/// A drop lists the folder again, and prints [`left_line`].  It does not
+/// fail the run: the person's own Safari can add files in the same time.
+/// It removes nothing.
+pub struct SafariData {
+    folder: PathBuf,
+    before: Vec<Entry>,
+}
+
+impl Drop for SafariData {
+    fn drop(&mut self) {
+        let left = left_behind(&self.before, &list_folder(&self.folder));
+        println!("{}", left_line(&left, &self.folder));
+    }
+}
+
+/// Lists Safari's folder for a Safari run on macOS, and gives the
+/// [`SafariData`] that reports at its drop.  `on_macos` tells whether this
+/// is macOS, and `temp` gives the user's temporary folder.
+pub fn watch_safari_data(
+    browser: Browser,
+    on_macos: bool,
+    temp: impl FnOnce() -> Option<PathBuf>,
+) -> Option<SafariData> {
+    if browser != Browser::Safari || !on_macos {
+        return None;
+    }
+    let Some(temp) = temp() else {
+        eprintln!("browser data: no DARWIN_USER_TEMP_DIR, so no count of what Safari leaves");
+        return None;
+    };
+    let folder = temp.join(SAFARI_FOLDER);
+    Some(SafariData {
+        before: list_folder(&folder),
+        folder,
+    })
+}
+
+/// The user's temporary folder, from `getconf DARWIN_USER_TEMP_DIR`.
+pub fn darwin_user_temp_dir() -> Option<PathBuf> {
+    let text =
+        crate::stdout_on_success(Command::new("/usr/bin/getconf").arg("DARWIN_USER_TEMP_DIR"))?;
+    let text = text.trim();
+    (!text.is_empty()).then(|| PathBuf::from(text))
 }
 
 fn chromedriver(
@@ -432,5 +629,138 @@ mod tests {
             ci.join(&name)
         );
         assert!(chromedriver(None, None, "".into()).is_err());
+    }
+
+    fn entry(name: &str, kind: EntryKind, bytes: u64) -> Entry {
+        Entry {
+            name: name.to_string(),
+            kind,
+            bytes,
+        }
+    }
+
+    /// Asserts:
+    /// * a new swap file and a new blob folder count, with their bytes;
+    /// * a removed swap file counts for nothing;
+    /// * a swap file and a blob folder that grew give their growth;
+    /// * an entry of another name, a link, and a folder named as a swap
+    ///   file count for nothing.
+    #[test]
+    fn a_run_left_what_is_new_in_the_listing() {
+        let before = [
+            entry("FileSystemWritableStream.lloyd", EntryKind::File, 100),
+            entry("FileSystemWritableStream.gone", EntryKind::File, 900),
+            entry("BlobRegistryFiles-old", EntryKind::Folder, 10),
+            entry("acme", EntryKind::File, 5),
+        ];
+        let after = [
+            entry("FileSystemWritableStream.lloyd", EntryKind::File, 150),
+            entry(
+                "FileSystemWritableStream.new1",
+                EntryKind::File,
+                349_521_256,
+            ),
+            entry("FileSystemWritableStream.new2", EntryKind::File, 0),
+            entry("BlobRegistryFiles-old", EntryKind::Folder, 30),
+            entry("BlobRegistryFiles-new", EntryKind::Folder, 1_000_000),
+            entry("acme", EntryKind::File, 500),
+            entry("beachape", EntryKind::Folder, 500),
+            entry("FileSystemWritableStream.link", EntryKind::Other, 7),
+            entry("FileSystemWritableStream.folder", EntryKind::Folder, 7),
+            entry("BlobRegistryFiles-file", EntryKind::File, 7),
+        ];
+        assert_eq!(
+            left_behind(&before, &after),
+            Left {
+                swap_files: 2,
+                swap_bytes: 349_521_256,
+                blob_folders: 1,
+                blob_bytes: 1_000_000,
+                grown_bytes: 70,
+            }
+        );
+        assert_eq!(left_behind(&after, &after), Left::default());
+        assert_eq!(left_behind(&after, &[]), Left::default());
+    }
+
+    #[test]
+    fn the_line_gives_the_counts_and_the_megabytes() {
+        let folder = Path::new("/var/folders/lloyd/T/com.apple.WebKit.Networking+com.apple.Safari");
+        let left = Left {
+            swap_files: 12,
+            swap_bytes: 350_070_000,
+            blob_folders: 1,
+            blob_bytes: 20_000,
+            grown_bytes: 0,
+        };
+        assert_eq!(
+            left_line(&left, folder),
+            "browser data: Safari left 12 swap files (350.1 MB) and 1 blob folder (0.0 MB) in /var/folders/lloyd/T/com.apple.WebKit.Networking+com.apple.Safari; xtask does not remove them (TD-103)"
+        );
+        let one = Left {
+            swap_files: 1,
+            swap_bytes: 349_521_256,
+            blob_folders: 2,
+            blob_bytes: 0,
+            grown_bytes: 1_260_000,
+        };
+        assert_eq!(
+            left_line(&one, folder),
+            "browser data: Safari left 1 swap file (349.5 MB) and 2 blob folders (0.0 MB) in /var/folders/lloyd/T/com.apple.WebKit.Networking+com.apple.Safari, and its older ones grew by 1.3 MB; xtask does not remove them (TD-103)"
+        );
+        assert_eq!(
+            left_line(&Left::default(), folder),
+            "browser data: Safari left 0 swap files (0.0 MB) and 0 blob folders (0.0 MB) in /var/folders/lloyd/T/com.apple.WebKit.Networking+com.apple.Safari; xtask does not remove them (TD-103)"
+        );
+    }
+
+    /// Asserts:
+    /// * the listing gives each file with its size, and each folder with
+    ///   the bytes of the files in it, at any depth;
+    /// * a symbolic link is `Other`, and its target is not read;
+    /// * a folder that is not there gives no entry.
+    #[test]
+    fn the_listing_reads_the_named_folder_only() {
+        let d = temp_dir("safari-listing");
+        std::fs::write(d.join("FileSystemWritableStream.lloyd"), vec![0u8; 1000]).unwrap();
+        let blobs = d.join("BlobRegistryFiles-acme");
+        std::fs::create_dir_all(blobs.join("inner")).unwrap();
+        std::fs::write(blobs.join("a"), vec![0u8; 30]).unwrap();
+        std::fs::write(blobs.join("inner/b"), vec![0u8; 12]).unwrap();
+        let outside = temp_dir("safari-listing-outside");
+        std::fs::write(outside.join("big"), vec![0u8; 5000]).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, blobs.join("link")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&outside, d.join("beachape")).unwrap();
+        let mut listing = list_folder(&d);
+        listing.sort_by(|a, b| a.name.cmp(&b.name));
+        let mut wanted = vec![
+            entry("BlobRegistryFiles-acme", EntryKind::Folder, 42),
+            entry("FileSystemWritableStream.lloyd", EntryKind::File, 1000),
+        ];
+        if cfg!(unix) {
+            wanted.push(entry("beachape", EntryKind::Other, 0));
+        }
+        assert_eq!(listing, wanted);
+        assert_eq!(list_folder(&d.join("missing")), Vec::new());
+        std::fs::remove_dir_all(d).unwrap();
+        std::fs::remove_dir_all(outside).unwrap();
+    }
+
+    #[test]
+    fn only_safari_on_macos_lists_safaris_folder() {
+        let not_read = || -> Option<PathBuf> { panic!("the temporary folder was read") };
+        assert!(watch_safari_data(Browser::Chrome, true, not_read).is_none());
+        assert!(watch_safari_data(Browser::Safari, false, not_read).is_none());
+        assert!(watch_safari_data(Browser::Safari, true, || None).is_none());
+        let d = temp_dir("safari-watch");
+        let watch = watch_safari_data(Browser::Safari, true, || Some(d.clone()));
+        assert_eq!(
+            watch.as_ref().map(|watch| watch.folder.clone()),
+            Some(d.join(SAFARI_FOLDER))
+        );
+        drop(watch);
+        std::fs::remove_dir_all(d).unwrap();
     }
 }

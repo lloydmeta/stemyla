@@ -114,6 +114,9 @@ fn run(args: &[String]) -> Result<i32> {
     let on_macos = cfg!(target_os = "macos");
     crate::drivers::refuse_a_locked_screen(browser, on_macos, crate::drivers::ioreg_root)?;
     let _active = crate::drivers::keep_user_active(browser, on_macos, crate::drivers::caffeinate);
+    // Its drop reports what Safari left, after each crate run ended.
+    let _safari_data =
+        crate::drivers::watch_safari_data(browser, on_macos, crate::drivers::darwin_user_temp_dir);
     let driver = browser.driver()?;
     // One run per crate: `--test web` names targets only `app` has.
     let runs: [(&str, &[&str]); 5] = [

@@ -750,7 +750,14 @@ Apache-2.0 section 4(a) asks that each recipient of the Work in Object form gets
 
 * Fix: copy the licence texts and `THIRD-PARTY.md` into the build, in their own PR.
 
-## Legibility for agents
+### TD-103: Safari keeps browser data on disk after a run
+
+It breaks no rule.  It is a known leak of disk in Safari, which M5.1 of `plans/active/gpu-speed.md` measures and reduces.
+
+On 2026-11-14, `$TMPDIR/com.apple.WebKit.Networking+com.apple.Safari` held 35,841 `FileSystemWritableStream*` swap files and 767 `BlobRegistryFiles-*` folders, 176 GB, from test runs.  By WebKit's source, a `close()` of a `createWritable` stream keeps its swap file (`FileSystemStorageHandle::closeWritable`).  So the app's writes through `createWritable` can leak in a user's Safari too.
+
+* `xtask` does not remove these files: the person's own Safari writes in the same folder, so `xtask` cannot tell its own files.  Each Safari `e2e` and `web-test` run prints one line with the swap files and blob folders that it left (`watch_safari_data` in `xtask/src/drivers.rs`).
+* Fix: M5.1 Steps 3 to 6 find the cause by counted runs, move the worker's writes to sync access handles, and record what still leaks.
 
 ### TD-18: large files and JavaScript inside Rust strings
 

@@ -481,6 +481,12 @@ pub fn run(args: &[String]) -> Result<()> {
     let on_macos = cfg!(target_os = "macos");
     crate::drivers::refuse_a_locked_screen(o.browser, on_macos, crate::drivers::ioreg_root)?;
     let _active = crate::drivers::keep_user_active(o.browser, on_macos, crate::drivers::caffeinate);
+    // Its drop reports what Safari left, after each driver of the run ended.
+    let _safari_data = crate::drivers::watch_safari_data(
+        o.browser,
+        on_macos,
+        crate::drivers::darwin_user_temp_dir,
+    );
     if !o.dist.join("index.html").is_file() {
         bail!(
             "{} has no index.html (build the app first: cd app && trunk build --release)",
