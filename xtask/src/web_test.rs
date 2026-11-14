@@ -137,38 +137,30 @@ fn run(args: &[String]) -> Result<i32> {
     let mut results = Vec::with_capacity(runs.len());
     let mut outputs = Vec::with_capacity(runs.len());
     for (package, targets) in runs {
-        let mut cmd = Command::new(env!("CARGO"));
-        cmd.current_dir(&root);
-        cmd.args(crate_run_args(package, targets, filter.as_deref()))
-            .env(
-                "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER",
-                "wasm-bindgen-test-runner",
-            );
-        for var in DRIVER_VARS {
-            cmd.env_remove(var).env_remove(format!("{var}_REMOTE"));
-        }
-        // It would skip every browser test and report success.
-        cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
-        // The runner gives each test binary 20 s by default.  The app's
-        // lib tests run the `?streamtest` runs, the stored lanes of M6,
-        // which play in real time, and the saves of M8.  They took 197 s in
-        // CI run 40788465048, and 219 s to 231 s on the maintainer's Mac.
-        // One run there passed 300 s (review round speed 1 of M8).  600 s
-        // is about 3 times the CI time.
-        if std::env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
-            cmd.env("WASM_BINDGEN_TEST_TIMEOUT", WEB_TEST_TIMEOUT_S);
-        }
-        let var = match browser {
-            Browser::Chrome => "CHROMEDRIVER",
-            Browser::Safari => "SAFARIDRIVER",
+        let capabilities = match browser {
+            Browser::Chrome => Some(chrome_capabilities(&root, &chrome_args)?),
+            Browser::Safari => None,
         };
-        cmd.env(var, &driver);
-        if browser == Browser::Chrome {
-            cmd.env(
-                "WASM_BINDGEN_TEST_WEBDRIVER_JSON",
-                chrome_capabilities(&root, &chrome_args)?,
-            );
+        // Removed at the end of this crate run, also after an error.
+        let chrome_folder = if crate::webdriver::wants_chrome_folder(browser, on_macos) {
+            Some(crate::webdriver::ChromeFolder::create(
+                std::path::Path::new(crate::webdriver::CHROME_FOLDER_PARENT),
+            )?)
+        } else {
+            None
+        };
+        let mut cmd = CrateRun {
+            package,
+            targets,
+            filter: filter.as_deref(),
+            browser,
+            driver: &driver,
+            capabilities: capabilities.as_deref(),
+            chrome_folder: chrome_folder
+                .as_ref()
+                .map(crate::webdriver::ChromeFolder::path),
         }
+        .command(&root);
         for var in run_vars(browser, package) {
             println!(
                 "web-test: {package}: {}={}, since {}",
@@ -473,6 +465,62 @@ fn plain(text: &str) -> String {
     kept
 }
 
+/// One crate run of `web-test`.
+struct CrateRun<'a> {
+    package: &'a str,
+    targets: &'a [&'a str],
+    filter: Option<&'a str>,
+    browser: Browser,
+    /// The WebDriver executable.
+    driver: &'a std::path::Path,
+    /// The `webdriver.json` for the runner, for Chrome.
+    capabilities: Option<&'a std::path::Path>,
+    /// The run's Chrome folder, for Chrome on macOS.
+    chrome_folder: Option<&'a std::path::Path>,
+}
+
+impl CrateRun<'_> {
+    /// The `cargo test` command of this crate run, in `root`.  The runner
+    /// and its driver inherit its environment.
+    fn command(&self, root: &std::path::Path) -> Command {
+        let mut cmd = Command::new(env!("CARGO"));
+        cmd.current_dir(root);
+        cmd.args(crate_run_args(self.package, self.targets, self.filter))
+            .env(
+                "CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER",
+                "wasm-bindgen-test-runner",
+            );
+        for var in DRIVER_VARS {
+            cmd.env_remove(var).env_remove(format!("{var}_REMOTE"));
+        }
+        // It would skip every browser test and report success.
+        cmd.env_remove("WASM_BINDGEN_TEST_ONLY_NODE");
+        // The runner gives each test binary 20 s by default.  The app's
+        // lib tests run the `?streamtest` runs, the stored lanes of M6,
+        // which play in real time, and the saves of M8.  They took 197 s in
+        // CI run 40788465048, and 219 s to 231 s on the maintainer's Mac.
+        // One run there passed 300 s (review round speed 1 of M8).  600 s
+        // is about 3 times the CI time.
+        if std::env::var_os("WASM_BINDGEN_TEST_TIMEOUT").is_none() {
+            cmd.env("WASM_BINDGEN_TEST_TIMEOUT", WEB_TEST_TIMEOUT_S);
+        }
+        let var = match self.browser {
+            Browser::Chrome => "CHROMEDRIVER",
+            Browser::Safari => "SAFARIDRIVER",
+        };
+        cmd.env(var, self.driver);
+        if let Some(capabilities) = self.capabilities {
+            cmd.env("WASM_BINDGEN_TEST_WEBDRIVER_JSON", capabilities);
+        }
+        // Cargo and rustc do not read it.  chromedriver makes each
+        // session's profile in the folder (`crate::webdriver::ChromeFolder`).
+        if let Some(folder) = self.chrome_folder {
+            cmd.env(crate::webdriver::CHROME_TMP_VAR, folder);
+        }
+        cmd
+    }
+}
+
 /// The arguments of the `cargo test` of one crate run.  `--color never`
 /// keeps Cargo's `Running` lines plain for [`session_did_not_start`], also
 /// with CI's `CARGO_TERM_COLOR: always`.
@@ -601,6 +649,56 @@ name = "wasm-bindgen"
 version = "0.2.129"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 "#;
+
+    fn env_of(cmd: &Command, name: &str) -> Option<String> {
+        cmd.get_envs()
+            .find(|(key, _)| *key == name)
+            .and_then(|(_, value)| value.map(|v| v.to_string_lossy().into_owned()))
+    }
+
+    /// Asserts:
+    /// * Chrome's crate run with a Chrome folder gives it to the runner,
+    ///   and so to chromedriver, in `MAC_CHROMIUM_TMPDIR`;
+    /// * a Safari crate run gives no such variable.
+    #[test]
+    fn a_chrome_crate_run_gives_its_chrome_folder_to_the_driver() {
+        let chrome = CrateRun {
+            package: "app",
+            targets: &["--lib"],
+            filter: None,
+            browser: Browser::Chrome,
+            driver: std::path::Path::new("/Users/lloyd/chromedriver"),
+            capabilities: Some(std::path::Path::new("/Users/lloyd/web-test-chrome.json")),
+            chrome_folder: Some(std::path::Path::new("/tmp/stemyla-chrome/4242-0")),
+        };
+        let cmd = chrome.command(std::path::Path::new("/Users/lloyd/stemyla"));
+        assert_eq!(
+            env_of(&cmd, crate::webdriver::CHROME_TMP_VAR).as_deref(),
+            Some("/tmp/stemyla-chrome/4242-0")
+        );
+        assert_eq!(
+            env_of(&cmd, "CHROMEDRIVER").as_deref(),
+            Some("/Users/lloyd/chromedriver")
+        );
+        assert_eq!(
+            env_of(&cmd, "WASM_BINDGEN_TEST_WEBDRIVER_JSON").as_deref(),
+            Some("/Users/lloyd/web-test-chrome.json")
+        );
+        let safari = CrateRun {
+            browser: Browser::Safari,
+            driver: std::path::Path::new("/usr/bin/safaridriver"),
+            capabilities: None,
+            chrome_folder: None,
+            ..chrome
+        };
+        let cmd = safari.command(std::path::Path::new("/Users/lloyd/stemyla"));
+        assert_eq!(env_of(&cmd, crate::webdriver::CHROME_TMP_VAR), None);
+        assert_eq!(env_of(&cmd, "WASM_BINDGEN_TEST_WEBDRIVER_JSON"), None);
+        assert_eq!(
+            env_of(&cmd, "SAFARIDRIVER").as_deref(),
+            Some("/usr/bin/safaridriver")
+        );
+    }
 
     #[test]
     fn finds_the_exact_package_in_the_lockfile() {

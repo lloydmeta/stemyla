@@ -190,6 +190,13 @@ pub fn processes() -> Option<String> {
     crate::stdout_on_success(Command::new("/bin/ps").args(["-x", "-o", "pid=,ppid=,comm="]))
 }
 
+/// The process ID and the whole command line of each process of each user,
+/// one line each, as `ps -A -ww -o pid=,command=` lists them, or `None`
+/// when `ps` fails.
+pub fn command_lines() -> Option<String> {
+    crate::stdout_on_success(Command::new("/bin/ps").args(["-A", "-ww", "-o", "pid=,command="]))
+}
+
 /// Ends each stale `safaridriver` in `ps` (the text of [`processes`]), so
 /// a new session can pair with Safari.  It gives `run` one `kill` command
 /// for each stale driver, and ends no driver that a running program owns.
