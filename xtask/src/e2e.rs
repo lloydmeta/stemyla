@@ -131,11 +131,12 @@
 //!   side before the first run.  A comparison refuses `attn=split` and
 //!   `attn=time` in `--query` or `--head-query`, since both split the
 //!   frequency axis.  It fails a run whose `kernels:` line does not name
-//!   the `attn` that its side's query forces (`attn=auto` forces none).  `perf` refuses `--head-query` without
-//!   `--base-dist`.  It refuses `--gate`, `--update-baselines` and
-//!   `--swiftshader`.  It refuses a run on a fallback or a software adapter
-//!   (GPU-3).  It refuses a run whose chunk times have 1 decimal: the
-//!   oldest base is `59da862`, the first commit that logs them with 2.
+//!   the `attn` that its side's query forces (`attn=auto` forces none).
+//!   `perf` refuses `--head-query` without `--base-dist`.  It refuses
+//!   `--gate`, `--update-baselines` and `--swiftshader`.  It refuses a run
+//!   on a fallback or a software adapter (GPU-3).  It refuses a run whose
+//!   chunk times have 1 decimal: the oldest base is `59da862`, the first
+//!   commit that logs them with 2.
 //!
 //! Options: `--browser safari|chrome`, `--dist DIR` (default `app/dist`),
 //! `--out DIR` (logs and screenshots; default `target/e2e/<scenario>`),
@@ -3183,6 +3184,16 @@ mod tests {
         let good = stored_stems_reply();
         let (checks, hashes) = stored_stems_checks(&good, 4, None, "split").unwrap();
         assert_eq!(checks.len(), 16, "ten checks, and one for each stem");
+        let mut fused = good.clone();
+        fused["replies"][0]["text"] =
+            json!("model loaded (matmul s64; attention fused, fused attention checked OK)");
+        let (checks, _) = stored_stems_checks(&fused, 4, None, "fused").unwrap();
+        let failed: Vec<&str> = checks
+            .iter()
+            .filter(|(ok, _)| !ok)
+            .map(|(_, what)| what.as_str())
+            .collect();
+        assert!(failed.is_empty(), "attn fused: {failed:?}");
         assert_eq!(failing(&good, None), Vec::<String>::new());
         let all = hashes.join(",");
         assert_eq!(failing(&good, Some(&all)), Vec::<String>::new());

@@ -1703,16 +1703,20 @@ mod tests {
     /// Asserts that the worker and calibration use one budget: the
     /// worker's `budget` falls back to `net::BUDGET`, the worker has no
     /// budget of its own, and it gives calibration the budget of the run.
-    /// The worker stores a choice only by `choices_to_store`.
+    /// The worker stores a choice only by `choices_to_store`, which it gives
+    /// the run's budget.  The worker's source is read with its whitespace
+    /// collapsed.
     #[test]
     fn the_run_and_calibration_share_one_budget() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/src/web.rs");
-        let worker = std::fs::read_to_string(&path).expect("worker/src/web.rs");
+        let source = std::fs::read_to_string(&path).expect("worker/src/web.rs");
+        let worker = source.split_whitespace().collect::<Vec<_>>().join(" ");
         for want in [
             "s.max_elems.unwrap_or(roformer_gpu::net::BUDGET)",
             "choose_kernels(g, format, budget(s))",
             "roformer_gpu::bench::calibrate(gpu, format, budget, ",
             "roformer_gpu::bench::choices_to_store(",
+            "KEEP_PER_GPU, budget, ) else",
         ] {
             assert!(worker.contains(want), "{want} in worker/src/web.rs");
         }

@@ -2407,8 +2407,8 @@ fn softmax_label(rows: usize, len: usize) -> String {
 }
 
 /// The profile label of a fused attention: the tokens of each sequence
-/// and the number of sequences, and `vfused` for the vec4 kernel (the
-/// tiled kernel's labels stay as they were).  `profile_groups` in
+/// and the number of sequences, and ` vfused` after them for the vec4
+/// kernel; the tiled kernel adds nothing.  `profile_groups` in
 /// `xtask/src/e2e/perf.rs` reads it.
 fn attention_label(seq: usize, nseq: usize, kernel: FusedKernel) -> String {
     let variant = match kernel {
@@ -3026,6 +3026,35 @@ mod tests {
             .find(|(name, _)| name == "vfused")
             .map(|(_, src)| workgroup_bytes(&src));
         assert_eq!(vfused, Some(2 * 64 * (16 + 4) * 4));
+    }
+
+    /// Asserts, on the generated source of `vfused`, that a
+    /// `workgroupBarrier()` comes between each write of a thread's row
+    /// maxima or row sums (`buf[ty * 16u + tx] = `) and the next read of
+    /// that region (`buf[ty * 16u]` or `buf[ty * 16u + k]`).  The GPU tests
+    /// cannot see a missing barrier there: on Apple GPUs a row of 16
+    /// threads is half a SIMD group.  There are two such writes, the
+    /// maxima and the sums in `FINISH`.
+    #[test]
+    fn vfused_waits_between_its_row_writes_and_reads() {
+        let src = attention_vec4_source();
+        let write = "buf[ty * 16u + tx] = ";
+        let reads = ["buf[ty * 16u]", "buf[ty * 16u + k]"];
+        let mut writes = 0;
+        for (at, _) in src.match_indices(write) {
+            writes += 1;
+            let after = &src[at + write.len()..];
+            let next_read = reads
+                .iter()
+                .filter_map(|r| after.find(r))
+                .min()
+                .unwrap_or_else(|| panic!("no read after the write at {at}"));
+            assert!(
+                after[..next_read].contains("workgroupBarrier()"),
+                "no barrier between the write at {at} and its read"
+            );
+        }
+        assert_eq!(writes, 2);
     }
 
     /// Every template placeholder in `src`: an upper-case name in braces,
