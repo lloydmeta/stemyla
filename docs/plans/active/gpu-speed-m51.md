@@ -197,7 +197,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 
 ## Decisions for the maintainer
 
-1. The page's writes in Safari (Step 5).  Options and recommendation: from Step 3's figures.  Answer: open.
+1. The page's writes in Safari (Step 5).  Options and recommendation: from Step 3's figures.  Answer (2026-11-14, the maintainer, through the orchestrator): c), a write worker for this one purpose, which keeps the decode worker's duties clean (decision 0019).  The maintainer first said b), then changed to c).
 
 ## Progress
 
@@ -206,9 +206,9 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * [x] 2026-11-14: Step 2: `xtask` reports what a run left (`2cb5de4`).  The 4 new tests failed first on an assert (`m51/step2-fail-first.log`, `m51/step2-fail-first-b.log`).  TD-103 records the leak.
 * [x] 2026-11-14: Step 3: counted runs in Safari (Surprises).  WebKit keeps the swap file of each closed write stream; an abort removes it.  The code check found no stream of the app with no `close()` and no `abort()`, and no object URL with no `revokeObjectURL`.  So the cause is in WebKit (case 4).
 * [x] 2026-11-14: Step 3a: not needed.  Step 3 ties no leak to a path of the app.
-* [ ] Step 4: the model saves use a sync access handle.
-* [ ] Step 5: the page's writes (decision point).
-* [ ] Step 6: the record.
+* [x] 2026-11-14: Step 4: the model saves use a sync access handle.  `write_file` in `worker/src/web.rs` writes through `createSyncAccessHandle`, for `opfs_write`, `cache_put` and `download_to_opfs`; no other production `createWritable` was in `worker/` or `decoder/`.  `the_model_writes_open_no_write_stream` and the two moved MEM-5 tests failed first on an assert (`m51/step4-fail-first-*.log`).  Counted Safari runs s9 and s10 left no swap file (Surprises).  `check --tier push` passed at `6199418`, 15 lines, with both perf gates: Chrome 3.65 s against a bound of 3.95 s, Safari 5.64 s against 6.13 s (`m51/check-push-1.log`).
+* [x] 2026-11-14: Step 5: the page's writes (decision point): decided: c), a write worker on the page for the song-sized writes (Decisions for the maintainer, item 1).  The team leader adds its steps.
+* [x] 2026-11-14: Step 6: the record: the quirk entry in `references/browser-quirks.md`, the draft bug `references/webkit-bug-writable-swap-file.md` with its line in `docs/README.md`, TD-103 for the state after Step 4, and the notes and the known local failure in `references/local-browser-testing.md`.
 * [ ] Step 7: the checks before review round 1.
 
 ## Surprises and discoveries
@@ -225,7 +225,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
   | c3 `e2e smoke --play-x 5000` | failed after its session started: WebDriver "move target out of bounds" | 0 (2 to 2) | its own: none; c4's: kept, since the orphan Chrome of c4 named it |
   | c5 `web-test --browser chrome` (5 crates) | passed | 0 (2 to 2) | none; at its start it printed "chrome folder: removed /tmp/stemyla-chrome/12977-0, which an ended run left" |
 
-  * c2 failed on the stem hashes of part 1, which Step 1 does not change.  The probable cause: this Mac has only the f16 model, and M3's hashes are of the f32 model.  Not checked on the base commit.  It is also a run that fails after its session starts, after 8 minutes.
+  * c2 failed on the stem hashes of part 1, which Step 1 does not change.  The probable cause: this Mac has only the f16 model, and M3's hashes are of the f32 model.  c2 ran at `71e0e5b`, whose diff from the base `8b16df7` changes only docs and `xtask/src/{drivers,web_test,webdriver}.rs`.  So the page, the workers and `xtask/src/e2e/weights.rs` were those of the base, and the check fails at the base too.  s3 gave the same six hashes in Safari: vocals and piano equal `M3_HASHES`, and the other four differ.  It does not matter for Step 4: Step 4's acceptance uses the scenario's other checks, which compare the f16 and f32 stems bit for bit, and the read-back tests of the writes.  It is also a run that fails after its session starts, after 8 minutes.
   * After c4's signal, its `chromedriver` (12984) and Chrome (12985) stayed as orphans, and Chrome's `--user-data-dir` named the folder.  The implementer ended those two PIDs, which c4's own `ps` tied to its `xtask`.  A first try of c4 sent SIGINT to a background job of a non-interactive bash, which ignores SIGINT, so that run passed (`m51/c4a-sigint-ignored.*`); the second try used `set -m`.
   * Chrome reads `MAC_CHROMIUM_TMPDIR`: during each run, the `scoped_dir` profiles were in the run's Chrome folder (22 in c5's watch).  The real socket path was `/tmp/stemyla-chrome/32776-0/com.google.Chrome.GkbIUr/SingletonSocket`, 57 bytes.  The bundle folder has no leading dot.  The longest form in the test (`/tmp/stemyla-chrome/4294967295-4294967295` with Chrome for Testing's folder) gives 95 bytes, under 104.
   * Chrome also made `com.google.Chrome.chrome_chrome_Unpacker_BeginUnzipping.*` and `com.google.Chrome.chrome_chrome_url_fetcher_.*` folders there.  The removal of the run's folder removes them too.
@@ -242,10 +242,25 @@ Each step is one or more signed commits.  A session that stops reads Progress an
   | s6 `e2e smoke` (one song open: 5 dropped 30 s stems) | 8 | 52,920,667 | 1, empty | the 5 source files, 10,584,068 each; 3 small files (125, 13, 189) |
   | s7 `web-test` `a_wav_save_of_a_stored_song_offers_its_save_file` (one save) | 4 | 21,168,176 (4 of 5,292,044) | 1, empty | the 3 planted stems and the WAV save file |
 
-  * The swap files: each `close()` of a `createWritable` stream keeps one swap file of the bytes written, and an `abort()` keeps none.  s1 to s7 show it for the page (`st_write`, `st_open` and `st_close`), the stem worker (`opfs_write`, `download_to_opfs`, `cache_put`) and the test helpers.  This is what WebKit's source says (Context).  Safari did not remove them in 5 minutes, and the 176 GB of 2026-11-14 shows that they stay longer.  Not checked: whether a quit of Safari removes them.  The implementer did not quit Safari (the orchestrator's rule).
+  * The swap files: each `close()` of a `createWritable` stream keeps one swap file of the bytes written, and an `abort()` keeps none.  s1 to s7 show it for the page (`st_write`, `st_open` and `st_close`), the stem worker (`opfs_write`, `download_to_opfs`, `cache_put`) and the test helpers.  This is what WebKit's source says (Context).  Safari did not remove them in 5 minutes, and the 176 GB of 2026-11-14 shows that they stay longer.  A quit of Safari does not remove them: the orchestrator saw the 35,841 files stay after Safari quit and its network process ended (Decision log).  The implementer did not quit Safari.
   * The bytes for each use of the app in Safari: one model save, 349.5 MB (s3, s4); one song open, the bytes of the dropped files (52.9 MB for 5 stems of 30 s, s6); one save, the bytes of the save file (5.3 MB for a 30 s WAV, s7).  A separation also writes the mix (about 85 MB for 4 minutes) and the stems; no run here measured them.
   * The blob folders: each WebDriver session made one new `BlobRegistryFiles-*` folder at its start, and Safari's launch made 3 (s1).  Each stayed empty, also after s7's object URL of a save file.  So a blob folder comes from a new network session, not from a blob or an object URL of the app.  It holds no bytes, but it stays: the 767 folders of 2026-11-14 are about 767 sessions.  In these runs, only a session start or the launch of Safari made one.
   * The code check: each `createWritable` of the production code ends with `close()` or `abort()` on each path (`st_write`, `write_file` in `worker/src/web.rs`, `write_mix_now`, `save_open` to `save_close` and `save_abort` with `StoredWav`'s drop, and `app/src/streamtest.rs`).  The test helpers `plant`, `plant_at`, `store_plant_tone` and `store_plant_wav` close, but do not abort on a failed write.  `save_blob` revokes its URL after 60 s, `app/src/streamtest.rs` revokes its worker URL, and each test that calls `blob_url` calls `revoke`.
+
+* 2026-11-14, Step 4, the counted runs after the change (logs in `m51/`).  The page was rebuilt with the change (`app/dist`).
+
+  | Run | Result | New swap files | New blob folders |
+  | - | - | - | - |
+  | s8 `web-test --browser safari` (5 crates, before the model runs) | passed | 1,311, 1,691.2 MB | 8, empty |
+  | s9 `e2e weights --weights <f16>` (`opfs_write`) | the known hash check failed; each other check passed | 0 (s3 and s3b: 3, with the 349,521,256-byte model) | 1, empty |
+  | s10 `e2e worker-check --download --weights <f16>` (`download_to_opfs`) | passed | 0 (s4: 2, with the model) | 1, empty |
+  | c6 `e2e worker-check --download` in Chrome | passed | none in Safari's folder | none |
+  | c7 `e2e weights` in Chrome | the known hash check failed; each other check passed | none in Safari's folder | none |
+
+  * The Safari perf gate of `check --tier push` (`e2e perf`, with the model) left 7 swap files, 10.6 MB, and 1 blob folder: the page's writes of its song, not the model.
+  * s8 is the leak of a whole Safari `web-test`: the page's writes in its tests and the test helpers, which Step 4 does not change (TD-103).
+  * `$TMPDIR` held 0 `org.chromium.Chromium.scoped_dir.*` from s9 on.  The two orphan Chromes' folders went; this milestone's runs did not remove them.
+* 2026-11-14, Step 6: the Step 2 commit (`2cb5de4`) had dropped the heading "## Legibility for agents" of `docs/tech-debt.md`, so TD-18, TD-19 and TD-20 were under "Known breaches".  `docs-check` did not see it.  Step 6 puts the heading back.
 
 ## Decision log
 
@@ -257,6 +272,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * 2026-11-14, agent (implementer), Step 3: `e2e weights` has no download path: it reads no `--download` (s3b shows it).  The download path of the model runs in `e2e worker-check --download`, so s4 uses it.  Step 4's acceptance names `e2e weights --download`; it needs `worker-check --download` too, or a `--download` in `weights`.  The abort row uses the existing test `a_dropped_wav_save_leaves_no_file_and_no_stream`: its two save streams reach WebKit's `createWritable`, and one has a write in flight before its abort.  So no new test.  Rows s6 and s7 give the bytes of one song open and one save.
 
 * 2026-11-14, agent (team leader), after Step 3: Step 3a is not needed; the cause is WebKit (Surprises, s1 to s7).  The download path is checked with `e2e worker-check --download`, since `e2e weights` does not read `--download`.  The failed hash check of `e2e weights` on this Mac is not a check of Step 4.  The implementer records it under "Known local failures" in `references/local-browser-testing.md`, with the evidence.
+* 2026-11-14, orchestrator: a quit of Safari does not remove the swap files.  The orchestrator saw it at about 13:30 on 2026-11-14: Safari quit, its network process ended, and the 35,841 swap files (176 GB) were still there.  No agent quits Safari or deletes a swap file, a blob folder or another file; the deletes go to the orchestrator.
 
 ## Outcomes and retrospective
 

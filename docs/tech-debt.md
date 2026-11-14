@@ -750,14 +750,26 @@ Apache-2.0 section 4(a) asks that each recipient of the Work in Object form gets
 
 * Fix: copy the licence texts and `THIRD-PARTY.md` into the build, in their own PR.
 
-### TD-103: Safari keeps browser data on disk after a run
+### TD-103: Safari keeps a swap file of each write stream that closes
 
-It breaks no rule.  It is a known leak of disk in Safari, which M5.1 of `plans/active/gpu-speed.md` measures and reduces.
+It breaks no rule.  It is a known leak of disk in Safari, by a defect of WebKit (`references/browser-quirks.md`; the draft bug is `references/webkit-bug-writable-swap-file.md`).  M5.1 of `plans/active/gpu-speed.md` measured it and stopped its largest part.
 
-On 2026-11-14, `$TMPDIR/com.apple.WebKit.Networking+com.apple.Safari` held 35,841 `FileSystemWritableStream*` swap files and 767 `BlobRegistryFiles-*` folders, 176 GB, from test runs.  A `close()` of a `createWritable` stream keeps its swap file, of the bytes written; an `abort()` removes it (`FileSystemStorageHandle::closeWritable` in WebKit, and the counted runs of M5.1 Step 3).  So the app's writes through `createWritable` leak in a user's Safari too: 349.5 MB for each model save, the bytes of the dropped files for each song open, and the bytes of the save file for each save.  Each WebDriver session also leaves one empty `BlobRegistryFiles-*` folder.
+On 2026-11-14, `$TMPDIR/com.apple.WebKit.Networking+com.apple.Safari` held 35,841 `FileSystemWritableStream*` swap files and 767 `BlobRegistryFiles-*` folders, 176 GB, from test runs.  A `close()` of a `createWritable` stream keeps its swap file, of the bytes written; an `abort()` removes it (`FileSystemStorageHandle::closeWritable` in WebKit, and the counted runs of M5.1 Step 3).  Safari did not remove the files in 5 minutes while it ran.  After a quit of Safari, with its network process ended, the 35,841 files were still there (the orchestrator, 2026-11-14).
 
-* `xtask` does not remove these files: the person's own Safari writes in the same folder, so `xtask` cannot tell its own files.  Each Safari `e2e` and `web-test` run prints one line with the swap files and blob folders that it left (`watch_safari_data` in `xtask/src/drivers.rs`).
-* Fix: M5.1 Steps 3 to 6 find the cause by counted runs, move the worker's writes to sync access handles, and record what still leaks.
+What still leaks after M5.1 Step 4, in a user's Safari:
+
+* The page's writes, which still use `createWritable` after Step 4: for each song open, the bytes of the dropped files (52.9 MB for 5 stems of 30 s); for each save, the bytes of the save file (5.3 MB for a WAV of 30 s); for each separation, the mix file (about 85 MB for 4 minutes) and `meta`.  The page runs on the main thread, which has no sync access handle.  The maintainer chose a write worker on the page for the song-sized files (M5.1, Step 5).  Later steps of M5.1 move them; the small writes stay on `createWritable`.
+* Not the model: since Step 4, the stem worker writes the model (349.5 MB each save before) and `matmul_kernels` through a sync access handle, which makes no swap file.
+
+What leaks in test runs only:
+
+* The test helpers that plant files through `createWritable` (`plant` and `plant_at` in `worker/src/web/tests.rs` and `decoder/src/web/tests.rs`, `store_plant_tone` and `store_plant_wav` in `app/src/store.rs`, the scripts of `xtask/src/e2e.rs`, `xtask/src/e2e/` and `xtask/e2e/worker.js`), and the page's writes in the tests.  A whole Safari `web-test` on 2026-11-14 left 1,311 swap files, 1,691 MB.
+* One empty `BlobRegistryFiles-*` folder for each WebDriver session.  It holds no bytes.
+
+* `xtask` does not remove these files: the person's own Safari writes in the same folder, so `xtask` cannot tell its own files.  Each Safari `e2e` and `web-test` run prints one line with the swap files and blob folders that it left (`watch_safari_data` in `xtask/src/drivers.rs`).  A person removes them by hand (`references/local-browser-testing.md`).
+* Fix: WebKit removes the swap file at `close()`.  Until then, the later steps of M5.1 move the page's song-sized writes (the source files, the mix, the stems of the memory path and the save files) to a write worker with sync access handles.
+
+## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
 
