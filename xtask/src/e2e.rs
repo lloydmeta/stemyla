@@ -2546,6 +2546,7 @@ fn perf_compare(o: &Opts, base_dist: &Path) -> Result<()> {
     perf::run_comparison(
         browser,
         o.runs,
+        [sites.query(perf::Side::Base), sites.query(perf::Side::Head)],
         |side, _n, name| {
             let (p, result) = perf_run(o, sites.of(side), sites.query(side), name)
                 .map_err(|e| format!("run {name}: {e:#}"))?;
@@ -2636,6 +2637,21 @@ fn stored_stems_attn(query: Option<&str>) -> String {
         .find_map(|pair| pair.strip_prefix("attn="))
         .unwrap_or("split")
         .to_string()
+}
+
+/// Why the worker of `stored-stems` did not take the attention policy
+/// `attn`, from the text of its reply to the model message (which names
+/// its policy as `; attention <policy>,`), or `None`.
+fn stored_stems_attention_problem(model_reply: &str, attn: &str) -> Option<String> {
+    let ran = model_reply
+        .split_once("; attention ")
+        .and_then(|(_, rest)| rest.split([',', ')']).next());
+    (ran != Some(attn)).then(|| {
+        format!(
+            "the worker runs attention {}, not the asked {attn}",
+            ran.unwrap_or("(none named)")
+        )
+    })
 }
 
 /// The session folder that `stored-stems` plants for the storage path.
@@ -2748,8 +2764,10 @@ fn stored_stems_checks(
 /// `chunk: 16384, overlap: 2`, so that it sends several segments: first on the
 /// memory path, from two arrays, then on the storage path into a planted
 /// session folder, from the clip planted there as its mix file (`mix.f32`,
-/// interleaved).  The kernels are fixed (`mm: s64, attn: split`), so the two
-/// runs do the same arithmetic.  Each stem file must equal
+/// interleaved).  Both runs use `mm: s64`, and `attn` is `split` unless
+/// `--query` sets it (`stored_stems_attn`), so the two runs do the same
+/// arithmetic.  The worker must run the asked `attn`
+/// (`stored_stems_attention_problem`).  Each stem file must equal
 /// `engine::wav::encode_pcm16` of the memory path's stem, byte for byte.  The
 /// storage path must send no `segment` reply, and its last `stored` reply must
 /// cover the song.  It prints the SHA-256 of each memory-path stem as a 16-bit
@@ -2818,7 +2836,13 @@ fn stored_stems(o: &Opts) -> Result<()> {
     )?;
     p.note(&format!("replies: {:?}", texts(&r["replies"])));
     p.note(&format!("stored-stems: attention {attn}"));
-    let (checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref())?;
+    let (mut checks, hashes) = stored_stems_checks(&r, frames, o.hashes.as_deref())?;
+    let reply = r["replies"][0]["text"].as_str().unwrap_or_default();
+    let problem = stored_stems_attention_problem(reply, &attn);
+    checks.push((
+        problem.is_none(),
+        problem.unwrap_or_else(|| format!("the worker runs attention {attn}")),
+    ));
     for (name, hash) in roformer::STEMS.iter().zip(&hashes) {
         p.note(&format!("stored-stems: memory path: {name} sha256 {hash}"));
     }
@@ -3710,6 +3734,46 @@ mod tests {
         assert_eq!(stored_stems_attn(Some("attn=fused")), "fused");
         assert_eq!(stored_stems_attn(Some("mm=s64&attn=freq")), "freq");
         assert_eq!(stored_stems_attn(Some("?attn=fused")), "fused");
+    }
+
+    /// Asserts that `stored_stems_attention_problem` passes a model reply
+    /// that names the asked policy (`fused`, `vfused`), and fails one that
+    /// names another (`split` when `fused` was asked) or none, with a
+    /// reason that names both.
+    #[test]
+    fn stored_stems_checks_the_workers_policy() {
+        let reply = |attn: &str| {
+            format!(
+                "model loaded in 0.4 s (apple metal-3, fallback adapter no; own WGSL kernels; matmul s64, checked OK: i64 s64; attention {attn}, fused attention checked OK, vfused checked OK)"
+            )
+        };
+        assert_eq!(
+            stored_stems_attention_problem(&reply("fused"), "fused"),
+            None
+        );
+        assert_eq!(
+            stored_stems_attention_problem(&reply("vfused"), "vfused"),
+            None
+        );
+        let problem = stored_stems_attention_problem(&reply("split"), "fused").unwrap_or_default();
+        assert!(
+            problem.contains("fused") && problem.contains("split"),
+            "{problem:?}"
+        );
+        assert!(stored_stems_attention_problem("model loaded", "split").is_some());
+    }
+
+    /// Asserts that the page script of `stored-stems` takes `attn` from its
+    /// arguments, not a fixed `attn: 'split'` (the defect of `a058eb6`).
+    #[test]
+    fn the_stored_stems_script_takes_its_attn() {
+        let source = include_str!("e2e.rs");
+        let fixed = ["attn: 'split'", ", chunk: 16384"].concat();
+        assert!(!source.contains(&fixed), "a fixed attn in the script");
+        let taken = ["{ mm: 's64', attn", ", chunk: 16384"].concat();
+        assert!(source.contains(&taken), "the script takes attn");
+        let args = ["const [model, session, names, attn]", " = args;"].concat();
+        assert!(source.contains(&args), "the script reads attn");
     }
 
     /// Asserts that `selftest_query`:

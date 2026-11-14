@@ -16,8 +16,11 @@
 //           a vec4 of the dimensions tx + 16j.  Each key takes 1 P and 1 V
 //           vec4 read for 16 multiply-adds.
 //
-// Each write to workgroup memory is a whole vec4 from one thread: on
-// Metal, threads that write different components of one vec4 race.  Each
+// Each write to workgroup memory is a whole vec4 from one thread.  WGSL
+// lets a write to one component of a vector access the whole vector
+// (https://www.w3.org/TR/WGSL/#component-reference-from-vector-memory-view),
+// so threads that write different components of one vec4 race.  They did
+// on Metal.  Each
 // score sums its dimensions in order, each output its keys in order, and
 // each row sum its threads in order, one operation at a time.
 //

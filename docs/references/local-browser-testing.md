@@ -58,10 +58,11 @@ The rule for a new matmul kernel (M4 of `plans/active/gpu-speed.md`, Step 7).  M
 The check of the goal "Each calibration choice is not slower", for one page and one browser (M5 of `plans/active/gpu-speed.md`).  M6 uses it too.
 
 * A policy is a time-axis attention policy, by the name in the `kernels:` line: `fused`, `freq` or `vfused`.  The check never forces `split` or `time`, which split the frequency axis.
-* The ratio at the flip point of a calibration is the faster fused kernel's time over its split time, from its `kernels for this GPU` line.  For the two fused kernels, it is `vfused`'s time over `fused`'s, and the flip point is 1.
+* The ratio at the flip point of a calibration is the faster fused kernel's time over its split time, from its `kernels for this GPU` line.  The flip point is `FUSED_MARGIN`.
+* For the two fused kernels, the ratio is `vfused`'s time over `fused`'s, and the flip point is 1.
 * A policy is choosable when 12 or more calibrations of the page in that browser show either of these:
   * calibration chose it at least once;
-  * the mean ratio at the flip point, plus or minus 2 standard deviations, crosses `FUSED_MARGIN`.
+  * the mean ratio at the flip point, plus or minus 2 standard deviations, crosses the flip point.
 * The pins: the matmul policy that the page's calibration chooses most often in that browser, from the `kernels:` lines of its runs.  Check a second matmul policy only with a reason in the plan's Decision log.
 * For each unordered pair `{p, q}` of policies where `p` is choosable, run one comparison with the page on both sides: `e2e perf --base-dist <page> --dist <page> --query "mm=<pins>&attn=<q>" --head-query "attn=<p>" --runs 4`.  One comparison gives both signs: a loss of the head is a gain of the base.
 * The check fails when a choosable policy is slower than another policy: a loss when it is the head, a gain when it is the base.  Else it passes.

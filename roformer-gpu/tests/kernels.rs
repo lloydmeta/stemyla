@@ -6,7 +6,9 @@
 //! instead under `STEMYLA_REQUIRE=gpu` (or `timestamps`, for the profile
 //! tests, or `f16`, for the f16 weight tests).
 
-use roformer_gpu::{Act, FusedKernel, Gpu, MatMul, TILES, View, WeightFormat, bit_differences};
+use roformer_gpu::{
+    Act, AttentionPolicy, FusedKernel, Gpu, MatMul, TILES, View, WeightFormat, bit_differences,
+};
 use test_support::{Need, skip};
 
 #[track_caller]
@@ -1531,6 +1533,63 @@ fn attention_matches_split_path() {
     let got = read(&g, &fused, tokens * 512);
     assert!(g.take_errors().is_empty());
     assert_close(&got, &want, 2e-5, "fused attention against the split path");
+}
+
+/// `vfused`'s WGSL with `from` replaced by `to`, which must be in it.
+fn planted_vfused(from: &str, to: &str) -> String {
+    let src = roformer_gpu::fused_source(FusedKernel::Vec4);
+    assert!(src.contains(from), "{from:?} not in vfused");
+    src.replace(from, to)
+}
+
+/// Asserts that the start-up check rejects a `vfused` with a planted
+/// fault, and keeps the tiled kernel:
+/// * no rescale of the output at a new row maximum: wrong only from the
+///   second key tile on, so the check's case must be longer than 64;
+/// * a wrong gate in the second sequence only (`wg.z` 1): the check must
+///   compare the outputs of each sequence.
+///
+/// Each time, `vfused_ok` is false, `fused_ok` true, and the reason names
+/// `vfused`.
+#[test]
+fn the_start_up_check_rejects_a_broken_vfused() {
+    for (what, from, to) in [
+        ("no rescale", "o0_0 = o0_0 * sc0;", ""),
+        (
+            "the second sequence",
+            "let f = g / lt.x;",
+            "let f = select(g, 2.0 * g, wg.z == 1u) / lt.x;",
+        ),
+    ] {
+        let Some(g) = gpu() else { return };
+        g.plant_attention_source(FusedKernel::Vec4, &planted_vfused(from, to));
+        let problem = pollster::block_on(g.check_attention()).unwrap_or_default();
+        assert!(problem.contains("vfused"), "{what}: {problem:?}");
+        assert!(!g.vfused_ok.get(), "{what}");
+        assert!(g.fused_ok.get(), "{what}");
+    }
+}
+
+/// Asserts that a policy whose kernels pass the start-up check stays
+/// after it: `fused`, `freq` and `vfused`.  A policy that a failed
+/// kernel cannot run goes back to split.
+#[test]
+fn the_start_up_check_keeps_a_usable_policy() {
+    for policy in [
+        AttentionPolicy::Fused,
+        AttentionPolicy::Freq,
+        AttentionPolicy::VFused,
+    ] {
+        let Some(g) = gpu() else { return };
+        g.attention.set(policy);
+        assert_eq!(pollster::block_on(g.check_attention()), None);
+        assert_eq!(g.attention.get(), policy);
+    }
+    let Some(g) = gpu() else { return };
+    g.plant_attention_source(FusedKernel::Vec4, &planted_vfused("o0_0 = o0_0 * sc0;", ""));
+    g.attention.set(AttentionPolicy::VFused);
+    pollster::block_on(g.check_attention());
+    assert_eq!(g.attention.get(), AttentionPolicy::Split);
 }
 
 #[test]

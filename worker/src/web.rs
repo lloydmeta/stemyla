@@ -2022,10 +2022,11 @@ enum Chosen {
 
 /// Sets this GPU's matmul kernels and attention path for weights in
 /// `format`: the choice kept in browser storage for this adapter, these
-/// kernels and this format, or else several seconds of
-/// `roformer_gpu::bench::calibrate` at the run's `budget`, whose result is
-/// then kept (see `roformer_gpu::bench::store_choice` for which lines
-/// stay).
+/// kernels and this format, or else about half a minute of
+/// `roformer_gpu::bench::calibrate` at the run's `budget` (about 33 s on
+/// the M2 Pro).  The result is kept only at the default budget
+/// (`roformer_gpu::bench::keep_choice`), since the stored key names no
+/// budget; see `roformer_gpu::bench::store_choice` for which lines stay.
 async fn choose_kernels(gpu: &Gpu, format: WeightFormat, budget: usize) -> Chosen {
     let pref = STATE.with_borrow(|s| s.power);
     // The key's separators (tab, newline, `|`) must not occur in the name,
@@ -2062,7 +2063,7 @@ async fn choose_kernels(gpu: &Gpu, format: WeightFormat, budget: usize) -> Chose
         }
     }
     log(&format!(
-        "choosing kernels for this GPU and {} weights (several seconds, once)…",
+        "choosing kernels for this GPU and {} weights (about half a minute, once)…",
         format.name()
     ));
     let c = roformer_gpu::bench::calibrate(gpu, format, budget, now_s, |l| log(&l)).await;
@@ -2075,6 +2076,10 @@ async fn choose_kernels(gpu: &Gpu, format: WeightFormat, budget: usize) -> Chose
         log(&format!(
             "kernel calibration hit a WebGPU error ({e}); this choice is not kept"
         ));
+        return Chosen::Calibrated;
+    }
+    if !roformer_gpu::bench::keep_choice(budget) {
+        log("this choice is not kept: it was timed at the budget of ?max_elems=, not the default");
         return Chosen::Calibrated;
     }
     let text = roformer_gpu::bench::store_choice(&text, &adapter, &key, &c.name(), KEEP_PER_GPU);

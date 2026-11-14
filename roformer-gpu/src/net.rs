@@ -1003,7 +1003,7 @@ fn split_attention<'s>(r: &mut Rec<'s>, s: &StepBufs<'s>, seq: usize, nb: usize,
 /// [`Step::Time`], through the same function, on buffers of its own.  It
 /// holds no [`Net`] and no [`Job`]: `?bench` has no model, and a job holds
 /// the hidden states of a whole chunk.
-pub(crate) struct TimeStep {
+pub struct TimeStep {
     block: Block,
     x: GpuBuffer,
     xn: GpuBuffer,
@@ -1023,13 +1023,7 @@ impl TimeStep {
     /// 113 MB: q/k/v of 4 bands (28 MB), the scores of 1 band (42 MB), the
     /// hidden layer (19 MB), `o` (9.4 MB), `x` and `xn` (4.7 MB each), and
     /// one layer's weights.
-    pub(crate) fn new(
-        gpu: &Gpu,
-        frames: usize,
-        budget: usize,
-        format: WeightFormat,
-        split: bool,
-    ) -> Self {
+    pub fn new(gpu: &Gpu, frames: usize, budget: usize, format: WeightFormat, split: bool) -> Self {
         let most = |fused: bool| time_steps(frames, budget, fused).into_iter().max();
         let bands = most(true).max(most(false)).unwrap_or(1);
         let tokens = bands * frames;
@@ -1068,7 +1062,7 @@ impl TimeStep {
     /// Records one time-transformer step of `bands` bands, with the fused
     /// kernel `fused` or split attention, as [`Job::run`] records
     /// [`Step::Time`].
-    pub(crate) fn record<'s>(&'s self, r: &mut Rec<'s>, bands: usize, fused: Option<FusedKernel>) {
+    pub fn record<'s>(&'s self, r: &mut Rec<'s>, bands: usize, fused: Option<FusedKernel>) {
         let bufs = StepBufs {
             xn: &self.xn,
             qkv: &self.qkv,

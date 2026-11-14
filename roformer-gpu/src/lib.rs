@@ -745,6 +745,14 @@ fn attention_source() -> String {
         .replace("{FINISH}", finish.trim_end())
 }
 
+/// The WGSL of the fused attention kernel `kernel`.
+pub fn fused_source(kernel: FusedKernel) -> String {
+    match kernel {
+        FusedKernel::Tiled => attention_source(),
+        FusedKernel::Vec4 => attention_vec4_source(),
+    }
+}
+
 /// The WGSL of `vfused`, fused attention with vec4 reads of workgroup
 /// memory: per-thread code with constant indices, generated into
 /// `attention_vec4.wgsl`.  Each score and each output keeps the sum order
@@ -1116,6 +1124,9 @@ struct Kernels {
     /// use; bound like the element-wise kernels (read, read, read-write,
     /// uniform).
     attention: [std::cell::OnceCell<wgpu::ComputePipeline>; 2],
+    /// For tests: the WGSL to compile each fused kernel from, in place of
+    /// its own ([`Gpu::plant_attention_source`]).
+    planted: [std::cell::RefCell<Option<String>>; 2],
     /// For tests: compile the f16 variants from WGSL that does not parse
     /// ([`Gpu::break_f16_variants`]).
     broken_f16: std::cell::Cell<bool>,
@@ -1222,6 +1233,7 @@ impl Kernels {
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
             attention: [std::cell::OnceCell::new(), std::cell::OnceCell::new()],
+            planted: Default::default(),
             broken_f16: std::cell::Cell::new(false),
             defective_f16: std::cell::Cell::new(None),
         }
@@ -1232,14 +1244,17 @@ impl Kernels {
         device: &wgpu::Device,
         kernel: FusedKernel,
     ) -> &wgpu::ComputePipeline {
-        let (cell, label, source): (_, _, fn() -> String) = match kernel {
-            FusedKernel::Tiled => (&self.attention[0], "attention", attention_source),
-            FusedKernel::Vec4 => (&self.attention[1], "vfused", attention_vec4_source),
+        let (i, label) = match kernel {
+            FusedKernel::Tiled => (0, "attention"),
+            FusedKernel::Vec4 => (1, "vfused"),
         };
-        cell.get_or_init(|| {
+        self.attention[i].get_or_init(|| {
+            let source = self.planted[i]
+                .take()
+                .unwrap_or_else(|| fused_source(kernel));
             pipeline(
                 device,
-                &shader(device, label, &source()),
+                &shader(device, label, &source),
                 "main",
                 &self.elementwise,
             )
@@ -1309,6 +1324,18 @@ impl Gpu {
     #[doc(hidden)]
     pub async fn new_without_f16_unpack(power: wgpu::PowerPreference) -> Result<Self, String> {
         Self::open(power, false, true).await
+    }
+
+    /// For tests: compile `kernel` from `wgsl` when it is first used, so a
+    /// test can plant a fault for [`Gpu::check_attention`] to find.  Call
+    /// it before the kernel's first dispatch.
+    #[doc(hidden)]
+    pub fn plant_attention_source(&self, kernel: FusedKernel, wgsl: &str) {
+        let i = match kernel {
+            FusedKernel::Tiled => 0,
+            FusedKernel::Vec4 => 1,
+        };
+        self.kernels.planted[i].replace(Some(wgsl.to_string()));
     }
 
     /// For tests: the f16 variants compiled from now on get a planted WGSL
@@ -1990,7 +2017,8 @@ impl Gpu {
     }
 
     /// Runs each fused attention kernel on a small ragged case (two
-    /// sequences of 37 tokens, with gates) and compares it with
+    /// sequences of 133 tokens, with gates: three key tiles, the last one
+    /// short) and compares it with
     /// [`attention_cpu`].  Sets [`Gpu::fused_ok`] for the tiled kernel and
     /// [`Gpu::vfused_ok`] for `vfused`, and sets the attention policy to
     /// split if it is no longer usable.  Returns why a kernel failed, if
@@ -2021,7 +2049,7 @@ impl Gpu {
     /// Why `kernel` fails the check of [`Gpu::check_attention`], or `None`
     /// when it passes.
     async fn check_fused(&self, kernel: FusedKernel) -> Option<String> {
-        let (seq, nseq) = (37, 2);
+        let (seq, nseq) = (133, 2);
         let tokens = seq * nseq;
         let mut st = 0x9e37_79b9u32;
         let mut rand = |n: usize| -> Vec<f32> {
@@ -3273,7 +3301,7 @@ mod tests {
         ("v64-f16", 0xbb95_7752_6ab4_50c6),
         ("v64k8-f16", 0xc324_6da6_933d_ea43),
         ("attention", 0xa091_9877_a004_c08c),
-        ("vfused", 0xed9b_5bcb_7b74_65a1),
+        ("vfused", 0x672c_1875_5e66_f53f),
         ("softmax.wgsl", 0x88a8_02c9_98a6_ac21),
         ("rmsnorm.wgsl", 0x051c_929e_5b3b_f568),
         ("elementwise.wgsl", 0x2df7_4f02_9bc1_b129),

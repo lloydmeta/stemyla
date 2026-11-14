@@ -1,7 +1,8 @@
-//! How stable the time-axis attention choice is on a freshly opened GPU
-//! (ignored by default:
-//! `cargo test -p roformer-gpu --release --test calibration -- --ignored --nocapture`).
-//! It times the time axis as calibration does since version 5
+//! How calibration times the time axis.  A test with a fake clock pins
+//! what `time_axis_per_chunk` adds up.  The test of how stable the choice
+//! is on a freshly opened GPU is ignored by default:
+//! `cargo test -p roformer-gpu --release --test calibration -- --ignored --nocapture`.
+//! Both time the time axis as calibration does since version 5
 //! (`time_axis_per_chunk`): whole time-transformer steps at the default
 //! budget, with a wait after each.  `attention_per_chunk` times the
 //! attention dispatches alone, as `?bench` does.
@@ -10,7 +11,55 @@ use roformer_gpu::bench::{
     ATTENTION_ROUND, ATTENTION_ROUNDS, ATTENTION_WARM, TimeSecs, decide, time_axis_per_chunk,
 };
 use roformer_gpu::{Gpu, WeightFormat};
+use std::cell::Cell;
 use std::time::Instant;
+use test_support::{Need, skip};
+
+/// Asserts, with a clock that moves 0.01 s at each read, no warm-up, no
+/// round length and 2 rounds, that `time_axis_per_chunk` gives each policy
+/// 2 rounds of:
+/// * split: 0.02 s for each step x 744 steps = 14.88 s;
+/// * each fused kernel: 0.02 s x (180 + 12) steps = 3.84 s.
+///
+/// 0.02 s is one submission for each wait: a read before it and a read
+/// after it.  `Covering`, which queues more submissions for each wait,
+/// gives less for each step.
+#[test]
+fn the_time_axis_adds_up_one_wait_for_each_step() {
+    let g = match pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)) {
+        Ok(g) => g,
+        Err(e) => return skip(Need::Gpu, &e),
+    };
+    pollster::block_on(g.check_kernels()).unwrap();
+    pollster::block_on(g.check_attention());
+    assert!(g.fused_ok.get() && g.vfused_ok.get());
+    let clock = Cell::new(0.0);
+    let now = || {
+        clock.set(clock.get() + 0.01);
+        clock.get()
+    };
+    let t = pollster::block_on(time_axis_per_chunk(
+        &g,
+        WeightFormat::F32,
+        roformer_gpu::net::BUDGET,
+        0.0,
+        0.0,
+        2,
+        &now,
+    ));
+    for (name, timing, want) in [
+        ("split", &t.split, 14.88),
+        ("fused", &t.fused, 3.84),
+        ("vfused", &t.vfused, 3.84),
+    ] {
+        assert_eq!(timing.rounds.len(), 2, "{name}");
+        for r in &timing.rounds {
+            assert!((r - want).abs() < 1e-9, "{name}: {r}, want {want}");
+        }
+    }
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
 
 #[test]
 #[ignore]

@@ -896,10 +896,13 @@ pub(super) struct Comparison {
 /// `runs / 2` blocks of [`BLOCK_ORDER`], then one more block at a time
 /// until [`decided`] gives a verdict, up to the larger of `runs / 2` and
 /// [`MAX_BLOCKS`].  It fails on a failed run, and on a run whose chunk
-/// times have fewer than 2 decimals.
+/// times have fewer than 2 decimals.  It also fails on a run that did
+/// not run the attention policy that its side's query forces
+/// (`queries`, base then head; [`forced_attn_problem`]).
 pub(super) fn run_comparison(
     browser: &str,
     runs: usize,
+    queries: [&str; 2],
     mut run: impl FnMut(Side, usize, &str) -> Result<PerfResult, String>,
     mut say: impl FnMut(String),
 ) -> Result<Comparison, String> {
@@ -926,6 +929,9 @@ pub(super) fn run_comparison(
                 ));
             }
             if let Some(reason) = adapter_refusal(&result) {
+                return Err(format!("run {name}: {reason}"));
+            }
+            if let Some(reason) = forced_attn_problem(queries[s], &result.kernels) {
                 return Err(format!("run {name}: {reason}"));
             }
             say(format!(
@@ -1054,6 +1060,24 @@ pub(super) fn compare_refusal(
         ));
     }
     None
+}
+
+/// Why a run whose `kernels:` line is `kernels` did not run the attention
+/// policy that `query` forces with `attn=`, or `None`.  A query with no
+/// `attn`, or with `attn=auto`, forces none.
+pub(super) fn forced_attn_problem(query: &str, kernels: &str) -> Option<String> {
+    let attn = query
+        .trim_start_matches('?')
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("attn="))
+        .filter(|attn| *attn != "auto")?;
+    let ran = kernels.rsplit_once("attention ").map(|(_, ran)| ran.trim());
+    (ran != Some(attn)).then(|| {
+        format!(
+            "its query forces attn={attn}, and its kernels: line gives attention {}",
+            ran.unwrap_or("none")
+        )
+    })
 }
 
 /// The page query of `side` in a same-session comparison, with no `?` at
@@ -1991,6 +2015,7 @@ mod tests {
         let result = run_comparison(
             "chrome",
             runs,
+            ["", ""],
             |side, n, name| {
                 names.push(name.to_string());
                 Ok(make(side, n))
@@ -2424,6 +2449,62 @@ mod tests {
         assert_eq!(compare_refusal(8, false, false, false), None);
     }
 
+    /// Asserts that `forced_attn_problem`:
+    /// * passes a run whose `kernels:` line names the policy that the
+    ///   query forces (`attn=freq` and `attention freq`, also with other
+    ///   keys and a `?`);
+    /// * fails a run that names another policy (`attn=freq` and
+    ///   `attention fused`; `attn=fused` and `attention vfused`), with a
+    ///   reason that names both;
+    /// * passes any run when the query forces none (no query, `mm=v64`,
+    ///   `attn=auto`).
+    #[test]
+    fn a_run_must_run_the_policy_that_its_query_forces() {
+        let freq = "matmul v64,v64, attention freq";
+        assert_eq!(forced_attn_problem("attn=freq", freq), None);
+        assert_eq!(
+            forced_attn_problem("?mm=v64,v64&attn=freq&profile=1", freq),
+            None
+        );
+        for (query, kernels) in [
+            ("attn=freq", "matmul v64,v64, attention fused"),
+            ("mm=v64,v64&attn=fused", "matmul v64,v64, attention vfused"),
+        ] {
+            let problem = forced_attn_problem(query, kernels).unwrap_or_default();
+            let (asked, ran) = (
+                query.rsplit('=').next().unwrap_or_default(),
+                kernels.rsplit(' ').next().unwrap_or_default(),
+            );
+            assert!(problem.contains(&format!("attn={asked}")), "{problem}");
+            assert!(problem.contains(&format!("attention {ran}")), "{problem}");
+        }
+        for query in ["", "mm=v64", "attn=auto"] {
+            assert_eq!(forced_attn_problem(query, freq), None, "{query}");
+        }
+    }
+
+    /// Asserts that a comparison fails on a head run that did not run the
+    /// policy of the head's query: the base query forces `fused`, the head
+    /// query `freq`, and the head runs `fused`.  The error names the run.
+    #[test]
+    fn a_comparison_fails_a_run_of_the_wrong_policy() {
+        let result = run_comparison(
+            "chrome",
+            4,
+            ["attn=fused", "attn=freq"],
+            |_, _, _| {
+                Ok(compare_result(
+                    5.0,
+                    "matmul v64,v64, attention fused",
+                    "157.0",
+                ))
+            },
+            |_| {},
+        );
+        let error = result.as_ref().err().cloned().unwrap_or_default();
+        assert!(error.contains("perf-chrome-head-1"), "{result:?}");
+    }
+
     /// Asserts that `side_query`:
     /// * gives the base `--query`, and the head `--query` with the value of
     ///   `--head-query` (`mm=v64k8,v64k8&attn=fused` and `attn=freq`);
@@ -2476,8 +2557,8 @@ mod tests {
     ///   names both;
     /// * in a comparison, refuses `attn=split` and `attn=time` in `--query`
     ///   and in `--head-query`, with a reason that names the policy;
-    /// * passes `attn=fused`, `attn=freq` and a policy name that it does
-    ///   not know (`attn=vfused`), with and without `--base-dist`;
+    /// * passes `attn=fused`, `attn=freq` and `attn=vfused`, which the
+    ///   denylist does not name, with and without `--base-dist`;
     /// * passes `attn=split` with no comparison, as a single run.
     #[test]
     fn the_queries_of_a_comparison_never_split_the_frequency_axis() {

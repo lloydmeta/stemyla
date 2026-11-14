@@ -17,8 +17,8 @@ use std::sync::Mutex;
 
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{DEPTH, DIM, DIM_HEAD, FEATURES, HEADS, HIDDEN, STEMS, band_groups};
-use roformer_gpu::net::{Job, Net, Step, normalise_bands};
-use roformer_gpu::{Gpu, WeightFormat, weight_format};
+use roformer_gpu::net::{Job, Net, Step, TimeStep, normalise_bands};
+use roformer_gpu::{AttentionPolicy, Gpu, MatMulPolicy, WeightFormat, weight_format};
 use test_support::{Need, skip};
 
 /// Held by the tests that upload a whole model, so at most one ~700 MB
@@ -644,6 +644,98 @@ fn calibration_frees_its_buffers() {
             |_| {},
         ));
         assert_eq!(g.live_bytes(), start, "{format:?}");
+    }
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+}
+
+/// The profile labels of one time-transformer step of 28 bands of 9
+/// frames with `i64`, and each label's count, for `policy`: the norms,
+/// q/k/v, rope, the gates, the attention, the output product and the
+/// feed-forward products.
+fn labels_of(policy: AttentionPolicy) -> Vec<(String, usize)> {
+    let mut labels = vec![
+        ("matmul 252x1024x256 x1 i64", 1),
+        ("matmul 252x1536x256 x1 i64", 1),
+        ("matmul 252x256x1024 x1 i64", 1),
+        ("matmul 252x256x512 x1 i64", 1),
+        ("matmul 252x8x256 x1 i64", 1),
+        ("rmsnorm", 2),
+        ("rope", 1),
+    ];
+    if policy.time().is_some() {
+        labels.push(("attention seq 9 x28", 1));
+    } else {
+        labels.extend([
+            ("gate", 1),
+            ("matmul 9x64x9 x224 i64", 1),
+            ("matmul 9x9x64 x224 i64", 1),
+            ("softmax 2016x9", 1),
+        ]);
+    }
+    labels.sort_unstable();
+    labels
+        .into_iter()
+        .map(|(l, n)| (l.to_string(), n))
+        .collect()
+}
+
+/// Asserts, on a profiling device, that calibration's step (`TimeStep`)
+/// records the dispatches that `Job::run` records for `Step::Time`, for
+/// split attention, the tiled fused kernel and `vfused`: the same labels
+/// (kernel and shape), each as many times, and the labels of
+/// `labels_of`.  A step that records nothing, or another shape, fails.
+/// The net has zero weights of the model's shapes; 9 frames and a budget
+/// of 400,000 give steps of 28 bands.
+#[test]
+fn calibration_records_the_step_of_the_separation() {
+    let _model = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+    let g = match pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance)) {
+        Ok(g) => g,
+        Err(e) => return skip(Need::Gpu, &e),
+    };
+    if !g.profiling() {
+        return skip(Need::Timestamps, "adapter without timestamp-query");
+    }
+    pollster::block_on(g.check_kernels()).unwrap();
+    pollster::block_on(g.check_attention());
+    g.policy.set(MatMulPolicy::Fixed(0));
+    let (frames, budget) = (9, 400_000);
+    let store = Store::from_source(Zeros::new(&tensors())).unwrap();
+    let net = Net::load_store(&g, store, budget, WeightFormat::F32).unwrap();
+    let profile = |g: &Gpu| {
+        pollster::block_on(g.done());
+        pollster::block_on(g.collect_profile()).unwrap();
+        g.take_profile()
+            .into_iter()
+            .map(|(label, (count, _))| (label, count))
+            .collect::<Vec<_>>()
+    };
+    for policy in [
+        AttentionPolicy::Split,
+        AttentionPolicy::Fused,
+        AttentionPolicy::VFused,
+    ] {
+        g.attention.set(policy);
+        let job = Job::new(&g, &net, frames);
+        let steps = job.layer_steps(0);
+        let Some(&Step::Time { n, .. }) = steps.first() else {
+            panic!("no time step: {steps:?}");
+        };
+        profile(&g);
+        job.run(&Step::Time {
+            layer: 0,
+            first: 0,
+            n,
+        });
+        let want = profile(&g);
+        let step = TimeStep::new(&g, frames, budget, WeightFormat::F32, true);
+        let mut r = g.rec();
+        step.record(&mut r, n, policy.time());
+        r.submit();
+        let got = profile(&g);
+        assert_eq!(want, labels_of(policy), "{policy:?}");
+        assert_eq!(got, want, "{policy:?}");
     }
     let errors = g.take_errors();
     assert!(errors.is_empty(), "{errors:?}");

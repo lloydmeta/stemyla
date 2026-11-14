@@ -671,11 +671,11 @@ pub struct AttentionTimes {
 /// Seconds per chunk of the attention dispatches alone, split and fused,
 /// on each axis, the way a chunk runs them at the default budget: on the
 /// time axis split takes one band of 1,151 frames per step (744 steps),
-/// and each fused kernel four (186 steps; it needs no scores buffer); on
-/// the frequency axis both take 88 frames of 62 bands per step (168
-/// steps).  `vfused` runs on the time axis only.  They take turns over
-/// `rounds` rounds; medians.  Without `freq` the frequency axis is not
-/// timed: calibration uses fused attention there whenever it works.
+/// and each fused kernel four (186 band-equivalents; 192 steps, with the
+/// last of each layer of 2 bands; it needs no scores buffer); on the
+/// frequency axis both take 88 frames of 62 bands per step (168 steps).
+/// `vfused` runs on the time axis only.  They take turns over `rounds`
+/// rounds; medians.  Without `freq` the frequency axis is not timed.
 /// `?bench` logs these figures ([`measure_attention`]); calibration times
 /// whole steps instead ([`time_axis_per_chunk`]).
 pub async fn attention_per_chunk(
@@ -699,46 +699,47 @@ pub async fn attention_per_chunk(
     for rd in 0..rounds.max(1) {
         let w = if rd == 0 { warm } else { 0.0 };
         let wait = Waits::Covering;
-        t.time_split.rounds.push(
-            time_rec(gpu, w, round, wait, now, &|r| split_attention(r, &b, T, 1)).await * 744.0,
-        );
+        t.time_split.rounds.push(per_chunk_total(&[(
+            time_rec(gpu, w, round, wait, now, &|r| split_attention(r, &b, T, 1)).await,
+            744,
+        )]));
         if freq {
-            t.freq_split.rounds.push(
+            t.freq_split.rounds.push(per_chunk_total(&[(
                 time_rec(gpu, w, round, wait, now, &|r| {
                     split_attention(r, &b, 62, 88)
                 })
-                .await
-                    * 168.0,
-            );
+                .await,
+                168,
+            )]));
         }
         if gpu.fused_ok.get() {
             let k = FusedKernel::Tiled;
-            t.time_fused.rounds.push(
+            t.time_fused.rounds.push(per_chunk_total(&[(
                 time_rec(gpu, w, round, wait, now, &|r| {
                     fused_attention(r, &b, k, T, 4)
                 })
-                .await
-                    * 186.0,
-            );
+                .await,
+                186,
+            )]));
             if freq {
-                t.freq_fused.rounds.push(
+                t.freq_fused.rounds.push(per_chunk_total(&[(
                     time_rec(gpu, w, round, wait, now, &|r| {
                         fused_attention(r, &b, k, 62, 88)
                     })
-                    .await
-                        * 168.0,
-                );
+                    .await,
+                    168,
+                )]));
             }
         }
         if gpu.vfused_ok.get() {
             let k = FusedKernel::Vec4;
-            t.time_vfused.rounds.push(
+            t.time_vfused.rounds.push(per_chunk_total(&[(
                 time_rec(gpu, w, round, wait, now, &|r| {
                     fused_attention(r, &b, k, T, 4)
                 })
-                .await
-                    * 186.0,
-            );
+                .await,
+                186,
+            )]));
         }
     }
     gpu.set_recording(recording);
@@ -794,6 +795,71 @@ pub async fn measure_attention(
     ));
 }
 
+/// One timing of [`time_axis_per_chunk`]: a step of `bands` bands of one
+/// policy, which a chunk runs `per_chunk` times.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StepTiming {
+    /// The policy: 0 split, 1 the tiled fused kernel, 2 `vfused`, as the
+    /// fields of [`TimeAxis`].
+    pub policy: usize,
+    pub kernel: Option<FusedKernel>,
+    pub bands: usize,
+    pub per_chunk: usize,
+    /// Seconds of warm-up before the timed round.
+    pub warm: f64,
+    pub waits: Waits,
+}
+
+/// The timings of round `rd` of [`time_axis_per_chunk`], in order.  For
+/// each policy that this GPU can run (split; the tiled kernel with
+/// `fused_ok`; `vfused` with `fused_ok` and `vfused_ok`), each step size of
+/// [`time_steps`] once, counted for each step of that size in each of the
+/// [`DEPTH`] layers.  Round 0 warms up for `warm` seconds first, and later
+/// rounds do not.  Each waits for the GPU after each step
+/// ([`STEP_WAITS`]).
+pub fn time_axis_round(
+    rd: usize,
+    budget: usize,
+    fused_ok: bool,
+    vfused_ok: bool,
+    warm: f64,
+) -> Vec<StepTiming> {
+    let policies = [
+        (None, true),
+        (Some(FusedKernel::Tiled), fused_ok),
+        (Some(FusedKernel::Vec4), fused_ok && vfused_ok),
+    ];
+    let warm = if rd == 0 { warm } else { 0.0 };
+    let mut out = Vec::new();
+    for (policy, (kernel, usable)) in policies.into_iter().enumerate() {
+        if !usable {
+            continue;
+        }
+        let mut sizes: Vec<(usize, usize)> = Vec::new();
+        for bands in time_steps(T, budget, kernel.is_some()) {
+            match sizes.iter_mut().find(|(b, _)| *b == bands) {
+                Some((_, count)) => *count += 1,
+                None => sizes.push((bands, 1)),
+            }
+        }
+        out.extend(sizes.into_iter().map(|(bands, count)| StepTiming {
+            policy,
+            kernel,
+            bands,
+            per_chunk: count * DEPTH,
+            warm,
+            waits: STEP_WAITS,
+        }));
+    }
+    out
+}
+
+/// Seconds for each chunk from `timed`: (seconds for each call, calls
+/// for each chunk).
+pub fn per_chunk_total(timed: &[(f64, usize)]) -> f64 {
+    timed.iter().map(|&(secs, calls)| secs * calls as f64).sum()
+}
+
 /// What [`time_axis_per_chunk`] timed, in seconds per chunk for each
 /// round: the time axis with each policy.  A kernel that failed its check
 /// has no rounds.
@@ -827,37 +893,21 @@ pub async fn time_axis_per_chunk(
 ) -> TimeAxis {
     let recording = gpu.set_recording(false);
     let step = TimeStep::new(gpu, T, budget, format, true);
-    let sizes = |fused: bool| {
-        let mut sizes: Vec<(usize, usize)> = Vec::new();
-        for bands in time_steps(T, budget, fused) {
-            match sizes.iter_mut().find(|(b, _)| *b == bands) {
-                Some((_, count)) => *count += 1,
-                None => sizes.push((bands, 1)),
-            }
-        }
-        sizes
-    };
-    let kernels = [
-        (None, true),
-        (Some(FusedKernel::Tiled), gpu.fused_ok.get()),
-        (Some(FusedKernel::Vec4), gpu.vfused_ok.get()),
-    ];
+    let (fused_ok, vfused_ok) = (gpu.fused_ok.get(), gpu.vfused_ok.get());
     let mut timings: [Timing; 3] = Default::default();
     for rd in 0..rounds.max(1) {
-        let w = if rd == 0 { warm } else { 0.0 };
-        for (timing, (kernel, ok)) in timings.iter_mut().zip(kernels) {
-            if !ok {
-                continue;
+        let mut timed: [Vec<(f64, usize)>; 3] = Default::default();
+        for s in time_axis_round(rd, budget, fused_ok, vfused_ok, warm) {
+            let secs = time_rec(gpu, s.warm, round, s.waits, now, &|r| {
+                step.record(r, s.bands, s.kernel)
+            })
+            .await;
+            timed[s.policy].push((secs, s.per_chunk));
+        }
+        for (timing, t) in timings.iter_mut().zip(&timed) {
+            if !t.is_empty() {
+                timing.rounds.push(per_chunk_total(t));
             }
-            let mut total = 0.0;
-            for (bands, count) in sizes(kernel.is_some()) {
-                let secs = time_rec(gpu, w, round, STEP_WAITS, now, &|r| {
-                    step.record(r, bands, kernel)
-                })
-                .await;
-                total += secs * (count * DEPTH) as f64;
-            }
-            timing.rounds.push(total);
         }
     }
     gpu.set_recording(recording);
@@ -955,6 +1005,14 @@ pub fn choice_key(adapter: &str, kernels_id: u64, format: WeightFormat) -> Strin
     )
 }
 
+/// Whether a worker keeps a choice that it calibrated at `budget`: only at
+/// the default budget ([`crate::net::BUDGET`]).  [`choice_key`] has no
+/// budget, so a choice timed under `?max_elems=` is used for that run
+/// only, and a later run at the default budget calibrates again.
+pub fn keep_choice(budget: usize) -> bool {
+    budget == crate::net::BUDGET
+}
+
 /// The line a worker logs for the kernel choice it uses, and where it came
 /// from (`stored`, `calibrated` or `from the URL`), for weights in
 /// `format`: `kernels: matmul v64,i64, attention fused (stored; f16
@@ -985,7 +1043,9 @@ pub const ATTENTION_ROUND: f64 = 0.3;
 /// With 3 rounds, Chrome on the M2 Pro gave a ratio (fused over split) of
 /// 1.020 with a standard deviation of 0.020, so at [`FUSED_MARGIN`] 1.0 it
 /// chose the slower policy now and then.  12 rounds, about 4 times the
-/// timing, add about 8 s to each calibration (M5).
+/// timing, added about 9.5 to 10.3 s to each calibration.  With `vfused`
+/// timed too, calibration takes about 33 s on the M2 Pro (32.4 to 32.9 s),
+/// against about 15 s before M5 (13.9 to 15.0 s).
 pub const ATTENTION_ROUNDS: usize = 12;
 
 /// Fused attention stays on the time axis unless split attention measured
@@ -1105,8 +1165,9 @@ fn time_policy(time: TimeSecs, fused_ok: bool, vfused_ok: bool) -> AttentionPoli
 /// the matmul kernel for large products (q/k/v and feed-forward shapes)
 /// and for small ones (attention gates, the p.v product of split
 /// attention), then the fastest time-axis policy with that matmul choice:
-/// split, the tiled fused kernel or `vfused`.  Everything measured takes turns
-/// over three rounds, medians compared; a matmul kernel more than 1.5
+/// split, the tiled fused kernel or `vfused`.  The matmul products take
+/// turns over three rounds, and the time axis over [`ATTENTION_ROUNDS`],
+/// medians compared; a matmul kernel more than 1.5
 /// times slower than the best after the first round is not timed again
 /// ([`still_in`]).  What is measured is only what varies between GPUs and
 /// cannot be read from WebGPU: whether the 8 x 4 or the 4 x 4 register
@@ -1129,11 +1190,12 @@ fn time_policy(time: TimeSecs, fused_ok: bool, vfused_ok: bool) -> AttentionPoli
 /// matmul products.
 ///
 /// It frees the matmul buffers (about 109 MB with f16 weights) before it
-/// times the time axis.  Then it holds about 113 MB ([`TimeStep`] at the
-/// default chunk and budget).  Before version 5 the peak was about 196 MB.
-/// Both are less than a job's buffers at the default chunk (about 310 MB),
-/// which calibration frees before the separation makes them.  Takes several
-/// seconds.
+/// times the time axis.  The time axis's buffers ([`TimeStep`] at the
+/// default chunk and budget) come to about 113 MB, by the sum of their
+/// sizes; no test measures this peak.  Before version 5 the sum was about
+/// 196 MB.  Both are less than a job's buffers at the default chunk (about
+/// 310 MB), which calibration frees before the separation makes them.  It
+/// takes about 33 s on the M2 Pro.
 pub async fn calibrate(
     gpu: &Gpu,
     format: WeightFormat,
@@ -1464,6 +1526,68 @@ mod tests {
         assert_eq!(Choice::parse("i64,i64;vfused"), Some(c));
     }
 
+    /// Asserts that `time_axis_round`, at a full chunk and `BUDGET`, with
+    /// both fused kernels usable:
+    /// * round 0 times split's step of 1 band (744 a chunk), then the
+    ///   tiled kernel's steps of 4 bands (180) and 2 bands (12), then
+    ///   `vfused`'s, each with a warm-up of `warm` and a wait after each
+    ///   step;
+    /// * round 1 times the same with no warm-up;
+    /// * each policy's steps cover the 62 bands of each of the 12 layers;
+    /// * without `vfused_ok`, `vfused` is not timed; without `fused_ok`,
+    ///   only split is, also with `vfused_ok`.
+    #[test]
+    fn the_time_axis_is_timed_as_the_separation_runs_it() {
+        let step = |policy, kernel, bands, per_chunk, warm| StepTiming {
+            policy,
+            kernel,
+            bands,
+            per_chunk,
+            warm,
+            waits: Waits::EachStep,
+        };
+        let (tiled, vec4) = (Some(FusedKernel::Tiled), Some(FusedKernel::Vec4));
+        let all = |warm| {
+            vec![
+                step(0, None, 1, 744, warm),
+                step(1, tiled, 4, 180, warm),
+                step(1, tiled, 2, 12, warm),
+                step(2, vec4, 4, 180, warm),
+                step(2, vec4, 2, 12, warm),
+            ]
+        };
+        let budget = crate::net::BUDGET;
+        assert_eq!(time_axis_round(0, budget, true, true, 0.5), all(0.5));
+        assert_eq!(time_axis_round(1, budget, true, true, 0.5), all(0.0));
+        for policy in 0..3 {
+            let bands: usize = time_axis_round(0, budget, true, true, 0.5)
+                .iter()
+                .filter(|s| s.policy == policy)
+                .map(|s| s.bands * s.per_chunk)
+                .sum();
+            assert_eq!(bands, 62 * DEPTH, "policy {policy}");
+        }
+        assert_eq!(
+            &time_axis_round(0, budget, true, false, 0.5)[..],
+            &all(0.5)[..3]
+        );
+        assert_eq!(
+            &time_axis_round(0, budget, false, true, 0.5)[..],
+            &all(0.5)[..1]
+        );
+    }
+
+    /// Asserts that `per_chunk_total` sums each call's seconds times its
+    /// calls for each chunk: 0.004 s x 744 = 2.976 s; 0.02 s x 180 +
+    /// 0.01 s x 12 = 3.72 s; nothing gives 0.
+    #[test]
+    fn a_chunk_total_sums_each_call_times_its_count() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(per_chunk_total(&[(0.004, 744)]), 2.976));
+        assert!(close(per_chunk_total(&[(0.02, 180), (0.01, 12)]), 3.72));
+        assert_eq!(per_chunk_total(&[]), 0.0);
+    }
+
     /// Asserts that calibration times the time axis with a wait after each
     /// step, as the separation does: `STEP_WAITS` is `EachStep`, which
     /// queues 1 submission for each wait however short a step is.
@@ -1502,9 +1626,22 @@ mod tests {
         );
     }
 
+    /// Asserts that a choice is kept only when it was calibrated at the
+    /// default budget: `BUDGET` is kept; half of it, twice it and 1 are
+    /// not.
+    #[test]
+    fn a_choice_is_kept_only_at_the_default_budget() {
+        let budget = crate::net::BUDGET;
+        assert!(keep_choice(budget));
+        for other in [budget / 2, 2 * budget, 1] {
+            assert!(!keep_choice(other), "{other}");
+        }
+    }
+
     /// Asserts that the worker and calibration use one budget: the
     /// worker's `budget` falls back to `net::BUDGET`, the worker has no
     /// budget of its own, and it gives calibration the budget of the run.
+    /// The worker stores a choice only by `keep_choice`.
     #[test]
     fn the_run_and_calibration_share_one_budget() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/src/web.rs");
@@ -1513,6 +1650,7 @@ mod tests {
             "s.max_elems.unwrap_or(roformer_gpu::net::BUDGET)",
             "choose_kernels(g, format, budget(s))",
             "roformer_gpu::bench::calibrate(gpu, format, budget, ",
+            "!roformer_gpu::bench::keep_choice(budget)",
         ] {
             assert!(worker.contains(want), "{want} in worker/src/web.rs");
         }
