@@ -15,7 +15,8 @@ This file is the map.  Claude Code loads it into every session.  It gives what i
 * `roformer-gpu/`: the network on WebGPU (WGSL kernels in `src/shaders/`, driver in `src/lib.rs` and `src/net.rs`).
 * `worker/`: the Web Worker that runs separations (package `stem-worker`).
 * `decoder/`: the page-side Web Worker that decodes a song in blocks into browser storage, and makes stem overviews and classic drums (package `decode-worker`, decision 0019).
-* `protocol/`: the messages between the page and its two workers (package `stem-protocol`).
+* `writer/`: the page-side Web Worker that writes the page's song-sized files into browser storage through sync access handles (package `write-worker`, TD-103).
+* `protocol/`: the messages between the page and its three workers (package `stem-protocol`).
 * `test-support/`: `skip`, which fails a test that cannot run when `STEMYLA_REQUIRE` asks for evidence; a dev-dependency only.
 * `xtask/`: the static server, the browser test runners (`web-test`, `e2e`), `docs-check`, `publish` and other tools.
 
@@ -43,7 +44,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p synth --all-targets -- -D warnings  # synth without its files feature
 cargo clippy -p app -- -D warnings              # app's lib and binary without any files feature
 cargo clippy -p app --all-targets -- -D warnings  # app's tests without the workspace's merged features
-cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p write-worker -p stem-protocol -p engine --all-targets -- -D warnings  # the web code, which compiles only for wasm32
 cargo test --workspace --exclude roformer-gpu   # what CI runs; most roformer-gpu tests need a GPU
 cargo test -p engine                            # engine alone: a workspace build merges the features of other members, such as app's engine/cpal, into it
 cargo test -p roformer-gpu --lib                # CI runs it too; it needs no GPU

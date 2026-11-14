@@ -1,6 +1,6 @@
 # How Stemyla works
 
-Stemyla is a Rust workspace compiled to WebAssembly.  The page has three parts.  The app runs on the page's main thread (drawing, playback, storage).  A Web Worker runs the separation model on the GPU through WebGPU.  A second Web Worker, the decode worker, decodes a stored song into session files (decision 0019).  It also makes the overviews of the stems and classic drums.  Nothing is sent to a server; the only network use is downloading the page and, once, the model.  Terms such as STFT, mask or workgroup are explained under [Vocabulary](#vocabulary).
+Stemyla is a Rust workspace compiled to WebAssembly.  The page has four parts.  The app runs on the page's main thread (drawing, playback, storage).  A Web Worker runs the separation model on the GPU through WebGPU.  A second Web Worker, the decode worker, decodes a stored song into session files (decision 0019).  It also makes the overviews of the stems and classic drums.  A third Web Worker, the write worker, writes the page's song-sized files through sync access handles, since Safari keeps a swap file of each write stream that closes (TD-103).  Nothing is sent to a server; the only network use is downloading the page and, once, the model.  Terms such as STFT, mask or workgroup are explained under [Vocabulary](#vocabulary).
 
 ```mermaid
 flowchart LR
@@ -10,6 +10,10 @@ flowchart LR
     STORE["store<br/>songs and stems in OPFS"]
     SEP["separator<br/>talks to the worker"]
     DEC["decoder<br/>talks to the decode worker"]
+    WRC["writer<br/>talks to the write worker"]
+  end
+  subgraph writer["Web Worker (writer crate)"]
+    WW["write queue<br/>whole files and blocks"]
   end
   subgraph decoder["Web Worker (decoder crate)"]
     DW["decode loop<br/>decode, resample, overviews,<br/>stem overviews, classic drums"]
@@ -23,8 +27,11 @@ flowchart LR
   UI --> STORE
   UI --> SEP
   UI --> DEC
+  STORE --> WRC
   SEP <-->|postMessage| W
   DEC <-->|postMessage| DW
+  WRC <-->|postMessage| WW
+  WW -->|song-sized files| OPFS
   DW -->|session files, overviews| OPFS
   W --> RF
   W --> GPU
@@ -47,13 +54,14 @@ flowchart LR
   * `classic`: classic drums of lane files as a 16-bit WAV, with a block HPSS, and its overview.  It ends with `classic-made` or `decode-unstored`.
 
   It reads each lane file in blocks of at most 1 MiB.  The page sends `classic` when every input lane of a song has a session file.  So classic drums of a stored song does not stop the page, and its lane is a stored lane.  For a song in memory, the page runs the block HPSS itself, within the memory path's limit for the lanes that it holds.  The page starts the worker at the first open (`app::decoder`).  The page does not read the session files back.  It shows stored lanes from their overviews (M7).
-* `stem-protocol` (`protocol/`): the messages between the page and its workers, one encoder and one decoder per message, shared by both sides.
+* `write-worker` (`writer/`): the page-side Web Worker that writes files (M5.1 of `plans/active/gpu-speed.md`).  It takes the requests of `stem_protocol::write`: a whole file from a `Blob` or a typed array, and a block of a file at an offset.  It writes each through a sync access handle, which it opens, writes, flushes and closes for each request, one request at a time, in the order sent.  It answers each with `write-done`, and gives a block's array back.  The page starts it at the first write (`app::writer`).  The app's browser tests use a page-side fake of it, behind the `fake-writer` feature of `app`, since the test runner serves no worker build.
+* `stem-protocol` (`protocol/`): the messages between the page and its three workers, one encoder and one decoder per message, shared by both sides.
 * `test-support`: `skip`, which a test calls when it has no GPU adapter, no adapter feature, no fixture or no AAC encoder.  It prints a skip line, or panics when `STEMYLA_REQUIRE` lists that need (VERIFY-1).  A wasm test logs `skip_line` on the console, and reads the `STEMYLA_REQUIRE` of its build.  A native test reads only the value of its run.  It is only a dev-dependency.
 * `xtask`: tools run with Cargo.  They are the static file server, the browser test runners (`web-test`, `e2e`), the docs check (`docs-check`) and the local checks by tier (`check`).  They also include the dev tool installs (`setup`), the review round tools (`review`), the clean-up of run output (`clean`) and publishing.  The others are model conversion, CPU separation, self-test reference files, the demo song generator and benchmarks.
 
 ### Layers
 
-Each workspace crate depends only on the workspace crates that its row lists, and on `test-support` as a dev-dependency (LAYER-1 in `docs/invariants.md`).  Each listed crate is in a lower layer.  The page side (`app` and `decode-worker`) and the worker side (`stem-worker`) meet only through `stem-protocol`.  The workspace crates that `stem-worker` reaches through normal dependencies, for any target, have only `stem-protocol` in common with those that `app` or `decode-worker` reaches.
+Each workspace crate depends only on the workspace crates that its row lists, and on `test-support` as a dev-dependency (LAYER-1 in `docs/invariants.md`).  Each listed crate is in a lower layer.  The page side (`app`, `decode-worker` and `write-worker`) and the worker side (`stem-worker`) meet only through `stem-protocol`.  The workspace crates that `stem-worker` reaches through normal dependencies, for any target, have only `stem-protocol` in common with those that `app`, `decode-worker` or `write-worker` reaches.
 
 | Layer | Crate | Depends on |
 | - | - | - |
@@ -67,6 +75,7 @@ Each workspace crate depends only on the workspace crates that its row lists, an
 | Engine and GPU | `roformer-gpu` | `roformer` |
 | Shells | `app` | `dsp`, `engine`, `m4a`, `stem-protocol`, `synth` |
 | Shells | `decode-worker` | `dsp`, `engine`, `m4a`, `stem-protocol` |
+| Shells | `write-worker` | `stem-protocol` |
 | Shells | `stem-worker` | `m4a`, `roformer`, `roformer-gpu`, `stem-protocol` |
 | Tools | `xtask` | `dsp`, `engine`, `m4a`, `roformer`, `synth` |
 
@@ -74,7 +83,7 @@ The rows run from the lowest layer to the highest.  Each row lists every workspa
 
 Any crate but `dsp` (DSP-1) may take `test-support` as a dev-dependency.  No crate may take it as a normal or build dependency: it is a dev-dependency only, so it never ships.  It takes no workspace crate.
 
-`app` takes `synth` as a normal dependency without its `files` feature, so `synth` brings no other crate into the web app (`app`, `decode-worker` and `stem-worker`; LAYER-1).
+`app` takes `synth` as a normal dependency without its `files` feature, so `synth` brings no other crate into the web app (`app`, `decode-worker`, `write-worker` and `stem-worker`; LAYER-1).
 
 ## From a song to six stems
 
@@ -295,7 +304,7 @@ The Storage menu lists the stored songs, opens or forgets one, shows the space u
 * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release`: every GPU kernel against CPU loops, each f16 variant against its f32 kernel bit for bit, and each layer and mask of the network against PyTorch.  `f16` needs an adapter with `SHADER_F16_IN_F32` (Metal has it); without it, use `STEMYLA_REQUIRE=gpu`.  The PyTorch part needs `STEMYLA_REQUIRE=gpu,fixtures`, and its end-to-end check also needs `ROFORMER_GPU_FULL=1`.  Without a GPU, point Vulkan at SwiftShader (see the README).
 * `cargo test -p engine`: the tests of `engine` with the features of its own manifest.  A workspace build gives `engine` the features of other members: the default feature `audio` of `app` turns on the `cpal` feature of `engine`.  `engine`'s own Symphonia features hold those of the tests of `m4a`.  CI and `check --tier push` run it.
 * `cargo test -p roformer-gpu --lib` and `--doc`: the GPU crate's tests that need no GPU (workgroup memory, kernel choice, the compile-fail check of `Rec`).  CI runs them.
-* `cargo run -p xtask -- web-test`: browser tests (wasm-bindgen-test, in Safari or Chrome) of the song sessions in browser storage (`app/tests/web.rs`, and `app/src/store.rs` for its private write path), of the Web Audio output freeing each song it replaces (`app/tests/web_output.rs`) and of closing the page (`app/tests/web_close.rs`), of the page's open and restore through the decode worker (`app/src/decode_tests.rs`), of the saves through browser storage (`app/src/save_tests.rs`), of the worker's model storage and messages, and of a GPU read-back copied into WebAssembly memory once (`worker/src/web/tests.rs`, in a dedicated worker; in tests the worker keeps what it would post), of the decode worker on OPFS (`decoder/src/web/tests.rs`), of every page <-> worker message surviving a structured clone with its transfers (`protocol/tests/web.rs`), and of the resampler with a 32-bit `usize` (`engine/src/resample.rs`).  A crate run whose test binary has no wasm test fails, unless a filter is given.
+* `cargo run -p xtask -- web-test`: browser tests (wasm-bindgen-test, in Safari or Chrome) of the song sessions in browser storage (`app/tests/web.rs`, and `app/src/store.rs` for its private write path), of the Web Audio output freeing each song it replaces (`app/tests/web_output.rs`) and of closing the page (`app/tests/web_close.rs`), of the page's open and restore through the decode worker (`app/src/decode_tests.rs`), of the saves through browser storage (`app/src/save_tests.rs`), of the worker's model storage and messages, and of a GPU read-back copied into WebAssembly memory once (`worker/src/web/tests.rs`, in a dedicated worker; in tests the worker keeps what it would post), of the decode worker on OPFS (`decoder/src/web/tests.rs`), of the write worker on OPFS (`writer/src/web/tests.rs`, in a dedicated worker) and of its client and its page-side fake (`app/src/writer/client/tests.rs`; the app's crate run turns on `fake-writer`), of every page <-> worker message surviving a structured clone with its transfers (`protocol/tests/web.rs`), and of the resampler with a 32-bit `usize` (`engine/src/resample.rs`).  A crate run whose test binary has no wasm test fails, unless a filter is given.
 * `cargo run -p xtask -- e2e <scenario>`: the built page driven over WebDriver by a small client on std's `TcpStream` and `serde_json` (`xtask/src/webdriver.rs`, `xtask/src/e2e.rs`).  `xtask serve --inject` adds the page helpers in `xtask/e2e/` (console capture, AudioContext stand-ins, a blank page that drives the worker directly, and a spy on the download link that measures the JS heap during a save).  `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage`, `flac` and `save` need no model and run in CI; `bench`, `selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems` and `weights` need a GPU and, but for `bench`, the model.
 
 ## Vocabulary

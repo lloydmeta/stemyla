@@ -112,10 +112,11 @@ const GPU_TESTS: usize = 11;
 const TRUNK: usize = 12;
 
 /// The packages of the wasm32 clippy line.
-const WASM_PACKAGES: [&str; 5] = [
+const WASM_PACKAGES: [&str; 6] = [
     "app",
     "stem-worker",
     "decode-worker",
+    "write-worker",
     "stem-protocol",
     "engine",
 ];
@@ -268,8 +269,10 @@ pub const STRICT_PATHS: &[(&str, &[&str])] = &[
             "protocol/src/**",
             "app/src/separator.rs",
             "app/src/decoder/client.rs",
+            "app/src/writer/client.rs",
             "worker/src/web.rs",
             "decoder/src/web.rs",
+            "writer/src/web.rs",
         ],
     ),
     (
@@ -298,6 +301,7 @@ pub const STRICT_PATHS: &[(&str, &[&str])] = &[
             "worker/src/web/encode.rs",
             "worker/src/web/stems.rs",
             "decoder/src/web.rs",
+            "writer/src/web.rs",
         ],
     ),
     (
@@ -1212,7 +1216,7 @@ mod tests {
     const SYNTH: &str = "cargo clippy -p synth --all-targets -- -D warnings";
     const APP: &str = "cargo clippy -p app -- -D warnings";
     const APP_ALL: &str = "cargo clippy -p app --all-targets -- -D warnings";
-    const WASM: &str = "cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings";
+    const WASM: &str = "cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p write-worker -p stem-protocol -p engine --all-targets -- -D warnings";
     const XTASK_REPO: &str = "cargo test -p xtask --lib --test rules --test docs --test review";
     const TESTS: &str = "cargo test --workspace --exclude roformer-gpu";
     const ENGINE: &str = "cargo test -p engine";
@@ -1227,7 +1231,7 @@ mod tests {
     const NIGHTLY_DOC: &str = "cargo +nightly-2026-10-30 test -p roformer-gpu --doc";
     const PUBLISH: &str = "cargo run -p xtask --release -- publish";
 
-    /// The 12 members of this repo and their real edges, of all kinds.
+    /// The 13 members of this repo and their real edges, of all kinds.
     fn fixture() -> Graph {
         Graph::new(&[
             (
@@ -1263,6 +1267,7 @@ mod tests {
                     "test-support",
                 ],
             ),
+            ("writer", "write-worker", &["stem-protocol"]),
             (
                 "xtask",
                 "xtask",

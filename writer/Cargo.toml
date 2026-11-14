@@ -1,0 +1,27 @@
+[package]
+name = "write-worker"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+description = "Page-side Web Worker that writes the page's song-sized files to browser storage through sync access handles, for the web app"
+
+# Only the browser glue is for wasm32; natively the crate is empty.  Its
+# messages are in `stem_protocol::write` (M5.1 of
+# `docs/plans/active/gpu-speed.md`).
+[dependencies]
+stem-protocol = { path = "../protocol" }
+
+# The same versions as `app`, `stem-worker` and `decode-worker` take
+# (DEPS-1).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3.107"
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+web-sys = { version = "0.3.107", features = ["Blob", "DedicatedWorkerGlobalScope", "MessageEvent", "console"] }
+
+# Browser tests (`xtask web-test`); the version moves with wasm-bindgen's.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3.80"
+
+[lints]
+workspace = true

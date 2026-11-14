@@ -67,7 +67,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p synth --all-targets -- -D warnings
 cargo clippy -p app -- -D warnings
 cargo clippy -p app --all-targets -- -D warnings
-cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p write-worker -p stem-protocol -p engine --all-targets -- -D warnings
 cargo test --workspace
 ```
 
@@ -108,7 +108,7 @@ cargo clippy --workspace --all-targets
 cargo clippy -p synth --all-targets          # synth without its files feature
 cargo clippy -p app                          # app's lib and binary without any files feature
 cargo clippy -p app --all-targets            # app's tests without the workspace's merged features
-cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets  # the web code, which compiles only for wasm32
+cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p write-worker -p stem-protocol -p engine --all-targets  # the web code, which compiles only for wasm32
 ```
 
 * `roformer` and `roformer-gpu` compare the network with PyTorch when the fixtures exist (`tools/roformer_export.py`, a Python script that only generates test data; tests skip without them, and `STEMYLA_REQUIRE=fixtures` makes them fail).
@@ -145,13 +145,14 @@ cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 | `app/` | the egui app (web and native); `index.html` is Trunk's entry point |
 | `worker/` | the Web Worker that runs separations |
 | `decoder/` | the Web Worker that decodes a stored song in blocks into browser storage, and makes the overviews of its stems and its classic drums (`decode-worker`) |
+| `writer/` | the Web Worker that writes the page's song-sized files into browser storage through sync access handles (`write-worker`) |
 | `roformer-gpu/` | the network on WebGPU: WGSL kernels and their driver |
 | `roformer/` | STFT, chunking, weights, and the CPU reference network |
 | `engine/` | decoding, playback, time-stretch, classic drum separation |
 | `dsp/` | small audio functions in plain Rust |
 | `synth/` | the demo song |
 | `m4a/` | the bytes of an M4A file: 16-bit stereo Apple Lossless (ALAC) from its safe port of an ALAC encoder, or AAC from packets that the caller gives.  It takes the AudioSpecificConfig out of an AAC encoder's description. |
-| `protocol/` | the messages between the page and its workers (`stem-protocol`) |
+| `protocol/` | the messages between the page and its three workers (`stem-protocol`) |
 | `test-support/` | `skip` and `STEMYLA_REQUIRE`, which make a test that cannot run fail where evidence is claimed |
 | `xtask/` | the static server, the browser test runners and other tools |
 | `docs/ARCHITECTURE.md` | how the pieces fit together |

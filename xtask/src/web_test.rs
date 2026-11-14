@@ -1,8 +1,10 @@
 //! `xtask web-test [--browser safari|chrome] [--chrome-arg <arg>]... [filter]`:
 //! the browser tests
-//! of `app` (song sessions in browser storage), `stem-worker` (model
-//! storage, message handling), `decode-worker`, `stem-protocol` and
-//! `engine` (the resampler with a 32-bit `usize`), compiled for wasm32 and
+//! of `app` (song sessions in browser storage, with the page-side fake
+//! of the write worker behind `fake-writer`), `stem-worker` (model
+//! storage, message handling), `decode-worker`, `write-worker`,
+//! `stem-protocol` and `engine` (the resampler with a 32-bit `usize`),
+//! compiled for wasm32 and
 //! run in a real browser by `wasm-bindgen-test-runner`.  It keeps the
 //! output of each crate run while it prints it, and fails a crate run
 //! whose test binary has no wasm test, unless a filter is given.  With a
@@ -89,6 +91,31 @@ fn parse_args(args: &[String], browser: Browser) -> Result<Options> {
 /// the runner's hang (TD-98).  It is `EX_TEMPFAIL` of `sysexits.h`.
 pub const HANG_EXIT_CODE: i32 = 75;
 
+/// One run per crate, with its targets: `--test web` names targets only
+/// `app` has.  The app's run turns on `fake-writer`, the page-side fake
+/// of the write worker, since the test runner serves no worker build.
+const CRATE_RUNS: [(&str, &[&str]); 6] = [
+    (
+        "app",
+        &[
+            "--lib",
+            "--test",
+            "web",
+            "--test",
+            "web_close",
+            "--test",
+            "web_output",
+            "--features",
+            "fake-writer",
+        ],
+    ),
+    ("stem-worker", &["--lib"]),
+    ("decode-worker", &["--lib"]),
+    ("write-worker", &["--lib"]),
+    ("stem-protocol", &["--test", "web"]),
+    ("engine", &["--lib"]),
+];
+
 /// Runs `web-test`, and gives its exit code: 0 when it passed,
 /// [`HANG_EXIT_CODE`] or 1 when it failed ([`exit_code`]).
 pub fn main(args: &[String]) -> i32 {
@@ -118,25 +145,7 @@ fn run(args: &[String]) -> Result<i32> {
     let _safari_data =
         crate::drivers::watch_safari_data(browser, on_macos, crate::drivers::darwin_user_temp_dir);
     let driver = browser.driver()?;
-    // One run per crate: `--test web` names targets only `app` has.
-    let runs: [(&str, &[&str]); 5] = [
-        (
-            "app",
-            &[
-                "--lib",
-                "--test",
-                "web",
-                "--test",
-                "web_close",
-                "--test",
-                "web_output",
-            ],
-        ),
-        ("stem-worker", &["--lib"]),
-        ("decode-worker", &["--lib"]),
-        ("stem-protocol", &["--test", "web"]),
-        ("engine", &["--lib"]),
-    ];
+    let runs = CRATE_RUNS;
     let mut results = Vec::with_capacity(runs.len());
     let mut outputs = Vec::with_capacity(runs.len());
     for (package, targets) in runs {
@@ -701,6 +710,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             env_of(&cmd, "SAFARIDRIVER").as_deref(),
             Some("/usr/bin/safaridriver")
         );
+    }
+
+    /// The app's tests write through the page-side fake of the write
+    /// worker, since the test runner serves no worker build (M5.1): its
+    /// crate run turns on `fake-writer`, and no other crate run names it.
+    /// The shipped page never turns it on: not Trunk's link, and not the
+    /// app's default features.
+    #[test]
+    fn only_the_apps_crate_run_turns_on_the_fake_writer() {
+        for (package, targets) in CRATE_RUNS {
+            let fake = targets
+                .windows(2)
+                .any(|w| w == ["--features", "fake-writer"]);
+            assert_eq!(fake, package == "app", "{package}: {targets:?}");
+        }
+        let index = include_str!("../../app/index.html");
+        assert!(!index.contains("fake-writer"), "Trunk builds no fake");
+        let manifest = include_str!("../../app/Cargo.toml");
+        let default = manifest
+            .lines()
+            .find(|line| line.trim_start().starts_with("default ="))
+            .expect("the app's default features");
+        assert!(!default.contains("fake-writer"), "{default}");
     }
 
     #[test]

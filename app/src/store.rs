@@ -2049,6 +2049,13 @@ pub async fn download_file(name: &str, path: &str, mime: &str, keep_ms: u32) -> 
     Ok(())
 }
 
+/// `st_write` of `body` to `within/rel`, for the fake write worker: true,
+/// "gone", or the name of the error.
+#[cfg(any(test, feature = "fake-writer"))]
+pub(crate) async fn fake_write_whole(within: &str, rel: &str, body: &JsValue) -> JsValue {
+    st_write(within, rel, body).await
+}
+
 /// Writes `bytes` to the file at `path` from the root, for a test.
 #[cfg(test)]
 pub(crate) async fn test_write(path: &str, bytes: &[u8]) -> Result<()> {

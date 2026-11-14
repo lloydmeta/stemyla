@@ -12,6 +12,8 @@
   <link data-trunk rel="rust" href="../worker/Cargo.toml" data-bin="stem-worker" data-type="worker" data-bindgen-target="web" data-loader-shim data-integrity="none" data-wasm-opt="z" data-cargo-profile="web-release" />
   <!-- Decode worker: decodes a stored song in blocks into browser storage (decoder/, decision 0019). -->
   <link data-trunk rel="rust" href="../decoder/Cargo.toml" data-bin="decode-worker" data-type="worker" data-bindgen-target="web" data-loader-shim data-integrity="none" data-wasm-opt="z" data-cargo-profile="web-release" />
+  <!-- Write worker: writes the page's song-sized files through sync access handles (writer/, TD-103). -->
+  <link data-trunk rel="rust" href="../writer/Cargo.toml" data-bin="write-worker" data-type="worker" data-bindgen-target="web" data-loader-shim data-integrity="none" data-wasm-opt="z" data-cargo-profile="web-release" />
   <!-- Safari puts Web Audio in the "ambient" audio session by default, which
        Silent Mode on an iPhone mutes.  "playback" plays through it, as media
        does.  Set before the app creates its AudioContext, and again on

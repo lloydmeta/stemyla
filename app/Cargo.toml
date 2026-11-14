@@ -7,6 +7,11 @@ edition.workspace = true
 default = ["audio"]
 # Real audio output through cpal.  Without it the app plays silently.
 audio = ["engine/cpal"]
+# The browser tests' write worker: a page-side fake that writes with write
+# streams, since the test runner serves no worker build (M5.1 of
+# `docs/plans/active/gpu-speed.md`).  `xtask web-test` turns it on for the
+# app's crate run; the shipped page never does.
+fake-writer = []
 
 [dependencies]
 anyhow = "1"
