@@ -210,9 +210,9 @@ impl ChromeFolder {
                 parent.display()
             );
         }
-        match crate::drivers::command_lines() {
-            Some(ps) => {
-                for removed in sweep(parent, uid, &ps) {
+        match sweep(parent, uid, crate::drivers::command_lines) {
+            Some(removed) => {
+                for removed in removed {
                     println!(
                         "chrome folder: removed {}, which an ended run left",
                         removed.display()
@@ -286,7 +286,18 @@ fn remove_retrying(
     path: &Path,
     tries: u32,
     pause: Duration,
+    remove: impl FnMut(&Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    remove_retrying_with(path, tries, pause, remove, std::thread::sleep)
+}
+
+/// [`remove_retrying`], with `wait` for each pause: a test records them.
+fn remove_retrying_with(
+    path: &Path,
+    tries: u32,
+    pause: Duration,
     mut remove: impl FnMut(&Path) -> std::io::Result<()>,
+    mut wait: impl FnMut(Duration),
 ) -> std::io::Result<()> {
     let mut last = Ok(());
     for attempt in 1..=tries {
@@ -298,7 +309,7 @@ fn remove_retrying(
             return last;
         }
         if attempt < tries {
-            std::thread::sleep(pause);
+            wait(pause);
         }
     }
     last
@@ -353,14 +364,18 @@ fn names_path(command: &str, path: &str) -> bool {
 }
 
 /// Removes each folder in `parent` that [`sweep_removes`] chooses, and
-/// gives their paths.  It reads `parent` only, and follows no symbolic
-/// link.
-fn sweep(parent: &Path, uid: u32, ps: &str) -> Vec<PathBuf> {
-    let Ok(entries) = std::fs::read_dir(parent) else {
-        return Vec::new();
+/// gives their paths, or `None` when `ps` gives no process list.  It reads
+/// `parent` first, and only then the process list, so a run that starts
+/// meanwhile has no folder in the listing yet, or is in the list.  It
+/// reads `parent` only, and follows no symbolic link.
+fn sweep(parent: &Path, uid: u32, ps: impl FnOnce() -> Option<String>) -> Option<Vec<PathBuf>> {
+    let entries: Vec<std::fs::DirEntry> = match std::fs::read_dir(parent) {
+        Ok(entries) => entries.flatten().collect(),
+        Err(_) => Vec::new(),
     };
+    let ps = ps()?;
     let mut removed = Vec::new();
-    for entry in entries.flatten() {
+    for entry in entries {
         let path = entry.path();
         // `DirEntry::metadata` does not follow a symbolic link.
         let (Some(name), Some(text), Ok(meta)) = (
@@ -376,7 +391,7 @@ fn sweep(parent: &Path, uid: u32, ps: &str) -> Vec<PathBuf> {
             is_dir: meta.is_dir(),
             owner: owner(&meta),
         };
-        if !sweep_removes(&swept, uid, ps) {
+        if !sweep_removes(&swept, uid, &ps) {
             continue;
         }
         match remove_retrying(&path, REMOVE_TRIES, REMOVE_PAUSE, |path| {
@@ -386,7 +401,7 @@ fn sweep(parent: &Path, uid: u32, ps: &str) -> Vec<PathBuf> {
             Err(error) => eprintln!("{}", removal_failed_line(&path, &error)),
         }
     }
-    removed
+    Some(removed)
 }
 
 /// The command of a driver process of `browser` at `path` on `port`.  A
@@ -1349,6 +1364,28 @@ mod tests {
         std::fs::remove_dir_all(parent).unwrap();
     }
 
+    /// A parent that is a symbolic link is refused, so the sweep reads no
+    /// folder that a link points to.
+    #[test]
+    #[cfg(unix)]
+    fn a_link_as_the_parent_is_refused() {
+        let parent = test_parent("link");
+        let target = parent.join("target");
+        std::fs::create_dir(&target).unwrap();
+        let link = parent.join("link");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let made = ChromeFolder::create(&link);
+        let error = made.as_ref().err().map(|e| e.to_string());
+        drop(made);
+        std::fs::remove_dir_all(&parent).unwrap();
+        assert!(
+            error
+                .as_deref()
+                .is_some_and(|e| e.contains("is not a folder of the current user")),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn a_failed_session_start_removes_the_chrome_folder() {
         let parent = test_parent("session");
@@ -1372,6 +1409,41 @@ mod tests {
         );
         assert!(!path.exists(), "{} is still there", path.display());
         std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    /// A removal pauses between two tries, and not after the last try.
+    #[test]
+    fn a_removal_pauses_between_tries_only() {
+        let path = Path::new("/tmp/stemyla-chrome/4242-0");
+        let pause = Duration::from_millis(200);
+        let mut waits = Vec::new();
+        let result = remove_retrying_with(
+            path,
+            3,
+            pause,
+            |_| Err(std::io::Error::other("busy for lloyd")),
+            |d| waits.push(d),
+        );
+        assert!(result.is_err());
+        assert_eq!(waits, [pause, pause], "between 3 tries");
+        let mut waits = Vec::new();
+        let mut calls = 0;
+        let result = remove_retrying_with(
+            path,
+            3,
+            pause,
+            |_| {
+                calls += 1;
+                if calls == 1 {
+                    Err(std::io::Error::other("busy for acme"))
+                } else {
+                    Ok(())
+                }
+            },
+            |d| waits.push(d),
+        );
+        assert!(result.is_ok());
+        assert_eq!(waits, [pause], "one pause before the try that works");
     }
 
     /// Asserts:
@@ -1497,8 +1569,8 @@ mod tests {
             std::process::id(),
             named.display()
         );
-        let removed = sweep(&parent, uid, &ps);
-        assert_eq!(removed, std::slice::from_ref(&ended));
+        let removed = sweep(&parent, uid, || Some(ps));
+        assert_eq!(removed.as_deref(), Some(std::slice::from_ref(&ended)));
         assert!(!ended.exists());
         for kept in [&live, &named, &other] {
             assert!(kept.join("Cookies").is_file(), "{}", kept.display());
@@ -1506,6 +1578,38 @@ mod tests {
         #[cfg(unix)]
         assert!(parent.join("999997-0").symlink_metadata().is_ok());
         std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    /// Finding 1-5 of review round 1: the sweep lists the parent before it
+    /// reads the process list.  A run that starts after the listing makes
+    /// its folder then, and the list may not have it yet: the folder stays.
+    #[test]
+    fn a_run_that_starts_during_the_sweep_keeps_its_folder() {
+        let parent = test_parent("sweep-race");
+        let uid = current_uid().unwrap();
+        let starting = parent.join("424242-0");
+        let made = starting.clone();
+        let removed = sweep(&parent, uid, move || {
+            std::fs::create_dir(&made).unwrap();
+            Some(format!("{} xtask\n", std::process::id()))
+        });
+        let kept = starting.is_dir();
+        std::fs::remove_dir_all(parent).unwrap();
+        assert_eq!(removed, Some(vec![]), "nothing to remove");
+        assert!(kept, "the new run's folder stays");
+    }
+
+    #[test]
+    fn no_process_list_removes_nothing() {
+        let parent = test_parent("sweep-no-ps");
+        let ended = parent.join("999999-0");
+        std::fs::create_dir(&ended).unwrap();
+        let uid = current_uid().unwrap();
+        let removed = sweep(&parent, uid, || None);
+        let kept = ended.is_dir();
+        std::fs::remove_dir_all(parent).unwrap();
+        assert_eq!(removed, None);
+        assert!(kept);
     }
 
     #[test]

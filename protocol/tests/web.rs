@@ -1733,3 +1733,32 @@ fn a_write_message_with_a_missing_or_wrong_field_is_refused() {
         assert_eq!(kind, Some(stem_protocol::kind_of(&msg)), "refused: {text}");
     }
 }
+
+/// Each write message names its kind, and each kind starts with
+/// `write-`.
+#[wasm_bindgen_test]
+fn each_write_message_names_its_kind() {
+    let requests: Vec<&str> = write_requests().iter().map(WriteRequest::kind).collect();
+    assert_eq!(
+        requests,
+        [
+            "write-file",
+            "write-file",
+            "write-block",
+            "write-block",
+            "write-end",
+            "write-end"
+        ]
+    );
+    let replies: Vec<&str> = write_replies().iter().map(WriteReply::kind).collect();
+    assert_eq!(
+        replies,
+        [
+            "write-ready",
+            "write-done",
+            "write-done",
+            "write-done",
+            "write-done"
+        ]
+    );
+}

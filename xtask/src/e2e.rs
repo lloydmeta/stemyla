@@ -1846,7 +1846,8 @@ fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
 const WORKER_HEADROOM_MB: f64 = -17.0;
 
 /// MEM-4's budget for the tab during a separation, in MB: page wasm,
-/// worker wasm, decoder wasm and GPU live bytes.  It is the 1,100 MB of
+/// worker wasm, decoder wasm, the write worker's wasm
+/// ([`WRITE_WORKER_WASM_MB`]) and GPU live bytes.  It is the 1,100 MB of
 /// M10 of `plans/completed/stream-from-storage.md`, less an MP3 save's
 /// frames (141 MB) and a save's page memory (16 MB), since
 /// `memory-budget` runs no save.  The 1,100 MB leaves about 950 MB under

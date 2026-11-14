@@ -716,7 +716,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
     /// worker, since the test runner serves no worker build (M5.1): its
     /// crate run turns on `fake-writer`, and no other crate run names it.
     /// The shipped page never turns it on: not Trunk's link, and not the
-    /// app's default features.
+    /// app's default features, also through another feature.
     #[test]
     fn only_the_apps_crate_run_turns_on_the_fake_writer() {
         for (package, targets) in CRATE_RUNS {
@@ -726,13 +726,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             assert_eq!(fake, package == "app", "{package}: {targets:?}");
         }
         let index = include_str!("../../app/index.html");
-        assert!(!index.contains("fake-writer"), "Trunk builds no fake");
-        let manifest = include_str!("../../app/Cargo.toml");
-        let default = manifest
+        let app_link = index
             .lines()
-            .find(|line| line.trim_start().starts_with("default ="))
-            .expect("the app's default features");
-        assert!(!default.contains("fake-writer"), "{default}");
+            .find(|line| line.contains("data-bin=\"app\""))
+            .expect("the app's Trunk link");
+        for turns_on in [
+            "fake-writer",
+            "data-cargo-features",
+            "data-cargo-all-features",
+        ] {
+            assert!(!app_link.contains(turns_on), "Trunk's link: {app_link}");
+        }
+        // The app's features as Trunk builds it (the default ones), with
+        // each feature that turns on another resolved.
+        let out = Command::new(env!("CARGO"))
+            .current_dir(crate::workspace_root())
+            .args(["tree", "--locked", "--color", "never", "-p", "app"])
+            .args([
+                "--target",
+                "wasm32-unknown-unknown",
+                "-e",
+                "features",
+                "-i",
+                "app",
+            ])
+            .output()
+            .expect("cargo tree runs");
+        let tree = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            out.status.success() && tree.contains("app feature \"default\""),
+            "{tree}"
+        );
+        assert!(!tree.contains("app feature \"fake-writer\""), "{tree}");
     }
 
     #[test]

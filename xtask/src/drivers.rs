@@ -367,13 +367,19 @@ fn bytes_in(folder: &Path) -> u64 {
 pub struct SafariData {
     folder: PathBuf,
     before: Vec<Entry>,
+    /// Where the line goes: stdout, or a test's record.
+    print: fn(&str),
 }
 
 impl Drop for SafariData {
     fn drop(&mut self) {
         let left = left_behind(&self.before, &list_folder(&self.folder));
-        println!("{}", left_line(&left, &self.folder));
+        (self.print)(&left_line(&left, &self.folder));
     }
+}
+
+fn print_line(line: &str) {
+    println!("{line}");
 }
 
 /// Lists Safari's folder for a Safari run on macOS, and gives the
@@ -395,6 +401,7 @@ pub fn watch_safari_data(
     Some(SafariData {
         before: list_folder(&folder),
         folder,
+        print: print_line,
     })
 }
 
@@ -762,5 +769,66 @@ mod tests {
         );
         drop(watch);
         std::fs::remove_dir_all(d).unwrap();
+    }
+
+    thread_local! {
+        static PRINTED: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    fn record(line: &str) {
+        PRINTED.with_borrow_mut(|lines| lines.push(line.to_string()));
+    }
+
+    /// The drop of a [`SafariData`] lists the folder again and gives the
+    /// line of what the run left.
+    #[test]
+    fn the_drop_gives_the_line_of_what_the_run_left() {
+        let d = temp_dir("safari-drop");
+        let watch = SafariData {
+            folder: d.clone(),
+            before: list_folder(&d),
+            print: record,
+        };
+        std::fs::write(
+            d.join("FileSystemWritableStreamlloyd"),
+            vec![0u8; 2_000_000],
+        )
+        .unwrap();
+        drop(watch);
+        std::fs::remove_dir_all(&d).unwrap();
+        let printed = PRINTED.with_borrow(Clone::clone);
+        assert_eq!(printed.len(), 1, "{printed:?}");
+        assert!(
+            printed[0]
+                .starts_with("browser data: Safari left 1 swap file (2.0 MB) and 0 blob folders"),
+            "{printed:?}"
+        );
+    }
+
+    /// The process list of this user's processes names this test process,
+    /// with its command line.
+    #[test]
+    fn the_command_lines_name_this_process() {
+        let ps = command_lines().expect("ps lists the processes");
+        let this = std::process::id().to_string();
+        let line = ps
+            .lines()
+            .map(str::trim_start)
+            .find(|line| line.split_whitespace().next() == Some(this.as_str()))
+            .unwrap_or_else(|| panic!("no line for {this}"));
+        assert!(line.contains("xtask"), "{line}");
+    }
+
+    /// `getconf DARWIN_USER_TEMP_DIR` gives an absolute folder that exists,
+    /// on macOS; elsewhere, none.
+    #[test]
+    fn the_user_temp_dir_is_a_folder_on_macos_only() {
+        let temp = darwin_user_temp_dir();
+        if cfg!(target_os = "macos") {
+            let temp = temp.expect("a folder on macOS");
+            assert!(temp.is_absolute() && temp.is_dir(), "{}", temp.display());
+        } else {
+            assert_eq!(temp, None);
+        }
     }
 }

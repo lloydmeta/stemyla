@@ -67,7 +67,8 @@ async function with_handle(within, rel, cut, body) {
     return (e && e.name) || "Error";
   }
 }
-// A `Blob` is read one slice at a time, so the worker holds at most one.
+// A `Blob` is read one slice at a time: the worker references at most one
+// slice of 8 MiB at a time, until the garbage collector frees it (TD-11).
 const SLICE = 8 << 20;
 export async function write_whole(within, rel, body) {
   return with_handle(within, rel, true, async (h) => {

@@ -17,7 +17,9 @@
 //!   the worker first cuts the file to 0 bytes.
 //! * `{type: "write-end", within, rel, size}`: the blocks of the file are
 //!   all sent.  `size` is the bytes that the file must hold: the worker
-//!   replies `failed` if it holds other bytes, as when a block is lost.
+//!   replies `failed` if it holds other bytes, so a lost last block fails.
+//!   A lost block in the middle leaves zeros, which this check does not
+//!   see.
 //!   `size: null` ends an abandoned write: the worker removes the file.
 //!
 //! The replies ([`WriteReply`], write worker to page):
@@ -292,4 +294,37 @@ fn bytes_field(o: &JsValue, k: &str) -> Result<Uint8Array, String> {
     get(o, k)
         .dyn_into::<Uint8Array>()
         .map_err(|_| format!("{k} must be a Uint8Array"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each request and reply that needs no JS object names its kind;
+    /// `protocol/tests/web.rs` covers the others in a browser.
+    #[test]
+    fn each_request_and_reply_names_its_kind() {
+        let end = WriteRequest::End {
+            within: "sessions/1".into(),
+            rel: "mix.f32.part".into(),
+            size: None,
+        };
+        assert_eq!(end.kind(), "write-end");
+        assert_eq!(WriteReply::Ready.kind(), "write-ready");
+        let done = WriteReply::Done {
+            outcome: Outcome::Gone,
+            bytes: None,
+        };
+        assert_eq!(done.kind(), "write-done");
+        assert_eq!(
+            [kind::FILE, kind::BLOCK, kind::END, kind::READY, kind::DONE],
+            [
+                "write-file",
+                "write-block",
+                "write-end",
+                "write-ready",
+                "write-done"
+            ]
+        );
+    }
 }

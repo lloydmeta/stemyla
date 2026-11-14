@@ -84,6 +84,16 @@ export function refuse_sync_handle() {
     return Promise.reject(new DOMException("refused by the test", "NoModificationAllowedError"));
   };
 }
+// The next `FileSystemSyncAccessHandle.prototype.write` throws, as a full
+// disk refuses it, once the handle is open.
+export function refuse_next_sync_write() {
+  const proto = FileSystemSyncAccessHandle.prototype;
+  const real = proto.write;
+  proto.write = function () {
+    proto.write = real;
+    throw new DOMException("refused by the test", "QuotaExceededError");
+  };
+}
 // "lloyd" at `at` in a buffer of 16 bytes, as a view of 5 bytes.
 export function lloyd_in_a_larger_buffer(at) {
   const b = new Uint8Array(16);
@@ -105,6 +115,7 @@ extern "C" {
     fn start_sync_spy();
     fn stop_sync_spy() -> String;
     fn refuse_sync_handle();
+    fn refuse_next_sync_write();
     fn lloyd_in_a_larger_buffer(at: u32) -> Uint8Array;
 }
 
@@ -300,6 +311,27 @@ async fn a_refused_handle_gives_its_error_and_leaves_none_open() {
     assert_eq!(again, [(Outcome::Written, Some(b"acme".to_vec()))]);
     assert_eq!(
         read_at("saves/2-1.wav").await.as_deref(),
+        Some(&b"acme"[..])
+    );
+}
+
+/// Finding 1-1 of review round 1: a write that fails after its handle
+/// opened gives the error's name, and closes the handle: the next write
+/// of the same file succeeds.
+#[wasm_bindgen_test]
+async fn a_write_that_fails_in_an_open_handle_closes_it() {
+    fresh().await;
+    refuse_next_sync_write();
+    let refused = run(vec![block("", "saves/5-1.wav", 0, b"lloyd")]).await;
+    let again = run(vec![block("", "saves/5-1.wav", 0, b"acme")]).await;
+    assert_eq!(
+        refused[0].0,
+        Outcome::Failed("QuotaExceededError".into()),
+        "the refused write"
+    );
+    assert_eq!(again[0].0, Outcome::Written, "the next write");
+    assert_eq!(
+        read_at("saves/5-1.wav").await.as_deref(),
         Some(&b"acme"[..])
     );
 }

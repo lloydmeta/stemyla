@@ -38,7 +38,8 @@ export function worker_port(url) { return new Worker(url, { type: "module" }); }
 "#)]
 extern "C" {
     fn port_listen(port: &JsValue, on_message: &js_sys::Function, on_error: &js_sys::Function);
-    fn port_post(port: &JsValue, msg: &Object, transfer: &Array);
+    #[wasm_bindgen(catch)]
+    fn port_post(port: &JsValue, msg: &Object, transfer: &Array) -> Result<(), JsValue>;
     fn port_end(port: &JsValue);
     #[wasm_bindgen(catch)]
     fn worker_port(url: &str) -> Result<JsValue, JsValue>;
@@ -103,17 +104,22 @@ impl WriteClient {
         let mut resolve = None;
         let promise = js_sys::Promise::new(&mut |done, _| resolve = Some(done));
         let ended = Rc::new(RefCell::new(None));
-        {
+        let post_now = {
             let mut inner = self.0.borrow_mut();
             inner.waiting.push_back(Waiting {
                 ended: ended.clone(),
                 resolve: resolve.expect("a promise calls its executor at once"),
             });
-            if inner.ready {
-                port_post(&port, &msg, &transfer);
-            } else {
-                inner.held.push((msg, transfer));
+            if !inner.ready {
+                inner.held.push((msg.clone(), transfer.clone()));
             }
+            inner.ready
+        };
+        // Posted after the borrow ends: a post that throws (a request that
+        // cannot be cloned) fails its own request, the last one waiting.
+        if post_now && let Err(e) = port_post(&port, &msg, &transfer) {
+            let failed = self.0.borrow_mut().waiting.pop_back();
+            fail(failed, &e);
         }
         Box::pin(async move {
             let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
@@ -163,13 +169,25 @@ impl WriteClient {
         };
         match reply {
             WriteReply::Ready => {
-                let mut inner = self.0.borrow_mut();
-                inner.ready = true;
-                let held = std::mem::take(&mut inner.held);
-                if let Some(port) = &inner.port {
-                    for (msg, transfer) in held {
-                        port_post(port, &msg, &transfer);
+                let (port, held) = {
+                    let mut inner = self.0.borrow_mut();
+                    inner.ready = true;
+                    (inner.port.clone(), std::mem::take(&mut inner.held))
+                };
+                let Some(port) = port else {
+                    return;
+                };
+                // Before `write-ready`, every request waits in `held`, in
+                // the order of `waiting`; a post that throws fails its own.
+                let mut failed = Vec::new();
+                for (n, (msg, transfer)) in held.iter().enumerate() {
+                    if let Err(e) = port_post(&port, msg, transfer) {
+                        failed.push((n, e));
                     }
+                }
+                for (n, e) in failed.into_iter().rev() {
+                    let waiting = self.0.borrow_mut().waiting.remove(n);
+                    fail(waiting, &e);
                 }
             }
             WriteReply::Done { outcome, bytes } => {
@@ -201,6 +219,18 @@ impl WriteClient {
             *w.ended.borrow_mut() = Some(Err(format!("the write worker stopped: {reason}")));
             let _ = w.resolve.call0(&JsValue::NULL);
         }
+    }
+}
+
+/// Ends the request `waiting`, if any, for a post that threw `e`.
+fn fail(waiting: Option<Waiting>, e: &JsValue) {
+    if let Some(w) = waiting {
+        let text = e
+            .dyn_ref::<js_sys::Error>()
+            .map(|e| format!("{}: {}", e.name(), e.message()))
+            .unwrap_or_else(|| format!("{e:?}"));
+        *w.ended.borrow_mut() = Some(Err(format!("the write could not be posted: {text}")));
+        let _ = w.resolve.call0(&JsValue::NULL);
     }
 }
 

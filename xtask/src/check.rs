@@ -2486,10 +2486,16 @@ mod tests {
                 "protocol/src/decode.rs",
                 "app/src/separator.rs",
                 "app/src/decoder/client.rs",
+                "app/src/writer/client.rs",
                 "worker/src/web.rs",
                 "decoder/src/web.rs",
+                "writer/src/web.rs",
             ],
-            &["app/src/decoder/x.rs", "decoder/src/pass.rs"],
+            &[
+                "app/src/decoder/x.rs",
+                "decoder/src/pass.rs",
+                "writer/src/lib.rs",
+            ],
         );
     }
 
@@ -2531,11 +2537,13 @@ mod tests {
                 "worker/src/web/encode.rs",
                 "worker/src/web/stems.rs",
                 "decoder/src/web.rs",
+                "writer/src/web.rs",
             ],
             &[
                 "app/src/reset.rs",
                 "app/src/lib.rs",
                 "worker/src/web/tests.rs",
+                "writer/src/lib.rs",
             ],
         );
     }

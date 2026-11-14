@@ -33,6 +33,26 @@ export function writer_writables_stop() {
   FileSystemFileHandle.prototype.createWritable = real_writable;
   return writables;
 }
+// A port whose `postMessage` throws, as a post that cannot be cloned does.
+export function writer_throwing_port() {
+  return {
+    onmessage: null,
+    postMessage() { throw new DOMException("refused by the test", "DataCloneError"); },
+  };
+}
+export function writer_tell(port, data) { port.onmessage({ data }); }
+// Counts the calls of `Worker.prototype.terminate` until the stop.
+let terminated = null;
+let real_terminate = null;
+export function writer_terminates_start() {
+  real_terminate = Worker.prototype.terminate;
+  terminated = 0;
+  Worker.prototype.terminate = function () { terminated++; return real_terminate.call(this); };
+}
+export function writer_terminates_stop() {
+  Worker.prototype.terminate = real_terminate;
+  return terminated;
+}
 export function writer_deliver(port, data) {
   port.dispatchEvent(new MessageEvent("message", { data }));
 }
@@ -40,6 +60,10 @@ export function writer_deliver(port, data) {
 extern "C" {
     fn writer_spy_on_post(port: &JsValue) -> js_sys::Array;
     fn writer_deliver(port: &JsValue, data: &JsValue);
+    fn writer_throwing_port() -> JsValue;
+    fn writer_tell(port: &JsValue, data: &JsValue);
+    fn writer_terminates_start();
+    fn writer_terminates_stop() -> u32;
     fn writer_writables_start();
     fn writer_writables_stop() -> u32;
 }
@@ -180,10 +204,12 @@ async fn the_fake_serves_files_and_blocks_in_order() {
 #[wasm_bindgen_test]
 async fn a_failed_worker_fails_each_request_and_the_next_write_starts_a_new_one() {
     let client = WriteClient::of_worker("./no-such-write-worker.js");
+    writer_terminates_start();
     let first = client.write(&block("a", 0, b"lloyd"));
     let second = client.write(&block("b", 0, b"acme"));
     let port = client.port().expect("a worker");
     let (first, second) = (first.await, second.await);
+    let terminated = writer_terminates_stop();
     let again = client.port().expect("a new worker");
     again.unchecked_ref::<Worker>().set_onerror(None);
     let new_port = !js_sys::Object::is(&again, &port);
@@ -196,6 +222,10 @@ async fn a_failed_worker_fails_each_request_and_the_next_write_starts_a_new_one(
         );
     }
     assert!(new_port, "a new worker");
+    assert_eq!(
+        terminated, 1,
+        "the failed worker is ended, so it holds no file"
+    );
 }
 
 /// PROTO-1: a reply that cannot be read cannot be matched to a request, so
@@ -289,4 +319,27 @@ async fn the_fake_opens_one_write_stream_for_each_block_written_file() {
     assert_eq!(got.last(), Some(&Ok(Outcome::Written)));
     assert_eq!(opened, 1, "one write stream for the file");
     assert_eq!(file.as_deref(), Some(&b"lloyd"[..]));
+}
+
+/// Finding 1-19 of review round 1: a post that throws fails its request,
+/// at once or when it was held for `write-ready`, and leaves no request
+/// waiting.
+#[wasm_bindgen_test]
+async fn a_post_that_throws_fails_its_request() {
+    let client = WriteClient::new(|| Ok(writer_throwing_port()));
+    let port = client.port().expect("the port");
+    let held = client.write(&block("e.wav", 0, b"lloyd"));
+    writer_tell(&port, &sent(WriteReply::Ready));
+    let held = held.await;
+    let at_once = client.write(&block("f.wav", 0, b"acme")).await;
+    let waiting = client.0.borrow().waiting.len();
+    client.stopped("the test ended");
+    for (what, ended) in [("held", held), ("at once", at_once)] {
+        assert!(
+            matches!(&ended, Err(reason) if reason.contains("DataCloneError")),
+            "{what}: {:?}",
+            ended.map(|(o, _)| o)
+        );
+    }
+    assert_eq!(waiting, 0, "no request waits");
 }

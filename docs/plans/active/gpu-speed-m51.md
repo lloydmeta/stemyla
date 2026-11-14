@@ -183,7 +183,7 @@ The implementer writes these in Surprises before any code of Step 5b:
 
 ### Step 5b: the write worker crate
 
-The maintainer chose the form on 2026-11-14 (parent Decision log, `00668a1`): a Rust crate built by Trunk, as `decode-worker` is.  So the messages go in `stem-protocol`, and PROTO-1's text does not change.  No decision record is needed beyond the parent's Decision log.
+The maintainer chose the form on 2026-11-14 (parent Decision log, `00668a1`): a Rust crate built by Trunk, as `decode-worker` is.  So the messages go in `stem-protocol`, and PROTO-1's text does not change.  Decision 0032 records the choice, accepted, since the maintainer chose option c) and the Rust crate form (finding 1-10 of review round 1).
 
 The crate:
 
@@ -320,6 +320,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * [x] 2026-11-14: Step 6: the record: the quirk entry in `references/browser-quirks.md`, the draft bug `references/webkit-bug-writable-swap-file.md` with its line in `docs/README.md`, TD-103 for the state after Step 4, and the notes and the known local failure in `references/local-browser-testing.md`.
 * [x] 2026-11-14: Step 7: the checks before review round 1.  `check --tier push` passed at `af9637f`, 15 lines, with both perf gates: Chrome 3.65 s (bound 3.95 s), Safari 5.64 s (bound 6.13 s); its Safari gate left 6 small swap files, 0.0 MB (`m51/check-push-2.log`).  `cargo build -p xtask` passed.  The last counted runs (`m51/s7-*`): `e2e storage` passed in both browsers; `e2e weights` failed in both only on the known hash check.  Chrome left 0 new profiles in each.  Safari left 0 swap files in each: before M5.1, `e2e weights` left 349.5 MB (s3) and `e2e storage` 5 small files (s5).
 * [x] 2026-11-14: the fix of the Safari `web-test` regression (option A): `write-end` in `stem_protocol::write`, the worker's size check and removal, the store's ends, and the fake's one stream for each file.  Each new test failed first on an assert (`m51/end-fail-*.log`, `m51/end-fail2-*.log`).  A whole Safari `web-test` left 1,320 swap files, 1,697.2 MB (s15), against 8,898.9 MB before the fix and 1,697.2 MB before Step 5c.
+* [x] 2026-11-14: the fixes of review round 1 (findings 1-1 to 1-19, and the missed mutants 1-21 to 1-39), each test that the findings ask for failing first on an assert, but 1-19's, whose first run failed on the uncaught `DataCloneError` (`m51/r1/`).  Decision 0032 records the write worker.
 
 ## Surprises and discoveries
 

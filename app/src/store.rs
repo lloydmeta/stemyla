@@ -427,9 +427,9 @@ async fn write_block(
 }
 
 /// Ends the block-written file `within/rel` in the write worker: with
-/// `Some` of its size, the worker checks that the file holds those bytes
-/// (a lost block fails); with `None`, an abandoned write, it removes the
-/// file.
+/// `Some` of its size, the worker checks that the file holds `size`
+/// bytes, so a lost last block fails; with `None`, an abandoned write, it
+/// removes the file.
 async fn write_end(within: &str, rel: &str, size: Option<u64>) -> Result<Outcome, String> {
     let request = WriteRequest::End {
         within: within.into(),
@@ -2031,7 +2031,8 @@ pub async fn save_put(
 }
 
 /// Ends the save `w` of the file at `path`, which keeps what it wrote: the
-/// write worker checks that the file holds every block.  Once [`close`]
+/// write worker checks that the file holds `size` bytes, so a lost last
+/// block fails.  Once [`close`]
 /// has run, or when the check fails, it drops the file instead and gives
 /// why.
 #[cfg_attr(mutants, mutants::skip)]
