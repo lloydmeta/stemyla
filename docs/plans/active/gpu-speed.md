@@ -104,7 +104,7 @@ Goal: the GPU does not wait for the CPU, and the CPU does not wait for the GPU, 
 * `Pace` keeps up to 2 steps in flight.  The step limit and the errors still stop a run.
 * The CPU work runs while the GPU works: the STFT of the next chunk, and the application of each stem's mask.
 
-Since M5 both browsers run `vfused`, with 192 time-axis steps for each chunk, so the gaps measured before M5 (14 % in Chrome, with `freq`'s 744 steps) no longer hold: by M5 Step 4's figures the time axis's waits are about 3 % in Chrome and 0.3 % in Safari.  M6's milestone plan first measures the gaps and the CPU share at M5's head with `profile=1`, and predicts each change's gain from them.  A change whose bound is under 3 % in both browsers is not built, and its figures go in Surprises.
+Since M5 both browsers run `vfused`: 470 steps for each chunk (192 on the time axis), against 1,022 with `freq`.  So the gaps measured before M5 (14 % in Chrome) no longer hold.  By M5 Step 4's cost of each wait (0.57 ms in Chrome, 0.08 ms in Safari), the waits of all steps are about 7.5 % of a chunk in Chrome and 0.7 % in Safari; the profile's upper bound gives 10 % and 3.7 %.  M6's milestone plan first measures the gaps at M5's head with `profile=1`, and the CPU share as each chunk's time minus its paced steps' wall time, for chunks 2 to the end.  It predicts each change's gain from them.  A change whose bound is under 3 % in both browsers is not built, and its figures go in Surprises.  If neither change is built, M6 lands no code: it skips cases 1 to 11, has no review rounds, and puts its figures in Surprises and Outcomes.
 
 M6's milestone plan designs the order of the work and the read-back.  It must meet these cases, each with a test that fails first where a test can see it:
 
@@ -359,6 +359,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * 2026-11-14, maintainer: calibration takes about 33 s on the M2 Pro (about 15 s before M5); accepted, no cut (M5 review round 1, finding 1-4).
 * 2026-11-14, agent (orchestrator), intent review of M5, round 1: M6 measures the gaps and the CPU share at M5's head before it builds a change, since `vfused` cut the time-axis steps from 744 to 192 (i1-4).  M6 also checks calibration's bias of `freq` against `fused`, since the choice check cannot fail on this Mac now (i1-1).  `memory-budget` also runs with `attn=freq` in Chrome (i1-2), and `stored-stems` with `attn=vfused` and `attn=freq` (i1-3).  The gate verdicts at M5's head are those of the push before M6 (i1-5).
+* 2026-11-14, agent (orchestrator), intent review of M5, round 2: the waits that `Pace` can hide are those of all 470 steps for each chunk, about 7.5 % in Chrome and 0.7 % in Safari, not of the 192 time-axis steps alone (i2-1).  If neither change is built, M6 lands no code (i2-2).  The CPU share is each chunk's time minus its paced steps' wall time, since `profile=1` gives only the GPU's busy time (i2-3).
 ## Outcomes and retrospective
 
 Not yet.
