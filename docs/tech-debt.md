@@ -778,6 +778,14 @@ It breaks no rule.  It is a leak of disk in test runs on macOS.  When no `MAC_CH
 * What guards it: a line in `references/local-browser-testing.md`, and a line in each review prompt from M5.1 review round 4 (decision of the orchestrator).  No check refuses a direct run.
 * Fix: a guard that refuses `cargo test --target wasm32-unknown-unknown` with a driver outside `xtask`.  None is planned.  Until then, a person deletes the profiles that no process uses.
 
+### TD-105: nothing makes the browser runs of agents run one at a time
+
+It breaks no rule.  It concerns the run rule of `plans/active/gpu-speed.md`: one browser run or perf gate at a time.  Two runs at once can share Safari's one automation session, or slow each other's timing.
+
+* Evidence: in M5.1 review round 2, two validators ran browser tests at once, in Chrome and in Safari.  In round 4, three reviewers' `web-test` runs overlapped, though each prompt said to start none while another ran (`plans/active/gpu-speed-m51.md`, Surprises).  No run lost its session.
+* What guards it: a line in each review prompt.  Agents run in parallel, so a line does not order their runs.
+* Fix: a lock that `xtask web-test` and `xtask e2e` hold for the whole browser run, for example a file lock in the target folder.  A second run then waits, or fails with a clear error.  Not planned.
+
 ## Legibility for agents
 
 ### TD-18: large files and JavaScript inside Rust strings
