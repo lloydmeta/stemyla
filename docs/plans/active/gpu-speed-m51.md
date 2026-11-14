@@ -434,6 +434,7 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 * 2026-11-14, orchestrator: `write-end` (option A).  It fixes the regression at its cause, and gives the shipped worker a size check that it lacks.  It stays inside the maintainer's design.  B changes more tests for a gain in tests only.
 * 2026-11-14, agent (implementer), `write-end`: an abandoned write is `size: null`, not a `complete` flag: one field, and a missing `size` is an error (TD-16).  Its reply is the `write-done` of every request, not a reply of its own: the worker ends each request with one reply in the order sent, and the client matches each reply to the oldest request.
 * 2026-11-14, orchestrator: from review round 3, each validator prompt ends with the line 'Start no browser run while another browser run of this round goes on.'  Why: two validators of round 2 ran browser tests at the same time (Surprises).
+* 2026-11-14, orchestrator: a browser test runs through `xtask web-test` with a filter, never through `cargo test --target wasm32-unknown-unknown` with a driver directly.  Each review prompt from round 4 says so, beside the line on one browser run at a time.  Why: only `xtask` gives Chrome its own profile folder, and the Chrome profiles in `$TMPDIR` went from 5 to 13 during review rounds 2 and 3.
 
 ## Outcomes and retrospective
 
