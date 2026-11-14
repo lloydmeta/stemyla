@@ -116,30 +116,6 @@ export function next_fetch_sends_views() {
   };
 }
 export function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-// Records what each OPFS write gets, in call order: "blob", "whole" (a
-// typed array that is its whole buffer) or "view".  A simpler copy of
-// the spy in app/src/store.rs.
-let record = null;
-let real_write = null;
-export function start_spy() {
-  if (real_write) throw new Error("a spy is already on write");
-  const proto = FileSystemWritableFileStream.prototype;
-  real_write = proto.write;
-  record = [];
-  proto.write = function (data) {
-    if (data instanceof Blob) record.push("blob");
-    else if (ArrayBuffer.isView(data))
-      record.push(data.byteOffset === 0 && data.byteLength === data.buffer.byteLength ? "whole" : "view");
-    else record.push(typeof data);
-    return real_write.call(this, data);
-  };
-}
-// Restores `write` and returns the record, joined by spaces.
-export function stop_spy() {
-  FileSystemWritableFileStream.prototype.write = real_write;
-  real_write = null;
-  return record.join(" ");
-}
 async function folder_at(path, create) {
   let d = await navigator.storage.getDirectory();
   for (const p of path.split("/").filter((s) => s)) d = await d.getDirectoryHandle(p, { create });
@@ -217,6 +193,26 @@ export function stop_sync_spy() {
   FileSystemSyncAccessHandle.prototype.write = sync_real;
   sync_real = null;
   return sync_record.join(" ");
+}
+// Counts the calls of `createWritable` (TD-103: Safari keeps the swap file
+// of each write stream that closes).
+let writables = null;
+let writable_real = null;
+export function start_writable_spy() {
+  if (writable_real) throw new Error("a spy is already on createWritable");
+  const proto = FileSystemFileHandle.prototype;
+  writable_real = proto.createWritable;
+  writables = 0;
+  proto.createWritable = function (...args) {
+    writables++;
+    return writable_real.apply(this, args);
+  };
+}
+// Restores `createWritable` and returns the count of its calls.
+export function stop_writable_spy() {
+  FileSystemFileHandle.prototype.createWritable = writable_real;
+  writable_real = null;
+  return writables;
 }
 // Records the bytes of each blob that FileReaderSync reads as an
 // ArrayBuffer, in call order.
@@ -312,8 +308,6 @@ extern "C" {
     fn record_next_fetch();
     fn last_redirect() -> Option<String>;
     fn hide_gpu() -> js_sys::Function;
-    fn start_spy();
-    fn stop_spy() -> String;
     async fn plant_folder(path: &str);
     #[wasm_bindgen(js_name = remove_at)]
     async fn remove_at_js(path: &str) -> JsValue;
@@ -325,6 +319,8 @@ extern "C" {
     async fn names_in_js(path: &str) -> JsValue;
     fn start_sync_spy(fail_at: u32);
     fn stop_sync_spy() -> String;
+    fn start_writable_spy();
+    fn stop_writable_spy() -> u32;
     fn refuse_sync_handle(n: u32) -> js_sys::Function;
     fn start_read_spy();
     fn stop_read_spy() -> Vec<f64>;
@@ -654,16 +650,46 @@ async fn a_picked_file_the_gpu_failed_to_load_is_not_stored() {
     assert_eq!(stored_bytes().await, [7]);
 }
 
+/// TD-103: Safari keeps the swap file of each write stream that closes,
+/// 350 MB for each model save.  So the model's writes open no write
+/// stream: a sync access handle writes the file in place.
+#[wasm_bindgen_test]
+async fn the_model_writes_open_no_write_stream() {
+    fresh().await;
+    let body = [4u8, 5, 6];
+    let progress = Closure::<dyn FnMut(f64, f64)>::new(|_: f64, _: f64| {});
+    next_fetch_sends_views();
+    start_writable_spy();
+    let from_blob = opfs_write("model", &blob(&body).into()).await;
+    let from_bytes = opfs_write("model", &Uint8Array::from(&body[..]).into()).await;
+    let put = cache_put(CACHE_NAME, &Uint8Array::from(&body[..])).await;
+    let downloaded = download_to_opfs(
+        "/weights/m",
+        DOWNLOAD_NAME,
+        progress.as_ref().unchecked_ref(),
+        false,
+    )
+    .await;
+    let opened = stop_writable_spy();
+    assert_eq!(opened, 0, "write streams opened");
+    assert_eq!(
+        (from_blob.as_bool(), from_bytes.as_bool(), put.as_bool()),
+        (Some(true), Some(true), Some(true))
+    );
+    assert_eq!(downloaded.ok().and_then(|n| n.as_f64()), Some(9.0));
+    assert_eq!(stored_bytes().await, body);
+}
+
 /// Chunks that are views of larger buffers, which Safari 27 would write
 /// whole (see `whole` in the worker).  Chrome writes just the view, so the
-/// read-back fails only in Safari without that copy; the spy on `write`
-/// fails in any browser (MEM-5).
+/// read-back fails only in Safari without that copy; the spy on the sync
+/// access handle's `write` fails in any browser (MEM-5).
 #[wasm_bindgen_test]
 async fn a_download_holds_only_the_bytes_of_its_chunks() {
     fresh().await;
     next_fetch_sends_views();
     let progress = Closure::<dyn FnMut(f64, f64)>::new(|_: f64, _: f64| {});
-    start_spy();
+    start_sync_spy(0);
     let got = download_to_opfs(
         "/weights/m",
         DOWNLOAD_NAME,
@@ -671,7 +697,7 @@ async fn a_download_holds_only_the_bytes_of_its_chunks() {
         false,
     )
     .await;
-    assert_eq!(stop_spy(), "whole whole");
+    assert_eq!(stop_sync_spy(), "whole whole");
     assert_eq!(got.ok().and_then(|n| n.as_f64()), Some(9.0));
     let stored = cache_get(DOWNLOAD_NAME).await.expect("no error");
     assert_eq!(stored.unchecked_into::<Uint8Array>().to_vec(), b"lloydacme");
@@ -685,16 +711,11 @@ async fn opfs_write_writes_more_than_one_slice() {
         ("a blob", blob(&body).into()),
         ("bytes", JsValue::from(Uint8Array::from(&body[..]))),
     ] {
-        start_spy();
+        start_sync_spy(0);
         let written = opfs_write("model", &src).await;
-        let record = stop_spy();
+        let record = stop_sync_spy();
         assert_eq!(written.as_bool(), Some(true));
-        let whole_slices = if what == "a blob" {
-            "blob blob"
-        } else {
-            "whole whole"
-        };
-        assert_eq!(record, whole_slices, "{what}");
+        assert_eq!(record, "whole whole", "{what}: whole arrays (MEM-5)");
         let got = cache_get("model")
             .await
             .expect("no error")

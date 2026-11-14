@@ -276,7 +276,7 @@ The player (`engine::player`) reads every lane at one position, mixes the lanes 
 
 The page uses the browser's private file system (OPFS):
 
-* `bs_roformer_sw.safetensors`: the model, downloaded or picked once.
+* `bs_roformer_sw.safetensors`: the model, downloaded or picked once.  The stem worker writes it, and `matmul_kernels`, through a sync access handle, since Safari keeps a swap file of each write stream that closes (TD-103).  The page writes its files through write streams, on the main thread, where no sync access handle exists.
 * `matmul_kernels`: the kernel choice per GPU.
 * `sessions/<id>/`: one per dropped song: the files as dropped (`src/`), its separated stems as 16-bit WAVs (`stems/`), and a small `meta` file.  `sessions/current` names the one shown last; a reload restores it without separating again.
 * `sessions/<id>/mix.f32`: the mix that the worker separates on the storage path (M4).  It holds raw 32-bit little-endian floats, interleaved stereo, with no header, at 44.1 kHz.  When the user presses Separate, the page writes it if the session has no usable one.  It writes 1 MiB blocks through `mix.f32.part`, then moves that file onto `mix.f32`.  Then it adds the line `mix<TAB><frames><TAB>f32le-1` to `meta`.  The page uses the file only when `meta` has this line with the song's frames, and the file holds 8 bytes for each frame.  The worker reads the file one chunk at a time with `FileReaderSync`.  After the last chunk, it checks that the file's size and `lastModified` did not change (TD-55).  When the worker sends `unstored`, the page removes the line and the file, so the next start writes them again.  The worker sends `unstored` also when it cannot read the file.
