@@ -426,6 +426,22 @@ async fn write_block(
     }
 }
 
+/// Ends the block-written file `within/rel` in the write worker: with
+/// `Some` of its size, the worker checks that the file holds those bytes
+/// (a lost block fails); with `None`, an abandoned write, it removes the
+/// file.
+async fn write_end(within: &str, rel: &str, size: Option<u64>) -> Result<Outcome, String> {
+    let request = WriteRequest::End {
+        within: within.into(),
+        rel: rel.into(),
+        size,
+    };
+    crate::writer::client()
+        .write(&request)
+        .await
+        .map(|(outcome, _)| outcome)
+}
+
 /// The bytes of the stored file at `path`, read in blocks
 /// (`picker::read_blob`).  So each read asks JavaScript for never more
 /// than one block of 1 MiB.  `None` if it cannot be read.
@@ -570,8 +586,22 @@ async fn write_mix_now(id: &str, input: &dyn engine::mixdown::Pcm) -> Result<()>
         return Err(anyhow!("browser storage could not remove the old mix"));
     }
     let part = format!("{MIX_FILE}.part");
-    if let Err(e) = put_mix_blocks(&base, &part, input).await {
+    // An abandoned write: the worker removes the file, and so does the
+    // page, which finds nothing to remove when the worker did.
+    let abandon = || async {
+        let _ = write_end(&base, &part, None).await;
         st_remove(&format!("{base}/{part}")).await;
+    };
+    if let Err(e) = put_mix_blocks(&base, &part, input).await {
+        abandon().await;
+        return Err(e);
+    }
+    if let Err(e) = routed(
+        &base,
+        &part,
+        write_end(&base, &part, Some(8 * input.frames() as u64)).await,
+    ) {
+        abandon().await;
         return Err(e);
     }
     if !move_file(&base, &part, MIX_FILE).await {
@@ -2000,21 +2030,40 @@ pub async fn save_put(
     (put, back)
 }
 
-/// Ends the save `w` of the file at `path`, which keeps what it wrote.
-/// Once [`close`] has run, it drops the file instead and gives why.
+/// Ends the save `w` of the file at `path`, which keeps what it wrote: the
+/// write worker checks that the file holds every block.  Once [`close`]
+/// has run, or when the check fails, it drops the file instead and gives
+/// why.
 #[cfg_attr(mutants, mutants::skip)]
 pub async fn save_close(w: &SaveStream, path: &str) -> Result<(), String> {
     if CLOSED.get() {
         save_abort(w, path).await;
         return Err(RESETTING.into());
     }
+    let ended = write_end("", &w.path, Some(w.at.get())).await;
+    let result = match ended {
+        Ok(Outcome::Written) => Ok(()),
+        Ok(Outcome::Gone) => Err("gone".to_string()),
+        Ok(Outcome::Failed(error)) | Err(error) => Err(error),
+    };
+    let result = match result {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = write_end("", &w.path, None).await;
+            st_remove(path).await;
+            Err(format!("browser storage could not finish {path} ({error})"))
+        }
+    };
     WRITES.set(WRITES.get() - 1);
-    Ok(())
+    result
 }
 
 /// Ends the save `w` with nothing kept, and removes the file at `path`.
 #[cfg_attr(mutants, mutants::skip)]
-pub async fn save_abort(_w: &SaveStream, path: &str) {
+pub async fn save_abort(w: &SaveStream, path: &str) {
+    // The worker removes the file of an abandoned write; the page's
+    // removal then finds nothing, which is no error.
+    let _ = write_end("", &w.path, None).await;
     st_remove(path).await;
     WRITES.set(WRITES.get() - 1);
 }

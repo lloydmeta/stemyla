@@ -1568,7 +1568,7 @@ fn array_of_request(request: &WriteRequest) -> Option<Uint8Array> {
             ..
         }
         | WriteRequest::Block { bytes, .. } => Some(bytes.clone()),
-        WriteRequest::File { .. } => None,
+        WriteRequest::File { .. } | WriteRequest::End { .. } => None,
     }
 }
 
@@ -1588,6 +1588,7 @@ fn request_text(request: &WriteRequest) -> String {
             at,
             bytes,
         } => format!("block {within:?} {rel:?} at {at} {:?}", bytes.to_vec()),
+        WriteRequest::End { within, rel, size } => format!("end {within:?} {rel:?} {size:?}"),
     }
 }
 
@@ -1625,6 +1626,16 @@ fn write_requests() -> Vec<WriteRequest> {
             rel: "saves/1-1.wav".into(),
             at: 0,
             bytes: numbered(44),
+        },
+        WriteRequest::End {
+            within: "sessions/1792640000000".into(),
+            rel: "mix.f32.part".into(),
+            size: Some(84_672_000),
+        },
+        WriteRequest::End {
+            within: String::new(),
+            rel: "saves/1-1.wav".into(),
+            size: None,
         },
     ]
 }
@@ -1699,6 +1710,10 @@ fn a_write_message_with_a_missing_or_wrong_field_is_refused() {
         r#"{"type": "write-block", "within": "", "rel": "a", "at": -1}"#,
         r#"{"type": "write-block", "within": "", "rel": "a", "at": 1.5}"#,
         r#"{"type": "write-block", "within": "", "rel": "a", "at": 0}"#,
+        r#"{"type": "write-end", "within": "", "rel": "a"}"#,
+        r#"{"type": "write-end", "within": "", "rel": "a", "size": -1}"#,
+        r#"{"type": "write-end", "within": "", "rel": "a", "size": "8"}"#,
+        r#"{"type": "write-end", "rel": "a", "size": 8}"#,
     ];
     for text in requests {
         let msg = from_json(text);

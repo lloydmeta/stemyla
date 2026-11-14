@@ -3,9 +3,11 @@
 //! build.  It sends `write-ready`, takes each request through a
 //! structured clone with its transfers, as `postMessage` does, and serves
 //! it with write streams, as the page wrote before the write worker: a
-//! whole file with `st_write`, and a block with a stream that keeps the
-//! file's bytes after a first block.  It replies the same way, with a
-//! block's array given back.  So the app's tests, their spies and their
+//! whole file with `st_write`, and the blocks of a file through one stream,
+//! which its block at 0 opens and its `write-end` closes (or aborts, for an
+//! abandoned write).  So each file leaves one swap file of its size in
+//! Safari (TD-103).  It replies as the worker does, with a block's array
+//! given back, and a size check at a `write-end`.  So the app's tests, their spies and their
 //! refusals of write streams keep their meaning.  It is compiled only with
 //! `cfg(test)` or the `fake-writer` feature.
 
@@ -41,24 +43,69 @@ export function fake_new(serve, ready, ready_transfer) {
   setTimeout(() => deliver(ready, ready_transfer), 0);
   return port;
 }
-// Writes `bytes` at `at` of `within/rel` through a write stream that
-// keeps the file's bytes when `at` is not 0: "written", "gone", or the
-// name of the error.
+// The open write stream of each block-written file, by its path: one
+// stream for each file, from its block at 0 to its `write-end`, so a test
+// run leaves one swap file of the file's size in Safari (TD-103).
+const streams = new Map();
+// The folder of `within/rel` and the file's name; null when the folder
+// `within` is gone.
+async function place(within, rel) {
+  let base;
+  try { base = await dir(within, false); }
+  catch (e) { if (within && e.name === "NotFoundError") return null; throw e; }
+  const [d, n] = split("/" + rel);
+  return [await dir(d, true, base), n];
+}
+async function drop(key) {
+  const w = streams.get(key);
+  streams.delete(key);
+  if (w) try { await w.abort(); } catch (_) {}
+}
+// Writes `bytes` at `at` of `within/rel` through the file's write stream,
+// which a block at 0 opens: "written", "gone", or the name of the error.
 export async function fake_block(within, rel, at, bytes) {
-  let w;
+  const key = within + "/" + rel;
   try {
-    let base;
-    try { base = await dir(within, false); }
-    catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
-    const [d, n] = split("/" + rel);
-    const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
-    w = await fh.createWritable({ keepExistingData: at > 0 });
+    const found = await place(within, rel);
+    if (!found) return "gone";
+    const [d, n] = found;
+    if (at === 0) {
+      await drop(key);
+      streams.set(key, await (await d.getFileHandle(n, { create: true })).createWritable());
+    } else if (!streams.has(key)) {
+      // A block after a refused or a lost first block: one stream that
+      // keeps the file's bytes.
+      streams.set(key, await (await d.getFileHandle(n, { create: true })).createWritable({ keepExistingData: true }));
+    }
+    const w = streams.get(key);
     await w.seek(at);
     await w.write(bytes);
-    await w.close();
     return "written";
   } catch (e) {
-    if (w) try { await w.abort(); } catch (_) {}
+    await drop(key);
+    return (e && e.name) || "Error";
+  }
+}
+// Ends `within/rel`: closes its stream and checks the file's size, or, for
+// an abandoned write (`size` null), aborts the stream and removes the file.
+export async function fake_end(within, rel, size) {
+  const key = within + "/" + rel;
+  try {
+    const found = await place(within, rel);
+    if (!found) { await drop(key); return "gone"; }
+    const [d, n] = found;
+    if (size === null) {
+      await drop(key);
+      try { await d.removeEntry(n); } catch (e) { if (e.name !== "NotFoundError") throw e; }
+      return "written";
+    }
+    const w = streams.get(key);
+    streams.delete(key);
+    if (w) await w.close();
+    const held = (await (await d.getFileHandle(n)).getFile()).size;
+    return held === size ? "written" : `the file holds ${held} of ${size} bytes`;
+  } catch (e) {
+    await drop(key);
     return (e && e.name) || "Error";
   }
 }
@@ -66,6 +113,7 @@ export async function fake_block(within, rel, at, bytes) {
 extern "C" {
     fn fake_new(serve: &js_sys::Function, ready: &Object, ready_transfer: &Array) -> JsValue;
     async fn fake_block(within: &str, rel: &str, at: f64, bytes: &Uint8Array) -> JsValue;
+    async fn fake_end(within: &str, rel: &str, size: &JsValue) -> JsValue;
 }
 
 /// A new fake port.
@@ -116,6 +164,13 @@ async fn serve(data: JsValue) -> JsValue {
             outcome: outcome(&fake_block(&within, &rel, at as f64, &bytes).await),
             bytes: Some(bytes),
         },
+        Ok(WriteRequest::End { within, rel, size }) => {
+            let size = size.map_or(JsValue::NULL, |n| JsValue::from(n as f64));
+            WriteReply::Done {
+                outcome: outcome(&fake_end(&within, &rel, &size).await),
+                bytes: None,
+            }
+        }
     };
     let (msg, transfer) = reply.to_js();
     Array::of2(&msg, &transfer).into()

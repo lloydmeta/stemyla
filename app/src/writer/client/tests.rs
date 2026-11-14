@@ -17,6 +17,22 @@ export function writer_spy_on_post(port) {
   port.postMessage = (data, transfer) => posts.push(data);
   return posts;
 }
+// Counts the calls of `createWritable` until `writer_writables_stop`.
+let writables = null;
+let real_writable = null;
+export function writer_writables_start() {
+  const proto = FileSystemFileHandle.prototype;
+  real_writable = proto.createWritable;
+  writables = 0;
+  proto.createWritable = function (...args) {
+    writables++;
+    return real_writable.apply(this, args);
+  };
+}
+export function writer_writables_stop() {
+  FileSystemFileHandle.prototype.createWritable = real_writable;
+  return writables;
+}
 export function writer_deliver(port, data) {
   port.dispatchEvent(new MessageEvent("message", { data }));
 }
@@ -24,6 +40,8 @@ export function writer_deliver(port, data) {
 extern "C" {
     fn writer_spy_on_post(port: &JsValue) -> js_sys::Array;
     fn writer_deliver(port: &JsValue, data: &JsValue);
+    fn writer_writables_start();
+    fn writer_writables_stop() -> u32;
 }
 
 const FOLDER: &str = "writer-tests";
@@ -92,6 +110,8 @@ async fn a_posted_array_is_transferred_and_a_block_gives_it_back_whole() {
     };
     let ended = client.write(&request).await;
     let after_post = array.byte_length();
+    // The fake holds a file's bytes in its write stream until the end.
+    let end = client.write(&end("save.wav", Some(2 << 20))).await;
     let back = match &ended {
         Ok((_, Some(back))) => back.byte_length(),
         _ => 0,
@@ -105,6 +125,7 @@ async fn a_posted_array_is_transferred_and_a_block_gives_it_back_whole() {
         matches!(&ended, Ok((Outcome::Written, Some(b))) if b.to_vec() == bytes),
         "the same bytes come back"
     );
+    assert_eq!(end.map(|(o, _)| o), Ok(Outcome::Written), "the end");
     assert!(stored == Some(bytes), "the block is in the file");
 }
 
@@ -129,6 +150,7 @@ async fn the_fake_serves_files_and_blocks_in_order() {
         client.write(&whole),
         client.write(&block("mix.f32.part", 0, b"lloyd")),
         client.write(&block("mix.f32.part", 5, b"acme")),
+        client.write(&end("mix.f32.part", Some(9))),
         client.write(&gone),
     ];
     let mut outcomes = Vec::new();
@@ -142,6 +164,7 @@ async fn the_fake_serves_files_and_blocks_in_order() {
     assert_eq!(
         outcomes,
         [
+            Ok(Outcome::Written),
             Ok(Outcome::Written),
             Ok(Outcome::Written),
             Ok(Outcome::Written),
@@ -192,4 +215,78 @@ async fn a_reply_that_cannot_be_read_fails_each_request() {
         "{:?}",
         first.map(|(o, _)| o)
     );
+}
+
+fn end(rel: &str, size: Option<u64>) -> WriteRequest {
+    WriteRequest::End {
+        within: String::new(),
+        rel: format!("{FOLDER}/{rel}"),
+        size,
+    }
+}
+
+/// The ends of `requests`, each sent through the fake's client in order.
+async fn through_the_fake(requests: &[WriteRequest]) -> Vec<Result<Outcome, String>> {
+    let client = WriteClient::new(|| Ok(super::super::fake::port()));
+    let ends: Vec<_> = requests.iter().map(|r| client.write(r)).collect();
+    let mut outcomes = Vec::new();
+    for end in ends {
+        outcomes.push(end.await.map(|(outcome, _)| outcome));
+    }
+    client.stopped("the test ended");
+    outcomes
+}
+
+/// A `write-end` whose file lost a block fails through the client, as the
+/// worker does; the whole file ends `written`.
+#[wasm_bindgen_test]
+async fn a_lost_block_makes_the_end_fail_through_the_client() {
+    store::test_remove(FOLDER).await;
+    let got = through_the_fake(&[
+        block("a.wav", 0, b"lloyd"),
+        block("a.wav", 5, b"acme"),
+        end("a.wav", Some(9)),
+        block("b.wav", 0, b"lloyd"),
+        end("b.wav", Some(9)),
+    ])
+    .await;
+    store::test_remove(FOLDER).await;
+    assert_eq!(got[2], Ok(Outcome::Written), "the whole file");
+    assert_eq!(
+        got[4],
+        Ok(Outcome::Failed("the file holds 5 of 9 bytes".into())),
+        "a lost block"
+    );
+}
+
+/// An abandoned block write leaves no partial file.
+#[wasm_bindgen_test]
+async fn an_abandoned_block_write_leaves_no_partial_file() {
+    store::test_remove(FOLDER).await;
+    let got = through_the_fake(&[block("c.wav", 0, b"lloyd"), end("c.wav", None)]).await;
+    let left = store::test_read(&format!("{FOLDER}/c.wav")).await;
+    store::test_remove(FOLDER).await;
+    assert_eq!(got[1], Ok(Outcome::Written));
+    assert_eq!(left, None, "no partial file");
+}
+
+/// TD-103: the fake opens one write stream for each block-written file,
+/// not one for each block, so a test run leaves one swap file of its size.
+#[wasm_bindgen_test]
+async fn the_fake_opens_one_write_stream_for_each_block_written_file() {
+    store::test_remove(FOLDER).await;
+    writer_writables_start();
+    let got = through_the_fake(&[
+        block("d.wav", 0, b"ll"),
+        block("d.wav", 2, b"oy"),
+        block("d.wav", 4, b"d"),
+        end("d.wav", Some(5)),
+    ])
+    .await;
+    let opened = writer_writables_stop();
+    let file = store::test_read(&format!("{FOLDER}/d.wav")).await;
+    store::test_remove(FOLDER).await;
+    assert_eq!(got.last(), Some(&Ok(Outcome::Written)));
+    assert_eq!(opened, 1, "one write stream for the file");
+    assert_eq!(file.as_deref(), Some(&b"lloyd"[..]));
 }

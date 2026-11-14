@@ -15,6 +15,10 @@
 //! * `{type: "write-block", within, rel, at, bytes}`: write `bytes`, a
 //!   `Uint8Array` (transferred), at byte `at` of the file.  With `at` 0,
 //!   the worker first cuts the file to 0 bytes.
+//! * `{type: "write-end", within, rel, size}`: the blocks of the file are
+//!   all sent.  `size` is the bytes that the file must hold: the worker
+//!   replies `failed` if it holds other bytes, as when a block is lost.
+//!   `size: null` ends an abandoned write: the worker removes the file.
 //!
 //! The replies ([`WriteReply`], write worker to page):
 //! * `{type: "write-ready"}` once the worker listens.
@@ -22,7 +26,8 @@
 //!   the oldest one not yet ended is done.  `result` is `"written"`,
 //!   `"gone"` (the folder `within` is gone) or `"failed"`, with the name of
 //!   the error in `error`.  A `write-block` reply gives its `bytes` back
-//!   (transferred), so the page can use the array again.
+//!   (transferred), so the page can use the array again.  A `write-end`
+//!   has this reply too: each request has one kind of reply.
 //!
 //! The worker ends each request with exactly one `write-done`, in the
 //! order sent.  A missing or wrong field is an error, never a default
@@ -39,6 +44,7 @@ use crate::{Malformed, get, kind_of, set, typed};
 pub mod kind {
     pub const FILE: &str = "write-file";
     pub const BLOCK: &str = "write-block";
+    pub const END: &str = "write-end";
     pub const READY: &str = "write-ready";
     pub const DONE: &str = "write-done";
 }
@@ -49,6 +55,7 @@ mod field {
     pub const REL: &str = "rel";
     pub const BODY: &str = "body";
     pub const AT: &str = "at";
+    pub const SIZE: &str = "size";
     pub const BYTES: &str = "bytes";
     pub const RESULT: &str = "result";
     pub const ERROR: &str = "error";
@@ -86,6 +93,14 @@ pub enum WriteRequest {
         at: u64,
         bytes: Uint8Array,
     },
+    /// The end of a block-written file `within/rel`: `Some` of the bytes
+    /// that it must hold, or `None` for an abandoned write, whose file the
+    /// worker removes.
+    End {
+        within: String,
+        rel: String,
+        size: Option<u64>,
+    },
 }
 
 /// How a request ended.
@@ -114,6 +129,7 @@ impl WriteRequest {
         match self {
             Self::File { .. } => kind::FILE,
             Self::Block { .. } => kind::BLOCK,
+            Self::End { .. } => kind::END,
         }
     }
 
@@ -145,6 +161,12 @@ impl WriteRequest {
                 set(&o, field::AT, *at as f64);
                 set(&o, field::BYTES, bytes);
                 transfer.push(&bytes.buffer());
+            }
+            Self::End { within, rel, size } => {
+                set(&o, field::WITHIN, within.as_str());
+                set(&o, field::REL, rel.as_str());
+                let size = size.map_or(JsValue::NULL, |n| JsValue::from(n as f64));
+                set(&o, field::SIZE, size);
             }
         }
         (o, transfer)
@@ -183,6 +205,20 @@ impl WriteRequest {
                 at: whole(msg, field::AT, MAX_SAFE).map_err(bad)? as u64,
                 bytes: bytes_field(msg, field::BYTES).map_err(bad)?,
             }),
+            kind::END => {
+                // `null` ends an abandoned write; a missing size is an
+                // error, never a default (TD-16).
+                let size = if get(msg, field::SIZE).is_null() {
+                    None
+                } else {
+                    Some(whole(msg, field::SIZE, MAX_SAFE).map_err(bad)? as u64)
+                };
+                Ok(Self::End {
+                    within: within()?,
+                    rel: rel()?,
+                    size,
+                })
+            }
             other => Err(bad(format!("not a request of the write worker: {other:?}"))),
         }
     }

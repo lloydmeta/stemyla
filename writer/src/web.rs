@@ -81,6 +81,26 @@ export async function write_whole(within, rel, body) {
 export async function write_block(within, rel, at, bytes) {
   return with_handle(within, rel, at === 0, (h) => put(h, bytes, at));
 }
+export async function write_end(within, rel, size) {
+  try {
+    let base;
+    try { base = await folder(within, false); }
+    catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
+    const [d, n] = split("/" + rel);
+    let dir;
+    try { dir = await folder(d, false, base); }
+    catch (e) { if (size === null && e.name === "NotFoundError") return "written"; throw e; }
+    if (size === null) {
+      try { await dir.removeEntry(n); }
+      catch (e) { if (e.name !== "NotFoundError") throw e; }
+      return "written";
+    }
+    const held = (await (await dir.getFileHandle(n)).getFile()).size;
+    return held === size ? "written" : `the file holds ${held} of ${size} bytes`;
+  } catch (e) {
+    return (e && e.name) || "Error";
+  }
+}
 "#)]
 extern "C" {
     /// Writes the whole file `within/rel` from `body`, a `Blob` or a typed
@@ -90,6 +110,11 @@ extern "C" {
     /// Writes `bytes` at byte `at` of the file `within/rel`, which is cut
     /// to 0 bytes first when `at` is 0: as [`write_whole`] answers.
     async fn write_block(within: &str, rel: &str, at: f64, bytes: &Uint8Array) -> JsValue;
+    /// Ends a block-written file `within/rel`: with a `size`, "written"
+    /// if the file holds `size` bytes, else the error; with `null`, it
+    /// removes the file (an abandoned write).  "gone" when the folder
+    /// `within` is gone.
+    async fn write_end(within: &str, rel: &str, size: &JsValue) -> JsValue;
 }
 
 thread_local! {
@@ -182,6 +207,13 @@ async fn handle(msg: &JsValue) -> WriteReply {
             outcome: outcome(&write_block(&within, &rel, at as f64, &bytes).await),
             bytes: Some(bytes),
         },
+        Ok(WriteRequest::End { within, rel, size }) => {
+            let size = size.map_or(JsValue::NULL, |n| JsValue::from(n as f64));
+            WriteReply::Done {
+                outcome: outcome(&write_end(&within, &rel, &size).await),
+                bytes: None,
+            }
+        }
     }
 }
 

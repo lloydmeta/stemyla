@@ -102,6 +102,7 @@ fn requests(port: &JsValue) -> Vec<String> {
             }) => {
                 format!("block {within}/{rel} at {at}")
             }
+            Ok(WriteRequest::End { within, rel, size }) => format!("end {within}/{rel} {size:?}"),
             Err(bad) => format!("unread {}", bad.text),
         })
         .collect()

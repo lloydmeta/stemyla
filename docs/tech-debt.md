@@ -764,11 +764,11 @@ What still leaks after M5.1 Step 5c, in a user's Safari:
 What leaks in test runs only:
 
 * The test helpers that plant files through `createWritable` (`plant` and `plant_at` in `worker/src/web/tests.rs` and `decoder/src/web/tests.rs`, `store_plant_tone` and `store_plant_wav` in `app/src/store.rs`, the scripts of `xtask/src/e2e.rs`, `xtask/src/e2e/` and `xtask/e2e/worker.js`).  `e2e save` plants a session of 1 minute and one of 10 minutes (`old_session`'s plant): 349.3 MB.
-* The page-side fake of the write worker (`fake-writer`), which the app's browser tests use: it writes each block through a new write stream that keeps the file's bytes, so each block leaves a swap file of the whole file so far.  A whole Safari `web-test` left 1,556 swap files, 8,898.9 MB, after Step 5c (1,316 files, 1,697.2 MB before).
+* The page-side fake of the write worker (`fake-writer`), which the app's browser tests use: it writes each block-written file through one write stream, from its block at 0 to its `write-end`, so each file leaves one swap file of its size.  After Step 5c and before `write-end`, it opened a stream for each block, and a whole Safari `web-test` left 1,556 swap files, 8,898.9 MB (1,316 files, 1,697.2 MB before Step 5c).
 * One empty `BlobRegistryFiles-*` folder for each WebDriver session.  It holds no bytes.
 
 * `xtask` does not remove these files: the person's own Safari writes in the same folder, so `xtask` cannot tell its own files.  Each Safari `e2e` and `web-test` run prints one line with the swap files and blob folders that it left (`watch_safari_data` in `xtask/src/drivers.rs`).  A person removes them by hand (`references/local-browser-testing.md`).
-* Fix: WebKit removes the swap file at `close()`.  For the test runs, a fake write worker that writes with fewer swap files, or a person who deletes the files after a run (`references/local-browser-testing.md`).
+* Fix: WebKit removes the swap file at `close()`.  Until then, the page's small files and the test runs' writes leak; a person deletes the files after a run (`references/local-browser-testing.md`).  Since `write-end` (M5.1), the fake leaves one swap file for each file that it writes in blocks, as the page did before M5.1.
 
 ## Legibility for agents
 

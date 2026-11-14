@@ -361,6 +361,58 @@ async fn a_request_that_cannot_be_read_ends_with_a_failure() {
     );
 }
 
+fn end(within: &str, rel: &str, size: Option<u64>) -> WriteRequest {
+    WriteRequest::End {
+        within: within.into(),
+        rel: rel.into(),
+        size,
+    }
+}
+
+/// A `write-end` with the file's size ends it; one whose block was lost
+/// fails, with the bytes that the file holds.
+#[wasm_bindgen_test]
+async fn a_lost_block_makes_the_end_fail() {
+    fresh().await;
+    let replies = run(vec![
+        block("", "saves/3-1.wav", 0, b"lloyd"),
+        block("", "saves/3-1.wav", 5, b"acme"),
+        end("", "saves/3-1.wav", Some(9)),
+        block("", "saves/3-2.wav", 0, b"lloyd"),
+        end("", "saves/3-2.wav", Some(9)),
+    ])
+    .await;
+    let ends: Vec<&Outcome> = replies.iter().map(|(o, _)| o).collect();
+    assert_eq!(ends[2], &Outcome::Written, "the whole file");
+    assert_eq!(
+        ends[4],
+        &Outcome::Failed("the file holds 5 of 9 bytes".into()),
+        "a lost block"
+    );
+}
+
+/// A `write-end` with no size ends an abandoned write: the partial file
+/// is gone.  In a gone folder it is `gone`.
+#[wasm_bindgen_test]
+async fn an_abandoned_write_leaves_no_partial_file() {
+    fresh().await;
+    make_folder("sessions/4").await;
+    let replies = run(vec![
+        block("sessions/4", "mix.f32.part", 0, b"lloyd"),
+        end("sessions/4", "mix.f32.part", None),
+        end("sessions/9", "mix.f32.part", None),
+    ])
+    .await;
+    assert_eq!(replies[1].0, Outcome::Written);
+    assert_eq!(replies[2].0, Outcome::Gone);
+    assert_eq!(
+        read_at("sessions/4/mix.f32.part").await,
+        None,
+        "no partial file"
+    );
+    assert!(!exists("sessions/9").await, "no folder made");
+}
+
 /// MEM-1: proves each path in this crate's `clippy.toml` (see the
 /// `#[expect]`s).
 #[wasm_bindgen_test]
