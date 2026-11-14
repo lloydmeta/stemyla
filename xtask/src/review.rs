@@ -1166,8 +1166,8 @@ pub struct Known {
     pub offset: usize,
 }
 
-/// The known-missed list: the missed mutants of TD-39 and TD-66 that review
-/// rounds sent to tech debt.  `cargo mutants --list` still
+/// The known-missed list: the missed mutants of TD-8, TD-39, TD-66 and
+/// TD-102 that review rounds sent to tech debt.  `cargo mutants --list` still
 /// shows each.  Each comment names the round's log and finding.
 /// `each_known_missed_entry_is_open_and_in_the_code` checks that each TD is
 /// open, and that each code line is once in a function of the mutation's
@@ -1321,6 +1321,151 @@ pub const KNOWN_MISSED: &[Known] = &[
         file: "xtask/src/e2e.rs",
         mutation: "replace load_and_separate -> Result<usize> with Ok(1)",
         code: "let from = p.mark();",
+        offset: 1,
+    },
+    // M5 of `docs/plans/completed/gpu-speed-m5.md`, review round 1: the
+    // network mutants of `transformer` and `split_attention` that no test
+    // without the model and its fixtures sees (TD-8): findings 1-23, 1-29, 1-41, 1-53, 1-60, 1-64, 1-67, 1-68, 1-72.
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "replace * with + in split_attention",
+        code: "r.gate(s.o, s.gates, nb * seq);",
+        offset: 25,
+    },
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "replace * with + in transformer",
+        code: "let x_off = tok0 * DIM;",
+        offset: 18,
+    },
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "replace * with / in transformer",
+        code: "let tok0 = first * seq;",
+        offset: 18,
+    },
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "replace * with + in split_attention",
+        code: "off: 2 * INNER,",
+        offset: 8,
+    },
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "replace * with / in transformer",
+        code: "let x_off = tok0 * DIM;",
+        offset: 18,
+    },
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "replace * with / in split_attention",
+        code: "r.gate(s.o, s.gates, nb * seq);",
+        offset: 25,
+    },
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "replace * with / in split_attention",
+        code: "let row = 3 * INNER;",
+        offset: 13,
+    },
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "replace * with + in transformer",
+        code: "let tok0 = first * seq;",
+        offset: 18,
+    },
+    Known {
+        debt: "TD-8",
+        file: "roformer-gpu/src/net.rs",
+        mutation: "delete - in transformer",
+        code: "let alpha = (DIM_HEAD as f32).powf(-0.5);",
+        offset: 36,
+    },
+    // M5 of `docs/plans/completed/gpu-speed-m5.md`, review round 1: the
+    // calibration mutants that no test reads (TD-102): findings 1-18, 1-19, 1-27, 1-30, 1-33, 1-51, 1-57, 1-61, 1-63, 1-65, 1-79.
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace measure_attention with ()",
+        code: "let t = attention_per_chunk(gpu, warm, round, rounds, true, &now).await;",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace fused_attention with ()",
+        code: "r.attention(kernel, &b.qkv, Some(&b.gates), &b.o, seq, nseq, 0.125);",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace time_one -> f64 with 1.0",
+        code: "let mm = matmul(s, b, tile, format);",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace == with != in calibrate",
+        code: "if rd == 1 {",
+        offset: 7,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace time_one -> f64 with -1.0",
+        code: "let mm = matmul(s, b, tile, format);",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace += with -= in calibrate",
+        code: "total += time_one(gpu, b, s, k, format, w, round, now).await",
+        offset: 7,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace * with + in calibrate",
+        code: "* s.per_chunk as f64;",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace time_one -> f64 with 0.0",
+        code: "let mm = matmul(s, b, tile, format);",
+        offset: 1,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace += with *= in calibrate",
+        code: "total += time_one(gpu, b, s, k, format, w, round, now).await",
+        offset: 7,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace == with != in calibrate",
+        code: "let w = if rd == 0 { warm } else { 0.0 };",
+        offset: 15,
+    },
+    Known {
+        debt: "TD-102",
+        file: "roformer-gpu/src/bench.rs",
+        mutation: "replace * with / in calibrate",
+        code: "* s.per_chunk as f64;",
         offset: 1,
     },
 ];

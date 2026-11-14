@@ -392,6 +392,12 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Docs: 3-2 (TD-8 and TD-102: a known gap; `check --tier push` and GPU-2's command set `gpu,f16`, and `timestamps` makes a skip of these tests fail), 3-3 (six `timestamp-query` tests), 3-4 (`xtask/src/e2e.rs`), 3-5 (`attention_label`, ARCHITECTURE.md).
   * `STEMYLA_REQUIRE=gpu,f16,timestamps cargo test -p roformer-gpu --release`, `cargo test -p xtask` and `check --tier commit` pass.
 * [x] Review round 4 fixes (2026-11-14): 4-1, a doc fix.  TD-102 and TD-8 now say that the timestamps tests run on an adapter with `timestamp-query`, and that `timestamps` in `STEMYLA_REQUIRE` makes a skip of them fail; item 3-2 above says the same.  The 4 nits of round 4 are reported, not fixed (late rule).
+* [x] Review round 1 (2026-11-14, `/review-rounds b7f980f`): 5 should-fix (all confirmed, 4 significant), 11 nits, and 63 missed mutants (10 confirmed, 52 pre-existing, 1 refuted).  Fixed in `eadebd9`, with the parent and rule diffs.  21 network mutants went to TD-8, and 11 calibration mutants to the new TD-102.
+* [x] Review round 2 (2026-11-14): 5 should-fix (all confirmed, 3 significant) and 5 nits; no missed mutant.  Fixed in `426d206`.
+* [x] Review round 3 (2026-11-14): 2 should-fix (both confirmed; 3-1 on VERIFY-1, 3-2 significant) and 5 nits; no missed mutant.  Fixed in `25a8af8`.
+* [x] Review round 4 (2026-11-14, late rule): 1 should-fix (4-1, confirmed, significant: TD-102 and TD-8 said that `timestamps` runs the tests).  Fixed in `4b96f06`.  4 nits reported, not fixed.
+* [x] Review round 5 (2026-11-14): 4 nits, reported, not fixed (2 of them repeat 4-2 and 4-3); no mutant in the diff.  No fix, so it is the last round by decision 0024.  The log is `docs/reviews/gpu-speed-2026-11-12-m5.md`.
+* [x] Close-out (2026-11-14): the `KNOWN_MISSED` entries of TD-8 (9) and TD-102 (11) in `xtask/src/review.rs`.  The other 12 network mutants of TD-8 repeat a code line in `split_attention` (`bo: seq * row,`, `bi: seq * seq,`, `bo: HEADS * seq * seq,`), and the check of `KNOWN_MISSED` needs a code line that is once in its function.  So they have no entry; the log rows of round 1 give them `known: TD-8` in a later round.
 
 ## Surprises and discoveries
 
@@ -572,6 +578,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 * 2026-11-14, Step 5, item 8: `e2e stored-stems` did not read `--query`.  Its page script set `mm: 's64', attn: 'split'`, so a run with `--query attn=fused` ran split attention, and gave the same hashes as `attn=freq`.  Now it takes `attn` from `--query` (`stored_stems_attn`), and logs the policy.  With it, `fused` and `freq` give different hashes, and each is the same at the base and the head.
 
+* 2026-11-14, review round 4: a docs reviewer's `git worktree add` failed on a path in use, `target/review/4-reviewer-1`.  The reviewer then changed one line of `attention_vec4.wgsl` in the other reviewer's worktree, and put it back.  That reviewer saw its own mutant undone once, applied it again, and took its results from the runs after that.  `review check 4` printed "no change" (TD-34; as in M1 to M3).
+
 ## Decision log
 
 * 2026-11-13, agent (team leader): Part 1 (the calibration fix) comes before Part 2 (the candidate).  Why: calibration chooses the candidate by the same timing, and a ratio against `freq` does not count until TD-101 is fixed.
@@ -594,4 +602,24 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 ## Outcomes and retrospective
 
-Not yet.
+Done on 2026-11-14, after 5 review rounds (38 agents, 2,771,317 tokens, 103.9 wall minutes, 0 interventions in the rounds).
+
+What M5 did:
+
+* It found why calibration timed `freq` too low: the linear products and other dispatches at M 1,151 in Safari (0.43 s for each chunk), and the 552 extra waits in Chrome (0.32 s).  Calibration now times whole time-transformer steps through the function that `Job::run` uses, with a wait after each step.  The bias went from -0.517 s to -0.010 s in Safari, and from -0.287 s to +0.006 s in Chrome.
+* The maintainer set `FUSED_MARGIN` to 1.0, with 12 rounds of the time axis, so that the choice is stable.  TD-101 is closed by the goal "Each calibration choice is not slower": the check failed first at `ab40862`, and passes at the head.
+* `vfused`, a fused attention with vec4 reads of workgroup memory and 10 KiB of it, lands as a calibration candidate.  Both browsers choose it.  Its in-page ratio is 0.66 to 0.70 against each reference, and the same-session comparison gives a gain of 22.4 % in Chrome and 20.3 % in Safari.  The baselines went from 4.70 s to 3.59 s (Chrome) and from 7.38 s to 5.57 s (Safari).  It gives the tiled kernel's output bit for bit natively.
+* Calibration takes about 33 s on the M2 Pro, against about 15 s before M5; the maintainer accepted it.
+* Tools for M6: `e2e perf --head-query`, the check of the goal in `docs/references/local-browser-testing.md`, and the forced-policy guard of a comparison run.
+
+What M5 did not do:
+
+* It did not find how much of `vfused`'s gain in Safari comes from the vec4 reads and how much from the smaller workgroup memory.  Step 7's predictor gave no effect in Safari, and Safari gained 44 % on attention.
+* 21 network mutants (TD-8) and 11 calibration mutants (TD-102) have no test; their `KNOWN_MISSED` entries cover 20 of them.
+* The nits of rounds 4 and 5 are reported, not fixed: TD-8's wording on `timestamp-query`, a sentence length, and a blank line of Progress.
+
+What to do differently:
+
+* Check that a test reaches the line that it guards, not only a pure function: three rounds each found a runtime check or a source test whose wiring no test saw.
+* Make the identity of a kernel observable in its profile label when two kernels give equal outputs.
+* A predictor from matmul kernels did not predict the attention kernel in Safari; time the candidate itself early.

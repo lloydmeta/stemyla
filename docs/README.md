@@ -18,7 +18,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
 * `plans/active/gpu-speed.md`: faster separation on Apple GPUs, in Safari first, with no loss on other GPUs.  A perf gate, and `memory-budget` at the default chunk.
-* `plans/active/gpu-speed-m5.md`: M5 of `plans/active/gpu-speed.md`: calibration times the time axis as the separation runs it, then a fused attention with vec4 reads as a calibration candidate.
+* `plans/completed/gpu-speed-m5.md`: M5 of `plans/active/gpu-speed.md`, done on 2026-11-14: calibration times whole time-transformer steps (`FUSED_MARGIN` 1.0), and `vfused`, a fused attention with vec4 reads that both browsers choose: a separation 20 % to 22 % faster.
 * `plans/completed/gpu-speed-m4.md`: M4 of `plans/active/gpu-speed.md`, done on 2026-11-13: `v64k8`, `v64` with a K tile of 8, as a calibration candidate that Safari chooses.  Also the rule for a shown gain, the same-session comparison (`e2e perf --base-dist`) and `--raise` for each raise of a bound.
 * `plans/completed/gpu-speed-m3.md`: M3 of `plans/active/gpu-speed.md`, done on 2026-11-13: why Safari runs the same WGSL slower than Chrome, with WebKit's zero-init of workgroup memory as one cause, and the start points of M4 and M5.
 * `plans/completed/gpu-speed-m2.md`: M2 of `plans/active/gpu-speed.md`, done on 2026-11-12: the scenario `e2e perf`, its baselines on the M2 Pro, and its gate in `check --tier push`.
