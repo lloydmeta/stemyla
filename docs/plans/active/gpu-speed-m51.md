@@ -202,10 +202,10 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 ## Progress
 
 * [x] 2026-11-14: the plan written, at `8b16df7`.
-* [ ] Step 1: each Chrome run removes its own profile.
-* [ ] Step 2: `xtask` reports what a run left.
-* [ ] Step 3: counted runs in Safari.
-* [ ] Step 3a: a cause in the app (only if Step 3 finds one).
+* [x] 2026-11-14: Step 1: each Chrome run removes its own profile (`71e0e5b`).  The 10 new tests failed first on an assert (`m51/step1-fail-first.log`, `m51/step1-fail-first-2.log`).  The counted Chrome runs left 0 new profiles and no run's Chrome folder (Surprises).
+* [x] 2026-11-14: Step 2: `xtask` reports what a run left (`2cb5de4`).  The 4 new tests failed first on an assert (`m51/step2-fail-first.log`, `m51/step2-fail-first-b.log`).  TD-103 records the leak.
+* [x] 2026-11-14: Step 3: counted runs in Safari (Surprises).  WebKit keeps the swap file of each closed write stream; an abort removes it.  The code check found no stream of the app with no `close()` and no `abort()`, and no object URL with no `revokeObjectURL`.  So the cause is in WebKit (case 4).
+* [x] 2026-11-14: Step 3a: not needed.  Step 3 ties no leak to a path of the app.
 * [ ] Step 4: the model saves use a sync access handle.
 * [ ] Step 5: the page's writes (decision point).
 * [ ] Step 6: the record.
@@ -215,11 +215,46 @@ Each step is one or more signed commits.  A session that stops reads Progress an
 
 * 2026-11-14: WebKit's source, at `c526785513`, deletes a write stream's swap file only on an abort.  A `close()` copies the swap file onto the stored file and keeps the swap file (`FileSystemStorageHandle::closeWritable`).  Not yet confirmed by a counted run.
 
+* 2026-11-14, Step 1, the counted Chrome runs (logs in `m51/`, each with `<run>.counts`, `<run>.log` and `<run>.watch`).  `$TMPDIR` held 2 `org.chromium.Chromium.scoped_dir.*` before each run.  Two orphan Chromes of earlier runs (pids 85971 and 86183, parent 1, started about 30 hours before) use them as `--user-data-dir`.  The orchestrator removed the folders, and those Chromes made them again at 14:42.  They are not of this milestone's runs, so they stay; the orchestrator decides.
+
+  | Run | Result | New profiles in `$TMPDIR` | Run's Chrome folder after |
+  | - | - | - | - |
+  | c1 `e2e storage` | passed | 0 (2 to 2) | none |
+  | c2 `e2e weights --weights <f16>` | failed at its end: "part 1: the f32 stems have M3's six hashes" | 0 (2 to 2) | none |
+  | c4 `e2e storage`, `kill -INT` of its `xtask` at about 6 s | ended by the signal (exit 130) | 0 (2 to 2) | kept, as planned |
+  | c3 `e2e smoke --play-x 5000` | failed after its session started: WebDriver "move target out of bounds" | 0 (2 to 2) | its own: none; c4's: kept, since the orphan Chrome of c4 named it |
+  | c5 `web-test --browser chrome` (5 crates) | passed | 0 (2 to 2) | none; at its start it printed "chrome folder: removed /tmp/stemyla-chrome/12977-0, which an ended run left" |
+
+  * c2 failed on the stem hashes of part 1, which Step 1 does not change.  The probable cause: this Mac has only the f16 model, and M3's hashes are of the f32 model.  Not checked on the base commit.  It is also a run that fails after its session starts, after 8 minutes.
+  * After c4's signal, its `chromedriver` (12984) and Chrome (12985) stayed as orphans, and Chrome's `--user-data-dir` named the folder.  The implementer ended those two PIDs, which c4's own `ps` tied to its `xtask`.  A first try of c4 sent SIGINT to a background job of a non-interactive bash, which ignores SIGINT, so that run passed (`m51/c4a-sigint-ignored.*`); the second try used `set -m`.
+  * Chrome reads `MAC_CHROMIUM_TMPDIR`: during each run, the `scoped_dir` profiles were in the run's Chrome folder (22 in c5's watch).  The real socket path was `/tmp/stemyla-chrome/32776-0/com.google.Chrome.GkbIUr/SingletonSocket`, 57 bytes.  The bundle folder has no leading dot.  The longest form in the test (`/tmp/stemyla-chrome/4294967295-4294967295` with Chrome for Testing's folder) gives 95 bytes, under 104.
+  * Chrome also made `com.google.Chrome.chrome_chrome_Unpacker_BeginUnzipping.*` and `com.google.Chrome.chrome_chrome_url_fetcher_.*` folders there.  The removal of the run's folder removes them too.
+* 2026-11-14, Step 3, the counted Safari runs (logs in `m51/`, `s<n>-*.counts`, `.log` and `.watch`).  No Safari ran before s1.  s1's session start launched Safari (pid 14461, parent 1).  It stayed open after each session, and each later run used it.  The implementer did not quit it.  Each `browser data:` line gave the same counts as the manual count.  A count 5 minutes after s1 to s5 gave the same figures as the count at the end: Safari removed nothing while it ran.
+
+  | Run | New swap files | Their bytes | New blob folders | What made the swap files |
+  | - | - | - | - | - |
+  | s1 `web-test` `a_view_is_written_whole` (3 `st_write`, each closed) | 3 | 15 (3 of 5) | 3, empty | each closed stream |
+  | s2 `web-test` `a_dropped_wav_save_leaves_no_file_and_no_stream` | 2 | 10,584,088 (2 of 5,292,044) | 1, empty | the 2 planted stems, closed; the 2 aborted save streams (one dropped at its open, one with a write in flight) left none |
+  | s3 `e2e weights --weights <f16>` (`opfs_write`) | 3 | 349,521,434 | 1, empty | the model, 349,521,256; the kernel choice of `cache_put`, 60 and 118 |
+  | s3b the same run again | 3 | 349,521,430 | 1, empty | the model; the kernel choice, 58 and 116 |
+  | s4 `e2e worker-check --download --weights <f16>` (`download_to_opfs`) | 2 | 349,521,316 | 1, empty | the model, 349,521,256; the kernel choice, 60 |
+  | s5 `e2e storage` | 5 | 4,217 | 1, empty | 4 downloads of 1,000 bytes and the 217-byte non-model of `?model_url=`; the stalled download, aborted, left none |
+  | s6 `e2e smoke` (one song open: 5 dropped 30 s stems) | 8 | 52,920,667 | 1, empty | the 5 source files, 10,584,068 each; 3 small files (125, 13, 189) |
+  | s7 `web-test` `a_wav_save_of_a_stored_song_offers_its_save_file` (one save) | 4 | 21,168,176 (4 of 5,292,044) | 1, empty | the 3 planted stems and the WAV save file |
+
+  * The swap files: each `close()` of a `createWritable` stream keeps one swap file of the bytes written, and an `abort()` keeps none.  s1 to s7 show it for the page (`st_write`, `st_open` and `st_close`), the stem worker (`opfs_write`, `download_to_opfs`, `cache_put`) and the test helpers.  This is what WebKit's source says (Context).  Safari did not remove them in 5 minutes, and the 176 GB of 2026-11-14 shows that they stay longer.  Not checked: whether a quit of Safari removes them.  The implementer did not quit Safari (the orchestrator's rule).
+  * The bytes for each use of the app in Safari: one model save, 349.5 MB (s3, s4); one song open, the bytes of the dropped files (52.9 MB for 5 stems of 30 s, s6); one save, the bytes of the save file (5.3 MB for a 30 s WAV, s7).  A separation also writes the mix (about 85 MB for 4 minutes) and the stems; no run here measured them.
+  * The blob folders: each WebDriver session made one new `BlobRegistryFiles-*` folder at its start, and Safari's launch made 3 (s1).  Each stayed empty, also after s7's object URL of a save file.  So a blob folder comes from a new network session, not from a blob or an object URL of the app.  It holds no bytes, but it stays: the 767 folders of 2026-11-14 are about 767 sessions.  In these runs, only a session start or the launch of Safari made one.
+  * The code check: each `createWritable` of the production code ends with `close()` or `abort()` on each path (`st_write`, `write_file` in `worker/src/web.rs`, `write_mix_now`, `save_open` to `save_close` and `save_abort` with `StoredWav`'s drop, and `app/src/streamtest.rs`).  The test helpers `plant`, `plant_at`, `store_plant_tone` and `store_plant_wav` close, but do not abort on a failed write.  `save_blob` revokes its URL after 60 s, `app/src/streamtest.rs` revokes its worker URL, and each test that calls `blob_url` calls `revoke`.
+
 ## Decision log
 
 * 2026-11-14, agent (team leader): Chrome's temporary files go to a folder that `xtask` makes and removes, through `MAC_CHROMIUM_TMPDIR`, not `--user-data-dir`.  Why: `web-test`'s one capabilities file serves each test binary of a crate run, so one `--user-data-dir` would share browser storage between them.
 * 2026-11-14, agent (team leader), plan review round 1: the folders are in `/tmp/stemyla-chrome/`, not `$TMPDIR`, so the start sweep reads only a folder that `xtask` owns, and the socket path fits.  The `Driver` owns its folder, so a failed session start removes it.  Step 2 reports Safari only.  Step 3 adds an abort test that reaches WebKit and the `--download` path of the model.  Step 3a covers a cause in the app.
 * 2026-11-14, agent (team leader), plan review round 2: `MAC_CHROMIUM_TMPDIR` on macOS only, so cargo and rustc are not affected.  The start sweep keeps a folder that a live process names, and a folder of another user.  The code goes in existing files, with no new module.  The MEM-5 spies of the model writes move to the sync access handle.
+* 2026-11-14, agent (implementer), Step 1: the start sweep reads the current user from `/usr/bin/id -u`, since the standard library gives no user ID and `xtask` has no `libc`.  It reads each process's command line from `ps -A -ww -o pid=,command=` (`drivers::command_lines`), since `drivers::processes()` gives the executable only, and an orphan Chrome names the folder in its arguments.  A process of another user counts as live too, which keeps more.  `/tmp/stemyla-chrome` must be a folder of the current user, not a link, or the run stops with an error that tells the person to remove it.  The folders get mode 700.
+* 2026-11-14, agent (implementer), Step 2: the listing is of `getconf DARWIN_USER_TEMP_DIR`, not `TMPDIR`, since a tool can set `TMPDIR` to another folder, and WebKit uses the user's temporary folder.  The line also gives the growth of the swap files and blob folders that were there before, since a blob folder of a Safari that runs can grow in place.  TD-103 is added in Step 2, since the line names it; Step 6 completes it.
+* 2026-11-14, agent (implementer), Step 3: `e2e weights` has no download path: it reads no `--download` (s3b shows it).  The download path of the model runs in `e2e worker-check --download`, so s4 uses it.  Step 4's acceptance names `e2e weights --download`; it needs `worker-check --download` too, or a `--download` in `weights`.  The abort row uses the existing test `a_dropped_wav_save_leaves_no_file_and_no_stream`: its two save streams reach WebKit's `createWritable`, and one has a write in flight before its abort.  So no new test.  Rows s6 and s7 give the bytes of one song open and one save.
 
 ## Outcomes and retrospective
 
