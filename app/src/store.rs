@@ -41,13 +41,24 @@
 //!   as it separates (the storage path of M3).  After the separation,
 //!   [`keep_stored_stems`] moves it onto its `.wav` file.  A separation
 //!   that stopped can leave one; no reader opens it.
+//! * `sessions/<id>/stems/<stem>.wav.page.part`: a stem of the memory path
+//!   that the write worker writes for [`save_stems`], which then moves it
+//!   onto its `.wav` file.
 //! * `saves/<page>-<n>.wav`, `.flac`, `.m4a` and `.mp3`: save files (D1 and
 //!   D7 of M8).  An ALAC and an AAC save both have the extension `.m4a`.
 //!   The page writes a save's 16-bit WAV here through
 //!   [`save_open`], [`save_put`] and [`save_close`], which count in the
-//!   writes that [`close`] waits for.  [`download_file`] offers a file, and
+//!   writes that [`close`] waits for.  Each block goes through the write
+//!   worker.  [`download_file`] offers a file, and
 //!   removes it after [`OFFERED_MS`].  [`clean_saves`] removes old ones at
 //!   the page's start.
+//!
+//! The song-sized files (the files as dropped, the mix, the stems of the
+//! memory path and the save files) go through the write worker
+//! (`crate::writer`), which writes with sync access handles: Safari keeps
+//! a swap file of each write stream that closes (TD-103).  The small files
+//! (`meta`, `current`) stay on write streams, which replace a file in one
+//! step.
 //!
 //! To open a song, the page saves the chosen files, and the decode worker
 //! decodes them into the session files in blocks (M5).  The page moves the
@@ -86,6 +97,7 @@ use js_sys::{Array, Uint8Array};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use stem_protocol::stem_file;
+use stem_protocol::write::{Body, Outcome, WriteRequest};
 use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen(inline_js = r#"
@@ -170,33 +182,6 @@ export function save_blob(name, blob) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-// A writer of `within/rel`, as `st_write` opens it; else "gone" or the
-// name of the error.
-export async function st_open(within, rel) {
-  try {
-    let base;
-    try { base = await dir(within, false); }
-    catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
-    const [d, n] = split("/" + rel);
-    const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
-    return await fh.createWritable();
-  } catch (e) {
-    console.warn("storage open failed", within, rel, e);
-    return (e && e.name) || "Error";
-  }
-}
-// Writes `bytes` at the writer's position: true, else the error's name.
-export async function st_put(w, bytes) {
-  try { await w.write(whole(bytes)); return true; }
-  catch (e) { console.warn("storage write failed", e); return (e && e.name) || "Error"; }
-}
-export async function st_close(w) {
-  try { await w.close(); return true; }
-  catch (e) { console.warn("storage close failed", e); return (e && e.name) || "Error"; }
-}
-export async function st_abort(w) {
-  try { await w.abort(); } catch (_) {}
-}
 export async function st_size(path) {
   try {
     const [d, n] = split(path);
@@ -256,17 +241,6 @@ extern "C" {
     fn save_file(name: &str, bytes: &Uint8Array, mime: &str);
     fn save_blob(name: &str, blob: &web_sys::Blob);
     async fn st_sleep(ms: u32) -> JsValue;
-    /// A writable stream of `within/rel`, creating the folders in `rel`;
-    /// `within` must exist.  Else "gone" when `within` does not exist, or
-    /// the name of the error.
-    async fn st_open(within: &str, rel: &str) -> JsValue;
-    /// Writes a typed array to the stream `w`: true, else the error's name.
-    async fn st_put(w: &JsValue, bytes: &Uint8Array) -> JsValue;
-    /// Closes the stream `w`, which keeps what it wrote: true, else the
-    /// error's name.
-    async fn st_close(w: &JsValue) -> JsValue;
-    /// Closes the stream `w` and drops what it wrote.
-    async fn st_abort(w: &JsValue);
     /// The bytes in the file at `path`, or null if it cannot be read.
     async fn st_size(path: &str) -> JsValue;
     /// The file at `path` as a `File`, or null if there is none.
@@ -395,6 +369,63 @@ async fn write_within(within: &str, rel: &str, body: &JsValue) -> Result<()> {
     }
 }
 
+/// Writes `body` to `within/rel` through the write worker, on
+/// [`write_within`]'s rules: the folder `within` must still exist, and a
+/// reset waits for the write and refuses a later one.  A song-sized file
+/// goes this way, since Safari keeps a swap file of each write stream that
+/// closes, and the page's main thread has no sync access handle (TD-103).
+async fn write_routed(within: &str, rel: &str, body: Body) -> Result<()> {
+    if CLOSED.get() {
+        return Err(anyhow!(RESETTING));
+    }
+    WRITES.set(WRITES.get() + 1);
+    let request = WriteRequest::File {
+        within: within.into(),
+        rel: rel.into(),
+        body,
+    };
+    let done = crate::writer::client().write(&request).await;
+    WRITES.set(WRITES.get() - 1);
+    routed(within, rel, done.map(|(outcome, _)| outcome))
+}
+
+/// The result of a routed write of `within/rel` from how it ended.
+fn routed(within: &str, rel: &str, done: Result<Outcome, String>) -> Result<()> {
+    match done {
+        Ok(Outcome::Written) => Ok(()),
+        Ok(Outcome::Gone) => Err(anyhow!("{within} is gone (forgotten?)")),
+        Ok(Outcome::Failed(error)) | Err(error) => Err(anyhow!(
+            "browser storage refused {} ({error})",
+            if within.is_empty() {
+                rel.to_string()
+            } else {
+                format!("{within}/{rel}")
+            }
+        )),
+    }
+}
+
+/// Writes `bytes` at byte `at` of `within/rel` through the write worker,
+/// which cuts the file to 0 bytes first when `at` is 0.  It gives how the
+/// write ended, and the array, which the worker gives back.
+async fn write_block(
+    within: &str,
+    rel: &str,
+    at: u64,
+    bytes: &Uint8Array,
+) -> (Result<Outcome, String>, Option<Uint8Array>) {
+    let request = WriteRequest::Block {
+        within: within.into(),
+        rel: rel.into(),
+        at,
+        bytes: bytes.clone(),
+    };
+    match crate::writer::client().write(&request).await {
+        Ok((outcome, back)) => (Ok(outcome), back),
+        Err(error) => (Err(error), None),
+    }
+}
+
 /// The bytes of the stored file at `path`, read in blocks
 /// (`picker::read_blob`).  So each read asks JavaScript for never more
 /// than one block of 1 MiB.  `None` if it cannot be read.
@@ -438,7 +469,12 @@ async fn save_sources_now(base: &str, files: &[(String, web_sys::Blob)], rate: u
             .unwrap_or("bin")
             .to_ascii_lowercase();
         let stored = format!("{i}.{ext}");
-        write_within("", &format!("{base}/src/{stored}"), file).await?;
+        write_routed(
+            "",
+            &format!("{base}/src/{stored}"),
+            Body::Blob(file.clone()),
+        )
+        .await?;
         meta.files.push((name.clone(), stored));
     }
     meta.name = files
@@ -534,26 +570,14 @@ async fn write_mix_now(id: &str, input: &dyn engine::mixdown::Pcm) -> Result<()>
         return Err(anyhow!("browser storage could not remove the old mix"));
     }
     let part = format!("{MIX_FILE}.part");
-    let w = st_open(&base, &part).await;
-    if w.as_string().as_deref() == Some("gone") {
-        return Err(anyhow!("{base} is gone (forgotten?)"));
-    }
-    if let Some(error) = w.as_string() {
-        // The open can make the file before the stream fails.
-        st_remove(&format!("{base}/{part}")).await;
-        return Err(anyhow!("browser storage refused {base}/{part} ({error})"));
-    }
-    if let Err(e) = put_mix_blocks(&w, input).await {
-        st_abort(&w).await;
+    if let Err(e) = put_mix_blocks(&base, &part, input).await {
         st_remove(&format!("{base}/{part}")).await;
         return Err(e);
     }
-    let closed = st_close(&w).await;
-    if closed.as_bool() != Some(true) || !move_file(&base, &part, MIX_FILE).await {
+    if !move_file(&base, &part, MIX_FILE).await {
         st_remove(&format!("{base}/{part}")).await;
         return Err(anyhow!(
-            "browser storage could not finish the mix ({})",
-            closed.as_string().unwrap_or_else(|| "not moved".into())
+            "browser storage could not finish the mix (not moved)"
         ));
     }
     // `meta` again, under its lock: another writer may have changed it
@@ -572,8 +596,9 @@ async fn write_mix_now(id: &str, input: &dyn engine::mixdown::Pcm) -> Result<()>
     Ok(())
 }
 
-/// Writes the mix of `song` to the stream `w`, one block at a time.
-async fn put_mix_blocks(w: &JsValue, input: &dyn engine::mixdown::Pcm) -> Result<()> {
+/// Writes the mix of `input` to `base/part`, one block at a time, through
+/// the write worker.  Each block is a new whole array, transferred.
+async fn put_mix_blocks(base: &str, part: &str, input: &dyn engine::mixdown::Pcm) -> Result<()> {
     let frames = input.frames();
     // A read of at most a block of a lane (D3 of the M7 plan).
     let read = (engine::source::BLOCK_FRAMES as usize).min(frames);
@@ -604,13 +629,10 @@ async fn put_mix_blocks(w: &JsValue, input: &dyn engine::mixdown::Pcm) -> Result
                 "the song could not be read from browser storage ({e})"
             ));
         }
-        let put = st_put(w, &Uint8Array::from(&bytes[..])).await;
-        if put.as_bool() != Some(true) {
-            return Err(anyhow!(
-                "browser storage refused the mix ({})",
-                put.as_string().unwrap_or_default()
-            ));
-        }
+        let block = Uint8Array::from(&bytes[..]);
+        let (put, _) = write_block(base, part, 8 * start as u64, &block).await;
+        // A gone session gives `routed`'s text, and so does a refusal.
+        routed(base, part, put)?;
         start = end;
     }
     Ok(())
@@ -819,13 +841,22 @@ async fn save_stems_now(id: &str, rate: u32, stems: &[Stem]) -> Result<()> {
         meta.new_stems();
         write_bytes(&base, "meta", meta.to_text().as_bytes()).await?;
     }
+    // Each stem goes through `<file>.page.part`, then moves onto its
+    // file: the write worker cuts a file before it writes it, and an old
+    // stem may still be read.
+    let folder = format!("{base}/stems");
     for s in stems {
-        write_bytes(
-            &base,
-            &format!("stems/{}", stem_file(&s.name)),
-            &engine::wav::encode_pcm16(&s.left, &s.right, rate),
-        )
-        .await?;
+        let file = stem_file(&s.name);
+        let part = format!("{file}{PAGE_PART}");
+        let wav = Uint8Array::from(&engine::wav::encode_pcm16(&s.left, &s.right, rate)[..]);
+        write_routed(&base, &format!("stems/{part}"), Body::Bytes(wav)).await?;
+        if !move_file(&folder, &part, &file).await {
+            st_remove(&format!("{folder}/{part}")).await;
+            if CLOSED.get() {
+                return Err(anyhow!(RESETTING));
+            }
+            return Err(anyhow!("browser storage could not keep the stem {file}"));
+        }
     }
     // `meta` again, under its lock: another writer may have changed it
     // while the stems were written.
@@ -1900,6 +1931,11 @@ pub const OFFERED_MS: u32 = 10 * 60 * 1000;
 pub const SAVE_MAX_AGE_MS: f64 = 60.0 * 60.0 * 1000.0;
 const RESETTING: &str = "browser storage is being reset";
 
+/// The suffix of a stem of the memory path while the write worker writes
+/// it ([`save_stems`]).  Not `.part`, which the stem worker's storage path
+/// writes: a second separation can overlap the first one's save.
+const PAGE_PART: &str = ".page.part";
+
 thread_local! {
     /// The saves of this page so far, for their file names.
     static SAVES_MADE: Cell<u64> = const { Cell::new(0) };
@@ -1914,72 +1950,71 @@ pub fn new_save_path() -> String {
     format!("{SAVES}/{}-{n}", st_page_ms() as u64)
 }
 
-/// Opens the save file at `path` (from the root) for writing, and makes
-/// its folder.  The stream counts in the writes that [`close`] waits for,
-/// until [`save_close`] or [`save_abort`] ends it, so a reset waits for
-/// the save (D3 of M8).  A failed open removes the file and gives why.
+/// A save file that the write worker writes, block by block: its path,
+/// and the bytes written so far.
+pub struct SaveStream {
+    path: String,
+    at: Cell<u64>,
+}
+
+/// Starts the save file at `path` (from the root).  The save counts in the
+/// writes that [`close`] waits for, until [`save_close`] or [`save_abort`]
+/// ends it, so a reset waits for the save (D3 of M8).  The first block
+/// makes the file and its folder.
 #[cfg_attr(mutants, mutants::skip)]
-pub async fn save_open(path: &str) -> Result<JsValue, String> {
+pub async fn save_open(path: &str) -> Result<SaveStream, String> {
     if CLOSED.get() {
         return Err(RESETTING.into());
     }
     WRITES.set(WRITES.get() + 1);
-    let w = st_open("", path).await;
-    if let Some(error) = w.as_string() {
-        // The open can make the file before the stream fails.
-        st_remove(path).await;
-        WRITES.set(WRITES.get() - 1);
-        return Err(format!("browser storage refused {path} ({error})"));
-    }
-    Ok(w)
+    Ok(SaveStream {
+        path: path.into(),
+        at: Cell::new(0),
+    })
 }
 
-/// Writes `bytes`, a whole array (MEM-5), to the save stream `w`.  It
-/// refuses once [`close`] has run.
+/// Writes `bytes`, a whole array (MEM-5), after the bytes that the save
+/// `w` wrote, through the write worker, which transfers the array and
+/// gives it back.  It refuses once [`close`] has run.  It gives the array
+/// back, if the worker did.
 #[cfg_attr(mutants, mutants::skip)]
-pub async fn save_put(w: &JsValue, bytes: &Uint8Array) -> Result<(), String> {
+pub async fn save_put(
+    w: &SaveStream,
+    bytes: &Uint8Array,
+) -> (Result<(), String>, Option<Uint8Array>) {
     if CLOSED.get() {
-        return Err(RESETTING.into());
+        return (Err(RESETTING.into()), None);
     }
-    let put = st_put(w, bytes).await;
-    match put.as_bool() {
-        Some(true) => Ok(()),
-        _ => Err(format!(
-            "browser storage refused a write ({})",
-            put.as_string().unwrap_or_else(|| "not available".into())
-        )),
-    }
+    let len = u64::from(bytes.length());
+    let (put, back) = write_block("", &w.path, w.at.get(), bytes).await;
+    let put = match put {
+        Ok(Outcome::Written) => {
+            w.at.set(w.at.get() + len);
+            Ok(())
+        }
+        Ok(Outcome::Gone) => Err("browser storage refused a write (gone)".to_string()),
+        Ok(Outcome::Failed(error)) | Err(error) => {
+            Err(format!("browser storage refused a write ({error})"))
+        }
+    };
+    (put, back)
 }
 
-/// Closes the save stream `w` of the file at `path`, which keeps what it
-/// wrote.  Once [`close`] has run, or when the close fails, it drops the
-/// file instead and gives why.
+/// Ends the save `w` of the file at `path`, which keeps what it wrote.
+/// Once [`close`] has run, it drops the file instead and gives why.
 #[cfg_attr(mutants, mutants::skip)]
-pub async fn save_close(w: &JsValue, path: &str) -> Result<(), String> {
+pub async fn save_close(w: &SaveStream, path: &str) -> Result<(), String> {
     if CLOSED.get() {
         save_abort(w, path).await;
         return Err(RESETTING.into());
     }
-    let closed = st_close(w).await;
-    let result = match closed.as_bool() {
-        Some(true) => Ok(()),
-        _ => {
-            st_remove(path).await;
-            Err(format!(
-                "browser storage could not finish {path} ({})",
-                closed.as_string().unwrap_or_else(|| "not available".into())
-            ))
-        }
-    };
     WRITES.set(WRITES.get() - 1);
-    result
+    Ok(())
 }
 
-/// Closes the save stream `w` with nothing kept, and removes the file at
-/// `path`.
+/// Ends the save `w` with nothing kept, and removes the file at `path`.
 #[cfg_attr(mutants, mutants::skip)]
-pub async fn save_abort(w: &JsValue, path: &str) {
-    st_abort(w).await;
+pub async fn save_abort(_w: &SaveStream, path: &str) {
     st_remove(path).await;
     WRITES.set(WRITES.get() - 1);
 }
@@ -2159,24 +2194,16 @@ pub(crate) mod tests {
     #[wasm_bindgen(inline_js = r#"
 let record = null;
 let real = null;
-let repeats = null;
-let last = null;
 // Records what each OPFS write gets, in call order: "blob", "whole" (a
 // typed array that is its whole buffer) or "view".
 // "same" is a write of `expected` itself.  From call `fail_from` on (0 is
-// the first), a write is refused, as a full disk refuses it.  `spy_repeats`
-// gives, for each write, whether it got the same object as the write
-// before.
+// the first), a write is refused, as a full disk refuses it.
 export function start_spy(expected, fail_from) {
   if (real) throw new Error("a spy is already on write");
   const proto = FileSystemWritableFileStream.prototype;
   real = proto.write;
   record = [];
-  repeats = [];
-  last = null;
   proto.write = function (data) {
-    repeats.push(data === last ? "1" : "0");
-    last = data;
     if (record.length >= fail_from) {
       record.push("refused");
       return Promise.reject(new DOMException("refused by the test", "QuotaExceededError"));
@@ -2195,9 +2222,6 @@ export function stop_spy() {
   real = null;
   return record.join(" ");
 }
-// For each write since `start_spy`, "1" if it got the object of the write
-// before, else "0".
-export function spy_repeats() { return repeats.join(""); }
 // The next `createWritable` is refused, after the file is made.
 export function refuse_next_writable() {
   const proto = FileSystemFileHandle.prototype;
@@ -2228,7 +2252,6 @@ export function lloyd_in_a_larger_buffer(at) {
     extern "C" {
         pub(crate) fn start_spy(expected: &JsValue, fail_from: f64);
         pub(crate) fn stop_spy() -> String;
-        pub(crate) fn spy_repeats() -> String;
         fn lloyd_in_a_larger_buffer(at: u32) -> Uint8Array;
         pub(crate) fn refuse_next_writable();
         /// The names in the folder `path`, sorted, joined by spaces, or
@@ -2349,7 +2372,10 @@ export function thaw_now() { Date.now = real_now; real_now = null; }
         let saved = save_sources(&[("Lloyd - Tune.wav".into(), file)], 44_100).await;
         let record = stop_spy();
         let id = saved.expect("saved");
-        assert_eq!(record, "same whole", "the file itself, then meta");
+        // The write worker gets the file through a structured clone, which
+        // refers to the same bytes: a Blob, never a copy in WebAssembly
+        // memory (M5.1).
+        assert_eq!(record, "blob whole", "the file as a Blob, then meta");
         // D9: the page makes the session current once its song opens.
         assert_eq!(current().await, None, "the save makes no session current");
         let (got, song, meta) = restore_id(&id, crate::MEMORY_PATH_MAX_FRAMES)

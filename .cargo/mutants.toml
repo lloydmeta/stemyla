@@ -23,6 +23,7 @@ exclude_globs = [
     "app/src/writer/client.rs",
     "app/src/writer/client/tests.rs",
     "app/src/writer/fake.rs",
+    "app/src/writer/routing_tests.rs",
     "decoder/src/web.rs",
     "decoder/src/web/**",
     "worker/src/web.rs",

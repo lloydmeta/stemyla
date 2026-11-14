@@ -22,3 +22,5 @@ mod client;
 pub use client::*;
 #[cfg(all(target_arch = "wasm32", any(test, feature = "fake-writer")))]
 mod fake;
+#[cfg(all(test, target_arch = "wasm32"))]
+mod routing_tests;
