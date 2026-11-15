@@ -68,13 +68,11 @@ export async function wipe() {
   for await (const name of root.keys()) await root.removeEntry(name, { recursive: true });
 }
 // Writes in place with a sync access handle, which leaves no swap file in
-// Safari (TD-103).  A copy of `bytes` is written: a whole array (MEM-5),
-// made before the first await.
+// Safari (TD-103).  The Rust side passes a whole copied array (MEM-5).
 export async function plant(name, bytes) {
-  const copy = bytes.slice();
   const root = await navigator.storage.getDirectory();
   const h = await (await root.getFileHandle(name, { create: true })).createSyncAccessHandle();
-  try { h.truncate(0); h.write(copy, { at: 0 }); h.flush(); } finally { h.close(); }
+  try { h.truncate(0); h.write(bytes, { at: 0 }); h.flush(); } finally { h.close(); }
 }
 export async function files() {
   const root = await navigator.storage.getDirectory();
@@ -139,10 +137,9 @@ export async function remove_at(path) {
 }
 // As `plant`, at `path`, with its folders.
 export async function plant_at(path, bytes) {
-  const copy = bytes.slice();
   const [d, n] = split_at(path);
   const h = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createSyncAccessHandle();
-  try { h.truncate(0); h.write(copy, { at: 0 }); h.flush(); } finally { h.close(); }
+  try { h.truncate(0); h.write(bytes, { at: 0 }); h.flush(); } finally { h.close(); }
 }
 // The bytes of the file at `path`, or null if there is none.
 export async function read_at(path) {

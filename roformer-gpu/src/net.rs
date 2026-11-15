@@ -9,7 +9,8 @@
 //! A [`Job`] owns one chunk's buffers and splits the forward pass into
 //! [`Step`]s, each a single short command buffer: one sub-batch of one
 //! transformer, one transpose, or one group of mask-estimator bands.  The
-//! caller submits a step, waits for the GPU ([`Gpu::done`]), and goes on.
+//! browser worker keeps up to 2 steps in flight ([`crate::Window`]).
+//! [`Job::masks`] waits for the GPU after each step ([`Gpu::done`]).
 
 use roformer::weights::{Dtype, Store, WeightError};
 use roformer::{

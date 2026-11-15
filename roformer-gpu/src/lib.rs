@@ -13,8 +13,9 @@
 //! step: a list of dispatches submitted together as one command buffer.
 //! Every buffer [`Gpu`] makes is a [`GpuBuffer`], destroyed when dropped.
 //! [`net::Net`] holds the weights on the GPU and [`net::Job`] runs one
-//! chunk as a list of [`net::Step`]s, so the caller can wait for the GPU
-//! after each step and keep every command buffer short.
+//! chunk as a list of [`net::Step`]s, so the caller can pace the steps and
+//! keep every command buffer short: at most [`STEPS_IN_FLIGHT`] steps are
+//! in flight ([`Window`]).
 
 pub mod bench;
 pub mod net;
@@ -1037,7 +1038,9 @@ impl Signal {
         self.done.load(Ordering::Acquire)
     }
 
-    /// Resolves when that work is done.
+    /// Resolves when that work is done.  Natively, it polls the device
+    /// until all submitted work is done.  So a native run keeps no step
+    /// in flight after a wait.
     pub async fn wait(self) {
         poll_all(&self.device);
         let _ = self.ended.await;
@@ -1088,10 +1091,40 @@ impl PendingRead {
 /// that was submitted and whose end is not yet awaited.
 pub const STEPS_IN_FLIGHT: usize = 2;
 
-/// The steps in flight, oldest first.  [`Window::submitted`] takes the
-/// step just submitted.  When `depth` steps are in flight, it gives the
-/// oldest, whose end to await before the next submission.  So at most
-/// `depth` steps are ever in flight.
+/// The work of a paced run of GPU steps, which [`Window::step`] and
+/// [`Window::drain`] drive in one order.  The worker's `Pace`,
+/// calibration's timing (`bench::time_rec`) and [`pace_order`] each give
+/// one.
+pub trait Steps {
+    /// What [`Steps::submit`] records.
+    type Step;
+    /// What [`Steps::submit`] gives for [`Steps::end`].
+    type Submitted;
+    /// What [`Steps::end`] awaits: for the GPU, a [`Signal`].
+    type Signal;
+    type Error;
+
+    /// Records `step` and submits it.
+    fn submit(&mut self, step: Self::Step) -> Self::Submitted;
+
+    /// Takes the signal of the work submitted until now
+    /// ([`Gpu::done_signal`]).
+    fn signal(&mut self) -> Self::Signal;
+
+    /// Awaits the end of a step, with its checks.  `newer` is true when a
+    /// newer step is still in flight.
+    fn end(
+        &mut self,
+        submitted: Self::Submitted,
+        signal: Self::Signal,
+        newer: bool,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+/// The steps in flight, oldest first.  [`Window::step`] submits a step
+/// and takes its signal.  When `depth` steps are then in flight, it
+/// awaits the end of the oldest.  So at most `depth` steps are ever in
+/// flight.
 pub struct Window<T> {
     depth: usize,
     flight: VecDeque<T>,
@@ -1108,7 +1141,7 @@ impl<T> Window<T> {
 
     /// Takes the step just submitted.  Gives the step to await now, if
     /// any.
-    pub fn submitted(&mut self, step: T) -> Option<T> {
+    fn submitted(&mut self, step: T) -> Option<T> {
         self.flight.push_back(step);
         if self.flight.len() >= self.depth {
             self.flight.pop_front()
@@ -1116,10 +1149,38 @@ impl<T> Window<T> {
             None
         }
     }
+}
 
-    /// The oldest step in flight, to await, until none is left.
-    pub fn oldest(&mut self) -> Option<T> {
-        self.flight.pop_front()
+impl<A, B> Window<(A, B)> {
+    /// One step of a paced run: `steps` records and submits `step`, then
+    /// takes its signal.  When `depth` steps are then in flight, it awaits
+    /// the end of the oldest.
+    pub async fn step<S>(&mut self, steps: &mut S, step: S::Step) -> Result<(), S::Error>
+    where
+        S: Steps<Submitted = A, Signal = B>,
+    {
+        let submitted = steps.submit(step);
+        let signal = steps.signal();
+        match self.submitted((submitted, signal)) {
+            Some((older, signal)) => {
+                let newer = !self.flight.is_empty();
+                steps.end(older, signal, newer).await
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Awaits the end of each step in flight, oldest first.  A read of the
+    /// GPU after it waits for no later step.
+    pub async fn drain<S>(&mut self, steps: &mut S) -> Result<(), S::Error>
+    where
+        S: Steps<Submitted = A, Signal = B>,
+    {
+        while let Some((older, signal)) = self.flight.pop_front() {
+            let newer = !self.flight.is_empty();
+            steps.end(older, signal, newer).await?;
+        }
+        Ok(())
     }
 }
 
@@ -1128,7 +1189,8 @@ impl<T> Window<T> {
 pub enum Event {
     /// Step `i` is recorded and submitted.
     Submit(usize),
-    /// The signal of step `i` is taken ([`Gpu::done_signal`]).
+    /// A signal is taken after step `i` was submitted
+    /// ([`Gpu::done_signal`]).
     Signal(usize),
     /// The end of step `i` is awaited, with its checks.
     Await(usize),
@@ -1137,31 +1199,66 @@ pub enum Event {
     Drained(usize),
 }
 
+/// The events of a paced run, for [`pace_order`].
+struct Recorded {
+    events: Vec<Event>,
+    submitted: usize,
+}
+
+impl Steps for Recorded {
+    type Step = ();
+    type Submitted = usize;
+    type Signal = ();
+    type Error = std::convert::Infallible;
+
+    fn submit(&mut self, (): ()) -> usize {
+        let i = self.submitted;
+        self.submitted += 1;
+        self.events.push(Event::Submit(i));
+        i
+    }
+
+    fn signal(&mut self) {
+        self.events
+            .push(Event::Signal(self.submitted.saturating_sub(1)));
+    }
+
+    async fn end(&mut self, i: usize, (): (), _newer: bool) -> Result<(), Self::Error> {
+        self.events.push(Event::Await(i));
+        Ok(())
+    }
+}
+
+/// The output of `future`, which must be ready at its first poll.
+fn now_or_never<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(out) => out,
+        std::task::Poll::Pending => panic!("a recorded run never waits"),
+    }
+}
+
 /// The order in which the worker's `Pace` and calibration's timing
 /// (`bench::time_rec`) run `groups[g]` steps for each group `g`, with up
 /// to `depth` steps in flight.  Steps are numbered from 0 across the
 /// groups.  After the last step of a group, each step in flight is
-/// awaited, then the group is drained.  It drives the same [`Window`]
-/// as they do.
+/// awaited, then the group is drained.  It drives [`Window::step`] and
+/// [`Window::drain`], as they do.
 pub fn pace_order(groups: &[usize], depth: usize) -> Vec<Event> {
     let mut window = Window::new(depth);
-    let mut out = Vec::new();
-    let mut i = 0;
+    let mut run = Recorded {
+        events: Vec::new(),
+        submitted: 0,
+    };
     for (g, &count) in groups.iter().enumerate() {
         for _ in 0..count {
-            out.push(Event::Submit(i));
-            out.push(Event::Signal(i));
-            if let Some(older) = window.submitted(i) {
-                out.push(Event::Await(older));
-            }
-            i += 1;
+            let Ok(()) = now_or_never(window.step(&mut run, ()));
         }
-        while let Some(older) = window.oldest() {
-            out.push(Event::Await(older));
-        }
-        out.push(Event::Drained(g));
+        let Ok(()) = now_or_never(window.drain(&mut run));
+        run.events.push(Event::Drained(g));
     }
-    out
+    run.events
 }
 
 /// The time of a step, in seconds, from the clock's reads: when it was
@@ -1171,6 +1268,35 @@ pub fn pace_order(groups: &[usize], depth: usize) -> Vec<Event> {
 /// wait, and the step limit checks the step's own time.
 pub fn step_secs(submitted: f64, before: f64, ended: f64) -> f64 {
     ended - submitted.max(before)
+}
+
+/// The times of the steps of a paced run, in the order of their ends
+/// ([`step_secs`]).
+pub struct StepClock {
+    /// When the end of the last step was seen.
+    last_end: f64,
+}
+
+impl StepClock {
+    pub fn new() -> Self {
+        Self {
+            last_end: f64::NEG_INFINITY,
+        }
+    }
+
+    /// The time of the step that was `submitted` and whose end was seen
+    /// at `ended`.  That end is then the end of the step before the next.
+    pub fn ended(&mut self, submitted: f64, ended: f64) -> f64 {
+        let secs = step_secs(submitted, self.last_end, ended);
+        self.last_end = ended;
+        secs
+    }
+}
+
+impl Default for StepClock {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// The device, its kernels and the buffers it makes.  The device is
@@ -4408,6 +4534,60 @@ mod tests {
         assert_eq!(got, [1.0, 2.0, 3.0, 4.0], "the contents at the start");
     }
 
+    /// Two buffers of 32 MiB, so that a copy between them is still in
+    /// flight right after its submission.
+    fn large_pair(gpu: &Gpu) -> (GpuBuffer, GpuBuffer) {
+        (gpu.buffer("a", 1 << 23), gpu.buffer("b", 1 << 23))
+    }
+
+    /// Right after `done_signal`, with a copy in flight and no poll, the
+    /// signal reads not done.
+    #[test]
+    fn a_done_signal_reads_not_done_before_a_poll() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = large_pair(&gpu);
+        let _copy = submit_copy(&gpu, &a, &b);
+        let signal = gpu.done_signal();
+        assert!(!signal.is_done(), "done before a poll");
+        pollster::block_on(signal.wait());
+    }
+
+    /// Right after `read_start`, with no poll, the staging buffer reads not
+    /// mapped.
+    #[test]
+    fn a_started_read_reads_not_mapped_before_a_poll() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = large_pair(&gpu);
+        let _copy = submit_copy(&gpu, &a, &b);
+        let read = gpu.read_start(&b, 0, 1 << 23);
+        assert!(!read.is_mapped(), "mapped before a poll");
+        pollster::block_on(read.finish()).expect("read");
+    }
+
+    /// After the wait of a later signal, an earlier signal reads done.
+    #[test]
+    fn the_wait_of_a_later_signal_ends_an_earlier_one() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = large_pair(&gpu);
+        let _first = submit_copy(&gpu, &a, &b);
+        let earlier = gpu.done_signal();
+        let _second = submit_copy(&gpu, &b, &a);
+        let later = gpu.done_signal();
+        pollster::block_on(later.wait());
+        assert!(earlier.is_done(), "the earlier signal after the wait");
+    }
+
+    /// After `Gpu::done`, a signal taken before it reads done.
+    #[test]
+    fn gpu_done_ends_each_signal_taken_before_it() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = large_pair(&gpu);
+        let _copy = submit_copy(&gpu, &a, &b);
+        let signal = gpu.done_signal();
+        pollster::block_on(gpu.done());
+        assert!(signal.is_done(), "the signal after `Gpu::done`");
+    }
+
     /// The most steps in flight at any event of `order`.
     fn most_in_flight(order: &[Event]) -> usize {
         let (mut now, mut most) = (0usize, 0usize);
@@ -4424,23 +4604,30 @@ mod tests {
 
     /// The order of `Pace` with 2 steps in flight, for 3 stems of 3, 2 and
     /// 2 steps:
+    /// * each step is awaited once;
     /// * each `Signal(i)` comes right after `Submit(i)`;
     /// * no `Submit(i + 2)` comes before `Await(i)`;
     /// * 2 steps are in flight at the most, and that is reached;
     /// * each `Drained(g)` comes after the `Await` of each step submitted
-    ///   before it, and before the first `Submit` of the next group;
-    /// * each step is awaited once.
+    ///   before it, and before the first `Submit` of the next group.
     #[test]
     fn the_pace_keeps_2_steps_in_flight_and_drains_before_each_read() {
         let order = pace_order(&[3, 2, 2], STEPS_IN_FLIGHT);
         let at = |e: Event| order.iter().position(|x| *x == e).expect("an event");
         for i in 0..7 {
-            assert_eq!(order[at(Event::Submit(i)) + 1], Event::Signal(i), "{i}");
-            if i + 2 < 7 {
-                assert!(at(Event::Await(i)) < at(Event::Submit(i + 2)), "{i}");
-            }
             let awaits = order.iter().filter(|e| **e == Event::Await(i)).count();
-            assert_eq!(awaits, 1, "{i}");
+            assert_eq!(awaits, 1, "step {i}: {order:?}");
+            assert_eq!(
+                order[at(Event::Submit(i)) + 1],
+                Event::Signal(i),
+                "step {i}: {order:?}"
+            );
+            if i + 2 < 7 {
+                assert!(
+                    at(Event::Await(i)) < at(Event::Submit(i + 2)),
+                    "step {i}: {order:?}"
+                );
+            }
         }
         assert_eq!(STEPS_IN_FLIGHT, 2);
         assert_eq!(most_in_flight(&order), 2, "{order:?}");
@@ -4475,6 +4662,69 @@ mod tests {
                 Drained(0)
             ]
         );
+    }
+
+    /// The ends that [`Window`] awaits, with whether a newer step is in
+    /// flight at each.
+    struct Ends(Vec<(usize, bool)>);
+
+    impl Steps for Ends {
+        type Step = usize;
+        type Submitted = usize;
+        type Signal = ();
+        type Error = std::convert::Infallible;
+
+        fn submit(&mut self, step: usize) -> usize {
+            step
+        }
+
+        fn signal(&mut self) {}
+
+        async fn end(&mut self, i: usize, (): (), newer: bool) -> Result<(), Self::Error> {
+            self.0.push((i, newer));
+            Ok(())
+        }
+    }
+
+    /// The ends of 3 steps, then a drain, with `depth` in flight.
+    fn ends(depth: usize) -> Vec<(usize, bool)> {
+        let (mut window, mut ends) = (Window::new(depth), Ends(Vec::new()));
+        for i in 0..3 {
+            let Ok(()) = now_or_never(window.step(&mut ends, i));
+        }
+        let Ok(()) = now_or_never(window.drain(&mut ends));
+        ends.0
+    }
+
+    /// Each end that the window awaits tells whether a newer step is in
+    /// flight:
+    /// * with 2 in flight, steps 0 and 1 end with a newer step in flight,
+    ///   and step 2 with none;
+    /// * with 1 in flight, no step ends with a newer step in flight.
+    #[test]
+    fn each_end_tells_whether_a_newer_step_is_in_flight() {
+        assert_eq!(ends(2), [(0, true), (1, true), (2, false)]);
+        assert_eq!(ends(1), [(0, false), (1, false), (2, false)]);
+    }
+
+    /// The step clock charges each step from the later of its submission
+    /// and the end of the step before:
+    /// * the first step, submitted at 1.0 s and ended at 1.8 s, took
+    ///   0.8 s;
+    /// * the second, submitted at 1.0 s behind it and ended at 2.1 s, took
+    ///   0.3 s;
+    /// * the third, submitted at 2.5 s after the second ended and ended at
+    ///   2.7 s, took 0.2 s.
+    #[test]
+    fn the_step_clock_charges_each_step_from_the_end_of_the_step_before() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        let mut clock = StepClock::new();
+        let first = clock.ended(1.0, 1.8);
+        let second = clock.ended(1.0, 2.1);
+        let third = clock.ended(2.5, 2.7);
+        assert!(close(first, 0.8), "first: {first}");
+        assert!(close(second, 0.3), "second: {second}");
+        assert!(close(third, 0.2), "third: {third}");
     }
 
     /// A step's time runs from the later of its submission and the end of

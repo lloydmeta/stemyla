@@ -291,14 +291,22 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] 2026-11-15: Step 5b skipped: O2 is not built (Step 2).
 * [x] 2026-11-15: Step 6: P lands (Step 4's comparisons, and Safari's again with `--runs 8`).  The baselines: Chrome 3.59 s to 3.43 s (`d3408f5`), Safari 5.57 s to 5.37 s (`cf2e935`).  The perf gates of Step 9 are in Progress there.
 * [x] 2026-11-15: Step 7: `memory-budget` passed 3 times in each browser and 3 times in Chrome with `attn=freq`.  `WORKER_HEADROOM_MB` stays (Surprises).
-* [ ] Step 10: no build: skipped, since P is built.
 * [x] 2026-11-15: Step 8: calibration at the head.  The choice check passes in both browsers.  The bias of `freq` against `fused` holds in Chrome.  In Safari it fails the limit on the first forced set, and holds on a second set and on the 8 runs together (Surprises, Decision log).  The team leader accepts the 8 runs (Decision log).
 * [x] 2026-11-15: Step 9: the checks before review round 1, at `cf2e935` with this plan's change (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step9-push.log`).
   * `check --tier push` passed 15 lines, with both perf gates.  Chrome's gate passed: 3.45 s against the bound 3.77 s (baseline 3.43 s), `matmul v64,v64, attention vfused`.  Safari's gate passed: 5.40 s against 5.91 s (baseline 5.37 s), `matmul v64k8,v64k8, attention vfused`.  Its line `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.
   * `cargo build -p xtask` passed.
   * The docs: `docs/ARCHITECTURE.md` ("Running it on the GPU" and "Short steps") and the doc of `Pace` changed in `406e819`.  P changes neither `chunk_stems` nor `working_set`, and TD-11's wasm-test bullet (`chunk_stems` with a fake GPU half) stays true.
   * `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/parent-m6.diff` for the orchestrator; `git apply --check` passes on HEAD.  No change of `CLAUDE.md` or `.claude/` is needed.
-* [ ] Step 10: no build (if neither is built).
+* [x] 2026-11-15: Step 10 skipped: P is built.
+* [x] 2026-11-15: the fixes of review round 1 (`<scratch>/m6/r1/fixes.txt`).  Each new or changed test failed first on an assert, against a mutant (`<scratch>/m6/r1/fail-*.log`):
+  * 1-1: `Pace` and `time_rec` run their steps through `Window::step` and `Window::drain` (a `Steps` trait).  `pace_order` drives them too.  `the_pace_keeps_2_steps_in_flight_and_drains_before_each_read` failed against a dropped older step (`fail-1-1-a-drop-older.log`), no await in the round (`fail-1-1-b-no-await-in-round.log`), an await of each step at once (`fail-1-1-c-await-at-once.log`) and a signal before the submission (`fail-1-1-d-signal-before-submit.log`).
+  * 1-1: `StepClock` keeps the end of the last step.  `the_step_clock_charges_each_step_from_the_end_of_the_step_before` failed without its update (`fail-1-1-e-no-last-end.log`).
+  * 1-1: `the_worker_paces_as_calibration_times` pins that `Pace`, `OnGpu`, `Checks` and `time_rec` use the shared parts.  It failed against a `Pace::run` that drops the older step, a step time without `StepClock`, a signal in `OnGpu::submit`, and `time_rec` with a window of 1 or no `Window::step` (`fail-1-1-f-*.log` to `fail-1-1-j-*.log`).
+  * 1-9: the error text names the newer step in flight too.  `each_end_tells_whether_a_newer_step_is_in_flight` failed against an end that always tells true (`fail-1-9-newer-always-true.log`).
+  * `time_rec_counts_the_steps_of_a_round` failed against `-` to `+` in the round loop of `Covering` and of `InFlight`, `/` to `*`, and a count of 2 for each step (`fail-1-tr-*.log`).
+  * The four signal tests failed against `Gpu::done` as `()`, `is_mapped` as `true`, `is_done` as `true` and `Signal::wait` as `()` (`fail-1-13-*.log`, `fail-1-16-*.log`, `fail-1-17-*.log`, `fail-1-24-*.log`).
+  * 1-2 to 1-8 and 1-10: the docs and the test helpers.
+  * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  `e2e selftest` passed in Chrome and Safari.  `e2e stored-stems --query attn=vfused` in Chrome gave the six hashes of M6's base (`<scratch>/m6/r1/stems-chrome-vfused.hashes`).  The worker and decoder tests passed in Safari, and the plant tests in Chrome (`<scratch>/m6/r1/web-test-*.log`).
 
 ## Surprises and discoveries
 
@@ -410,7 +418,9 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-15, agent (implementer): the self-test also ran the full chunk with the pins, beyond Step 4's `e2e selftest` with the default query.  Why: the default query runs only the stages, and the full chunk is the path that reads each mask after a drain.
 
 * 2026-11-15, agent (implementer): Safari's bias in Step 8 is judged on the 8 forced runs (both sets), and holds there: -0.028 s, under the noise of `D`, 0.220 s.  By Step 8's rule on the first set alone, it fails: -0.033 s, over 0.0175 s.  Why: the first set's `D` changed its sign on a repeat, so it is under its noise, and the limit is then that noise (M5's rule).  The plan says that a failed bias is a defect of M6, to fix in the timing or by a revert of P.  This decision is the team leader's, so the report names it.
-* 2026-11-15, agent (team leader): Safari's bias holds on the 8 forced runs, and M6 keeps P with no change of the timing.  Why: `D` changed its sign on the repeat, so it is under its noise, and M5's rule then takes that noise (0.220 s) as the limit.  `|D|` is about 0.5 % of a chunk, under `T` (1 %), and calibration gives the two policies as equal (+0.002 s), so neither choice costs more than the noise.  Neither `fused` nor `freq` is choosable on this Mac, since `vfused` is about 21 % ahead.
+* 2026-11-15, agent (team leader): Safari's bias holds on the 8 forced runs, and M6 keeps P with no change of the timing.  Why: `D` changed its sign on the repeat, so it is under its noise, and M5's rule then takes that noise (0.220 s) as the limit.  `|D|` is about 0.5 % of a chunk, under `T` (1 %).  Calibration gives the two policies as equal (+0.002 s).  So neither choice costs more than the noise.  Neither `fused` nor `freq` is choosable on this Mac, since `vfused` is about 21 % ahead.
+
+* 2026-11-15, agent (implementer of review round 1): a `Steps` trait gives the submission, the signal and the end of a step.  `Window::step` and `Window::drain` drive it in one order, for `Pace`, `time_rec` and `pace_order`.  `submit` and `signal` are two calls, so the shared function sets their order.  Why: finding 1-1; each caller had its own copy of the loop, and only `pace_order` was tested.  `Pace` keeps the window apart from its checks (`Checks`), so a step's end can borrow the checks while the window is borrowed.
 
 ## Outcomes and retrospective
 

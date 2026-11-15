@@ -10,7 +10,7 @@ use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::net::{Job, Net, Step};
-use roformer_gpu::{Gpu, STEPS_IN_FLIGHT, Signal, WeightFormat, Window, step_secs};
+use roformer_gpu::{Gpu, STEPS_IN_FLIGHT, Signal, StepClock, Steps, WeightFormat, Window};
 use stem_protocol::{
     self as protocol, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
 };
@@ -1029,7 +1029,7 @@ fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
 /// waits for no later step.
 ///
 /// A step's time runs from the later of its submission and the end of the
-/// step before, to its end, as the worker sees them ([`step_secs`]).  If
+/// step before, to its end, as the worker sees them ([`StepClock`]).  If
 /// one step takes longer than the limit (default 5 s, `?step_limit=` in
 /// the page URL), the run stops instead of risking the operating system's
 /// GPU watchdog.  The first step of each kind may take up to 60 s, since
@@ -1038,6 +1038,13 @@ fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
 /// after each awaited end.  With `?profile=1`, the profile's read of the
 /// newer step waits for that step too, so a profile run has less overlap.
 struct Pace {
+    /// The steps in flight, oldest first.
+    flight: Window<(Submitted, Signal)>,
+    checks: Checks,
+}
+
+/// What `Pace` checks and adds up at the end of each step.
+struct Checks {
     limit: f64,
     seen: HashSet<&'static str>,
     worst: f64,
@@ -1049,70 +1056,60 @@ struct Pace {
     secs: f64,
     /// Wall time of every step, the first of each kind included.
     wall: f64,
-    /// The steps in flight, oldest first.
-    flight: Window<InFlight>,
-    /// When the worker saw the end of the last step that it awaited.
-    last_end: f64,
+    clock: StepClock,
 }
 
-/// A step that the worker submitted and whose end it has not yet awaited.
-struct InFlight {
+/// A step that the worker submitted, and when.
+struct Submitted {
     step: Step,
-    submitted: f64,
-    signal: Signal,
+    at: f64,
 }
 
-impl Pace {
-    fn new(s: &Settings) -> Self {
-        let limit = s.step_limit.unwrap_or(5.0);
-        Self {
-            limit,
-            seen: HashSet::new(),
-            worst: 0.0,
-            worst_what: String::new(),
-            steps: 0,
-            flops: 0.0,
-            secs: 0.0,
-            wall: 0.0,
-            flight: Window::new(STEPS_IN_FLIGHT),
-            last_end: f64::NEG_INFINITY,
-        }
+/// The steps of `job` on `gpu`, for [`Window::step`], with the checks of
+/// `checks` at each end.
+struct OnGpu<'p, 'j> {
+    gpu: &'p Gpu,
+    job: &'p Job<'j>,
+    checks: &'p mut Checks,
+}
+
+impl Steps for OnGpu<'_, '_> {
+    type Step = Step;
+    type Submitted = Submitted;
+    type Signal = Signal;
+    type Error = String;
+
+    fn submit(&mut self, step: Step) -> Submitted {
+        let at = now_s();
+        self.job.run(&step);
+        Submitted { step, at }
     }
 
-    /// Submits `step` and takes its signal.  When [`STEPS_IN_FLIGHT`]
-    /// steps are in flight, it awaits the oldest, and checks its time and
-    /// the errors (the order of `roformer_gpu::pace_order`).
-    async fn run(&mut self, gpu: &Gpu, job: &Job<'_>, step: &Step) -> Result<(), String> {
-        let submitted = now_s();
-        job.run(step);
-        let signal = gpu.done_signal();
-        let this = InFlight {
-            step: *step,
-            submitted,
-            signal,
-        };
-        match self.flight.submitted(this) {
-            Some(older) => self.end(gpu, job, older).await,
-            None => Ok(()),
-        }
+    fn signal(&mut self) -> Signal {
+        self.gpu.done_signal()
     }
 
-    /// Awaits each step in flight, with its checks.  A read of the GPU
-    /// after it waits for no later step.
-    async fn drain(&mut self, gpu: &Gpu, job: &Job<'_>) -> Result<(), String> {
-        while let Some(older) = self.flight.oldest() {
-            self.end(gpu, job, older).await?;
-        }
-        Ok(())
-    }
-
-    /// Awaits the end of the step `f`, and checks its time and the errors.
-    async fn end(&mut self, gpu: &Gpu, job: &Job<'_>, f: InFlight) -> Result<(), String> {
-        f.signal.wait().await;
+    async fn end(&mut self, s: Submitted, signal: Signal, newer: bool) -> Result<(), String> {
+        signal.wait().await;
         let ended = now_s();
-        let dt = step_secs(f.submitted, self.last_end, ended);
-        self.last_end = ended;
-        let step = &f.step;
+        self.checks.ended(self.gpu, self.job, s, ended, newer).await
+    }
+}
+
+impl Checks {
+    /// Checks the time of the step `s`, whose end the worker saw at
+    /// `ended`, and the errors.  `newer` is true when a newer step is
+    /// still in flight, so the errors can come from it too.
+    async fn ended(
+        &mut self,
+        gpu: &Gpu,
+        job: &Job<'_>,
+        s: Submitted,
+        ended: f64,
+        newer: bool,
+    ) -> Result<(), String> {
+        let dt = self.clock.ended(s.at, ended);
+        let step = &s.step;
         gpu.collect_profile().await?;
         let first = self.seen.insert(step.kind());
         self.steps += 1;
@@ -1127,8 +1124,13 @@ impl Pace {
         }
         let errors = gpu.take_errors();
         if !errors.is_empty() {
+            let during = if newer {
+                format!("{step} or the step in flight after it")
+            } else {
+                step.to_string()
+            };
             return Err(format!(
-                "the GPU rejected {} operation(s) during {step}, so the result would be wrong; first: {}",
+                "the GPU rejected {} operation(s) during {during}, so the result would be wrong; first: {}",
                 errors.len(),
                 errors[0]
             ));
@@ -1144,6 +1146,43 @@ impl Pace {
             ));
         }
         Ok(())
+    }
+}
+
+impl Pace {
+    fn new(s: &Settings) -> Self {
+        let limit = s.step_limit.unwrap_or(5.0);
+        Self {
+            flight: Window::new(STEPS_IN_FLIGHT),
+            checks: Checks {
+                limit,
+                seen: HashSet::new(),
+                worst: 0.0,
+                worst_what: String::new(),
+                steps: 0,
+                flops: 0.0,
+                secs: 0.0,
+                wall: 0.0,
+                clock: StepClock::new(),
+            },
+        }
+    }
+
+    /// Submits `step` and takes its signal.  When [`STEPS_IN_FLIGHT`]
+    /// steps are in flight, it awaits the oldest, and checks its time and
+    /// the errors (`Window::step`, the order of `roformer_gpu::pace_order`).
+    async fn run(&mut self, gpu: &Gpu, job: &Job<'_>, step: &Step) -> Result<(), String> {
+        let checks = &mut self.checks;
+        self.flight
+            .step(&mut OnGpu { gpu, job, checks }, *step)
+            .await
+    }
+
+    /// Awaits each step in flight, with its checks.  A read of the GPU
+    /// after it waits for no later step.
+    async fn drain(&mut self, gpu: &Gpu, job: &Job<'_>) -> Result<(), String> {
+        let checks = &mut self.checks;
+        self.flight.drain(&mut OnGpu { gpu, job, checks }).await
     }
 
     /// Runs `steps`, then awaits each step in flight.
@@ -1736,8 +1775,8 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
     log(&format!(
         "selftest: stages took {:.1} s; longest GPU step {:.2} s ({})",
         now_s() - t0,
-        pace.worst,
-        pace.worst_what
+        pace.checks.worst,
+        pace.checks.worst_what
     ));
     drop(job);
 
@@ -1831,8 +1870,8 @@ fn log_profile(gpu: &Gpu, pace: &Pace) {
     }
     log(&format!(
         "profile: GPU busy {busy:.2} s of {:.2} s of step wall time ({:.0}% waiting, submitting or between dispatches); one pass per dispatch while profiling",
-        pace.wall,
-        100.0 * (1.0 - busy / pace.wall.max(1e-9))
+        pace.checks.wall,
+        100.0 * (1.0 - busy / pace.checks.wall.max(1e-9))
     ));
 }
 
@@ -1844,14 +1883,15 @@ fn report(worst: &mut f64, name: &str, db: f64) {
 impl Pace {
     /// "N GPU steps, longest ..., about X TFLOP/s" for log lines.
     fn summary(&self) -> String {
-        let rate = if self.secs > 0.0 {
-            self.flops / self.secs / 1e12
+        let c = &self.checks;
+        let rate = if c.secs > 0.0 {
+            c.flops / c.secs / 1e12
         } else {
             0.0
         };
         format!(
             "{} GPU steps, longest {:.2} s ({}), {rate:.2} TFLOP/s on average (steps after the first of each kind)",
-            self.steps, self.worst, self.worst_what
+            c.steps, c.worst, c.worst_what
         )
     }
 }

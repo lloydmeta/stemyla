@@ -7,7 +7,7 @@
 use crate::net::{TimeStep, time_steps};
 use crate::{
     Act, AttentionPolicy, FusedKernel, Gpu, GpuBuffer, MatMul, MatMulPolicy, Rec, STEPS_IN_FLIGHT,
-    TILES, View, Weight, WeightFormat, Window,
+    Signal, Steps, TILES, View, Weight, WeightFormat, Window,
 };
 use roformer::DEPTH;
 
@@ -516,11 +516,10 @@ async fn time_rec<'g>(
     now: &impl Fn() -> f64,
     record: &impl Fn(&mut Rec<'g>),
 ) -> f64 {
-    let submit = |times: usize| {
+    let mut steps = Timed { gpu, record };
+    let mut submit = |times: usize| {
         for _ in 0..times {
-            let mut r = gpu.rec();
-            record(&mut r);
-            r.submit();
+            steps.submit(());
         }
     };
     let t0 = now();
@@ -548,18 +547,42 @@ async fn time_rec<'g>(
             // The order of `crate::pace_order` for one group.
             let mut window = Window::new(depth);
             while count == 0 || now() - t0 < round {
-                submit(1);
-                if let Some(older) = window.submitted(gpu.done_signal()) {
-                    older.wait().await;
-                }
+                let Ok(()) = window.step(&mut steps, ()).await;
                 count += 1;
             }
-            while let Some(older) = window.oldest() {
-                older.wait().await;
-            }
+            let Ok(()) = window.drain(&mut steps).await;
         }
     }
     (now() - t0) / count as f64
+}
+
+/// The steps that [`time_rec`] times: each submission is one call of
+/// `record`.
+struct Timed<'r, 'g, R> {
+    gpu: &'g Gpu,
+    record: &'r R,
+}
+
+impl<'g, R: Fn(&mut Rec<'g>)> Steps for Timed<'_, 'g, R> {
+    type Step = ();
+    type Submitted = ();
+    type Signal = Signal;
+    type Error = std::convert::Infallible;
+
+    fn submit(&mut self, (): ()) {
+        let mut r = self.gpu.rec();
+        (self.record)(&mut r);
+        r.submit();
+    }
+
+    fn signal(&mut self) -> Signal {
+        self.gpu.done_signal()
+    }
+
+    async fn end(&mut self, (): (), signal: Signal, _newer: bool) -> Result<(), Self::Error> {
+        signal.wait().await;
+        Ok(())
+    }
 }
 
 /// Buffers for attention timings: q/k/v, gates, scores and output for up
@@ -1674,30 +1697,173 @@ mod tests {
         assert_eq!(queued(Waits::Covering, 1.0), 1);
     }
 
-    /// Asserts that the worker's `Pace` keeps the steps in flight that
-    /// calibration times (`STEPS_IN_FLIGHT`, through a `Window`), and
-    /// awaits each step in flight before it reads a stem's mask.  So the
-    /// separation and calibration run the time axis alike (case 11 of M6),
-    /// and no mask is read after a later stem's steps (case 2).
+    /// The body of the function or method whose first line is `header`
+    /// in `source`, up to its closing brace at `indent`.
+    fn body_of<'s>(source: &'s str, header: &str, indent: &str) -> &'s str {
+        source
+            .split_once(header)
+            .and_then(|(_, rest)| rest.split_once(&format!("\n{indent}}}\n")))
+            .map(|(body, _)| body)
+            .unwrap_or_else(|| panic!("no {header}"))
+    }
+
+    /// Whether `body` has `first`, and `second` after it.
+    fn in_order(body: &str, first: &str, second: &str) -> bool {
+        matches!((body.find(first), body.find(second)), (Some(f), Some(s)) if f < s)
+    }
+
+    /// Asserts that the worker's `Pace` and `time_rec` run their steps
+    /// through `Window::step` and `Window::drain`, whose order
+    /// `pace_order`'s tests check, and that:
+    /// * `Pace` keeps `STEPS_IN_FLIGHT` in flight, and `time_rec` the
+    ///   depth of its `Waits`;
+    /// * each `submit` records and submits, and takes no signal;
+    /// * each `signal` takes `Gpu::done_signal`;
+    /// * each `end` awaits the signal before it reads the clock (the
+    ///   worker) or returns (`time_rec`);
+    /// * the worker's checks take each step's time from a `StepClock`;
+    /// * `GpuNetwork::mask` drains before it reads the mask.
+    ///
+    /// So the separation and calibration run the time axis alike (case 11
+    /// of M6), and no mask is read after a later stem's steps (case 2).
     #[test]
     fn the_worker_paces_as_calibration_times() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/src/web.rs");
         let worker = std::fs::read_to_string(&path).expect("worker/src/web.rs");
+        let bench_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/bench.rs");
+        let bench = std::fs::read_to_string(&bench_path).expect("roformer-gpu/src/bench.rs");
         assert!(
             worker.contains("flight: Window::new(STEPS_IN_FLIGHT),"),
             "Pace's window in worker/src/web.rs"
         );
-        let mask = worker
-            .split_once("    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String> {")
-            .and_then(|(_, rest)| rest.split_once("\n    }\n"))
-            .map(|(body, _)| body)
-            .expect("GpuNetwork's mask");
-        let drain = mask.find("self.pace.drain(self.gpu, j).await?;");
-        let read = mask.find("j.mask().await?");
+        let run = body_of(
+            &worker,
+            "    async fn run(&mut self, gpu: &Gpu, job: &Job<'_>, step: &Step) -> Result<(), String> {",
+            "    ",
+        );
+        let squeezed: String = run.split_whitespace().collect();
         assert!(
-            matches!((drain, read), (Some(d), Some(r)) if d < r),
+            squeezed.contains("self.flight.step(&mutOnGpu{gpu,job,checks},*step).await"),
+            "Pace::run: {run}"
+        );
+        let drain = body_of(
+            &worker,
+            "    async fn drain(&mut self, gpu: &Gpu, job: &Job<'_>) -> Result<(), String> {",
+            "    ",
+        );
+        assert!(
+            drain.contains("self.flight.drain(&mut OnGpu { gpu, job, checks }).await"),
+            "Pace::drain: {drain}"
+        );
+        let submit = body_of(
+            &worker,
+            "    fn submit(&mut self, step: Step) -> Submitted {",
+            "    ",
+        );
+        assert!(
+            submit.contains("self.job.run(&step);") && !submit.contains("done_signal"),
+            "OnGpu::submit: {submit}"
+        );
+        let signal = body_of(&worker, "    fn signal(&mut self) -> Signal {", "    ");
+        assert_eq!(signal.trim(), "self.gpu.done_signal()", "OnGpu::signal");
+        let end = body_of(
+            &worker,
+            "    async fn end(&mut self, s: Submitted, signal: Signal, newer: bool) -> Result<(), String> {",
+            "    ",
+        );
+        assert!(
+            in_order(end, "signal.wait().await;", "let ended = now_s();"),
+            "OnGpu::end: {end}"
+        );
+        let ended = body_of(&worker, "    async fn ended(", "    ");
+        assert!(
+            ended.contains("let dt = self.clock.ended(s.at, ended);"),
+            "Checks::ended: {ended}"
+        );
+        let mask = body_of(
+            &worker,
+            "    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String> {",
+            "    ",
+        );
+        assert!(
+            in_order(
+                mask,
+                "self.pace.drain(self.gpu, j).await?;",
+                "j.mask().await?"
+            ),
             "the drain before the read of the mask: {mask}"
         );
+        let time_rec = body_of(&bench, "async fn time_rec<'g>(", "");
+        let in_flight = time_rec
+            .split_once("Waits::InFlight(depth) => {")
+            .map(|(_, arm)| arm)
+            .expect("time_rec's InFlight arm");
+        for want in [
+            "let mut window = Window::new(depth);",
+            "let Ok(()) = window.step(&mut steps, ()).await;",
+            "let Ok(()) = window.drain(&mut steps).await;",
+        ] {
+            assert!(in_flight.contains(want), "{want} in time_rec: {in_flight}");
+        }
+        let timed_submit = body_of(&bench, "    fn submit(&mut self, (): ()) {", "    ");
+        assert!(
+            !timed_submit.contains("done_signal"),
+            "Timed::submit: {timed_submit}"
+        );
+        let timed_signal = body_of(&bench, "    fn signal(&mut self) -> Signal {", "    ");
+        assert_eq!(
+            timed_signal.trim(),
+            "self.gpu.done_signal()",
+            "Timed::signal"
+        );
+        let timed_end = body_of(
+            &bench,
+            "    async fn end(&mut self, (): (), signal: Signal, _newer: bool) -> Result<(), Self::Error> {",
+            "    ",
+        );
+        assert!(
+            in_order(timed_end, "signal.wait().await;", "Ok(())"),
+            "Timed::end: {timed_end}"
+        );
+    }
+
+    /// A GPU for the native tests of `time_rec`, or `None` after a skip.
+    fn bench_gpu() -> Option<Gpu> {
+        match pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                test_support::skip(test_support::Need::Gpu, &e);
+                None
+            }
+        }
+    }
+
+    /// `time_rec` with no warm-up, a `record` that records nothing, and a
+    /// clock that moves 1 s at each read (it panics after 1000 reads, so a
+    /// loop that never ends fails):
+    /// * a round of 3 s gives 4 s for 3 steps, 1.333 s, from 9 reads;
+    /// * a round of 4 s gives 5 s for 4 steps, 1.25 s, from 10 reads;
+    /// * each holds for `Covering` and for `InFlight(2)`.
+    #[test]
+    fn time_rec_counts_the_steps_of_a_round() {
+        let Some(gpu) = bench_gpu() else { return };
+        for waits in [Waits::Covering, Waits::InFlight(2)] {
+            for (round, secs, reads) in [(3.0, 4.0 / 3.0, 9), (4.0, 1.25, 10)] {
+                let clock = std::cell::Cell::new(0u32);
+                let now = || {
+                    let t = clock.get();
+                    assert!(t < 1000, "a round that never ends");
+                    clock.set(t + 1);
+                    f64::from(t)
+                };
+                let got = pollster::block_on(time_rec(&gpu, 0.0, round, waits, &now, &|_| {}));
+                assert!(
+                    (got - secs).abs() < 1e-12,
+                    "{waits:?}, round {round}: {got} s, not {secs} s"
+                );
+                assert_eq!(clock.get(), reads, "{waits:?}, round {round}: the reads");
+            }
+        }
     }
 
     /// Asserts that the two paths of the worker that take an attention

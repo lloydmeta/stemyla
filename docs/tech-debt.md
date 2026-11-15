@@ -554,7 +554,9 @@ This entry concerns VERIFY-1.  Review round 1 of M5 of `plans/active/gpu-speed.m
 * `measure_attention` and `fused_attention` replaced with `()`: no test reads `?bench`'s attention lines, or what `fused_attention` records.
 * Tests since that round:
   * `the_time_axis_is_timed_as_the_separation_runs_it`, `a_chunk_total_sums_each_call_times_its_count` and `each_timing_goes_to_its_policy` (no GPU): the plan of the time axis, its totals, and which policy each timing feeds.
-  * `the_time_axis_adds_up_one_wait_for_each_step` (`gpu` in `STEMYLA_REQUIRE`): `time_rec` with the steps in flight of the separation, and the totals of each usable policy, with a fake clock.
+  * `the_time_axis_adds_up_one_wait_for_each_step` (`gpu` in `STEMYLA_REQUIRE`): the totals of each usable policy, with a fake clock.  Each round has no round length, so it is one submission.  So this test cannot see the depth in flight.
+  * `time_rec_counts_the_steps_of_a_round` (`gpu` in `STEMYLA_REQUIRE`): the figure and the clock reads of `time_rec` for rounds of 3 s and 4 s (3 and 4 steps), with `Covering` and `InFlight(2)`, with a fake clock.
+  * The depth in flight: `time_rec` and the worker's `Pace` run their steps through `Window::step` and `Window::drain`.  `pace_order`'s tests check their order.  `the_worker_paces_as_calibration_times` pins that both use them.
   * `calibration_records_the_step_of_the_separation`: what a time-axis step records, and which fused kernel it runs, by its profile labels.  It runs on an adapter with `timestamp-query`.  On an adapter without it, it skips with a pass, unless `timestamps` is in `STEMYLA_REQUIRE`.  By default, `check --tier push` and the command of GPU-2 do not set `timestamps` (TD-8).
 * Fix: a GPU test of `calibrate` and `measure_attention` with a clock that moves a fixed step at each read, and a captured log, as the time axis's test does.  A profile-label test of `attention_per_chunk`, as the time-axis step's test does.
 

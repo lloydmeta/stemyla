@@ -4,7 +4,9 @@
 //! `cargo test -p roformer-gpu --release --test calibration -- --ignored --nocapture`.
 //! Both time the time axis as calibration does since version 5
 //! (`time_axis_per_chunk`): whole time-transformer steps at the default
-//! budget; since version 7, with 2 steps in flight.  `attention_per_chunk` times the
+//! budget.  Since version 7, calibration keeps 2 steps in flight.
+//! Natively, `Signal::wait` polls until all submitted work is done, so a
+//! native run keeps no step in flight.  `attention_per_chunk` times the
 //! attention dispatches alone, as `?bench` does.
 
 use roformer_gpu::bench::{
@@ -24,7 +26,8 @@ use test_support::{Need, skip};
 ///
 /// 0.02 s is one submission for each wait: a read before it and a read
 /// after it.  `Covering`, which queues more submissions for each wait,
-/// gives less for each step.
+/// gives less for each step.  A round of one submission cannot see the
+/// depth in flight.
 #[test]
 fn the_time_axis_adds_up_one_wait_for_each_step() {
     let g = match pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)) {
