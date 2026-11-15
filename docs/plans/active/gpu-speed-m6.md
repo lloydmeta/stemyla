@@ -292,7 +292,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] 2026-11-15: Step 6: P lands (Step 4's comparisons, and Safari's again with `--runs 8`).  The baselines: Chrome 3.59 s to 3.43 s (`d3408f5`), Safari 5.57 s to 5.37 s (`cf2e935`).  The perf gates of Step 9 are in Progress there.
 * [x] 2026-11-15: Step 7: `memory-budget` passed 3 times in each browser and 3 times in Chrome with `attn=freq`.  `WORKER_HEADROOM_MB` stays (Surprises).
 * [ ] Step 10: no build: skipped, since P is built.
-* [x] 2026-11-15: Step 8: calibration at the head.  The choice check passes in both browsers.  The bias of `freq` against `fused` holds in Chrome.  In Safari it fails the limit on the first forced set, and holds on a second set and on the 8 runs together (Surprises, Decision log).  The team leader decides.
+* [x] 2026-11-15: Step 8: calibration at the head.  The choice check passes in both browsers.  The bias of `freq` against `fused` holds in Chrome.  In Safari it fails the limit on the first forced set, and holds on a second set and on the 8 runs together (Surprises, Decision log).  The team leader accepts the 8 runs (Decision log).
 * [x] 2026-11-15: Step 9: the checks before review round 1, at `cf2e935` with this plan's change (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step9-push.log`).
   * `check --tier push` passed 15 lines, with both perf gates.  Chrome's gate passed: 3.45 s against the bound 3.77 s (baseline 3.43 s), `matmul v64,v64, attention vfused`.  Safari's gate passed: 5.40 s against 5.91 s (baseline 5.37 s), `matmul v64k8,v64k8, attention vfused`.  Its line `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.
   * `cargo build -p xtask` passed.
@@ -410,6 +410,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-15, agent (implementer): the self-test also ran the full chunk with the pins, beyond Step 4's `e2e selftest` with the default query.  Why: the default query runs only the stages, and the full chunk is the path that reads each mask after a drain.
 
 * 2026-11-15, agent (implementer): Safari's bias in Step 8 is judged on the 8 forced runs (both sets), and holds there: -0.028 s, under the noise of `D`, 0.220 s.  By Step 8's rule on the first set alone, it fails: -0.033 s, over 0.0175 s.  Why: the first set's `D` changed its sign on a repeat, so it is under its noise, and the limit is then that noise (M5's rule).  The plan says that a failed bias is a defect of M6, to fix in the timing or by a revert of P.  This decision is the team leader's, so the report names it.
+* 2026-11-15, agent (team leader): Safari's bias holds on the 8 forced runs, and M6 keeps P with no change of the timing.  Why: `D` changed its sign on the repeat, so it is under its noise, and M5's rule then takes that noise (0.220 s) as the limit.  `|D|` is about 0.5 % of a chunk, under `T` (1 %), and calibration gives the two policies as equal (+0.002 s), so neither choice costs more than the noise.  Neither `fused` nor `freq` is choosable on this Mac, since `vfused` is about 21 % ahead.
 
 ## Outcomes and retrospective
 
