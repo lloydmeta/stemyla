@@ -325,6 +325,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] 2026-11-15: the fixes of review round 4.  `a_step_check_gives_the_errors_first_then_the_limit` gained a step on the limit and a limit of 120 s.  It failed against `dt >= limit` (4-2) and against a fixed 60 s for a first step (4-1) (`<scratch>/m6/r4/fail-4-*.log`).
 * [x] 2026-11-15: review round 5 found 1 nit and no should-fix, so it is the last round (decision 0024).  Five rounds: 34 agents, 2,166,247 tokens, 52.6 wall minutes, 0 interventions.  Rounds 4 and 5 fixed 2 findings, both cases of the test of `step_check`.  The log is `docs/reviews/gpu-speed-2026-11-12-m6.md`.
 * [x] 2026-11-15: finding i1-2 of the intent review of M6: `WORKER_HEADROOM_MB` follows M6's growth of 55 MB, and goes from -17 to -19 MB (Surprises, Decision log).  `the_worker_growth_must_fit_the_working_set_budget` failed first with -17 MB, on its new assert: a lost cut 3 less the taken noise (62.28 MB) passed the budget of 63.16 MB (`<scratch>/m6/i1-2/fail-headroom-17.log`).  With -19 MB it passed.  `memory-budget` passed 3 times in each browser at the head.
+* [x] 2026-11-15: review rounds 6 to 9, after the intent review.  Round 6 reviewed the fix of i1-2 and the close-out.  Rounds 6 to 8 each fixed one significant doc finding: the verdict on Safari's bias (i1-3), and the cause and the fix of TD-106.  Round 9 found 2 nits, both repeats, so it is the last round (decision 0024).
+* [x] 2026-11-15: all nine rounds: 48 agents, 2,767,767 tokens, 68.7 wall minutes, 0 interventions.
 
 ## Surprises and discoveries
 
