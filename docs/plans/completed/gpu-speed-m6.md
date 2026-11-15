@@ -324,6 +324,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  `e2e selftest` passed in Chrome and Safari (`<scratch>/m6/r3/selftest-*.log`).
 * [x] 2026-11-15: the fixes of review round 4.  `a_step_check_gives_the_errors_first_then_the_limit` gained a step on the limit and a limit of 120 s.  It failed against `dt >= limit` (4-2) and against a fixed 60 s for a first step (4-1) (`<scratch>/m6/r4/fail-4-*.log`).
 * [x] 2026-11-15: review round 5 found 1 nit and no should-fix, so it is the last round (decision 0024).  Five rounds: 34 agents, 2,166,247 tokens, 52.6 wall minutes, 0 interventions.  Rounds 4 and 5 fixed 2 findings, both cases of the test of `step_check`.  The log is `docs/reviews/gpu-speed-2026-11-12-m6.md`.
+* [x] 2026-11-15: finding i1-2 of the intent review of M6: `WORKER_HEADROOM_MB` follows M6's growth of 55 MB, and goes from -17 to -19 MB (Surprises, Decision log).  `the_worker_growth_must_fit_the_working_set_budget` failed first with -17 MB, on its new assert: a lost cut 3 less the taken noise (62.28 MB) passed the budget of 63.16 MB (`<scratch>/m6/i1-2/fail-headroom-17.log`).  With -19 MB it passed.  `memory-budget` passed 3 times in each browser at the head.
 
 ## Surprises and discoveries
 
@@ -390,7 +391,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   | Chrome, `attn=freq`, 3 runs | 799 MB (144 MB) each | 55 MB (63.16 MB) each song | 0 MB |
 
   * The tab totals are M5's (756, 758 and 799 MB): P adds no buffer.
-  * The worker grew 55 MB in each of the 18 separations, not M1's 57 MB.  So the measured headroom is -25.16 MB, with a spread of 0, and the margin under the bound is 8.16 MB.  It stays inside the band of `WORKER_HEADROOM_MB`'s doc: above the taken noise (2.16 MB), and a lost cut 3 (55 + 9.44 = 64.44 MB) still fails the check.  So the constant stays (Step 7, item 2).  P adds no CPU buffer of a chunk's size.  This run did not measure the growth at M6's base, so the cause of the 2 MB is not known.
+  * The worker grew 55 MB in each of the 18 separations, not M1's 57 MB.  So the measured headroom is -25.16 MB, with a spread of 0, and the margin under the bound is 8.16 MB.  It stays inside the band of `WORKER_HEADROOM_MB`'s doc: above the taken noise (2.16 MB), and a lost cut 3 (55 + 9.44 = 64.44 MB) still fails the check.  So the constant stays (Step 7, item 2).  P adds no CPU buffer of a chunk's size.  This run did not measure the growth at M6's base, so the cause of the 2 MB is not known.  Finding i1-2 of the intent review changed the constant later (the entry of i1-2, below).
 
 * Step 8, 2026-11-15, the head page (`406e819`), `CALIBRATION` 7.  The calibrations: each unforced run of the head page in Steps 4, 6 and 8 (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-<browser>/perf-*-head-*`, `6-<browser>-baseline/`, `6-safari-runs8/perf-safari-head-*`, `8-<browser>-calib/`; tables `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/8-<browser>-calib.table`).
   * The pins, the matmul policy chosen most often: Chrome `v64,v64` (12 of 14 calibrations; also `v64,i64` and `v64,v64k8` once each).  Safari `v64k8,v64k8` (14 of 24; `v64k8,v64` 10).
@@ -416,6 +417,21 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * In Safari, P made `freq` and `fused` almost equal: `D` is 0.5 % of a chunk, under `T` (1 %), against about 0.3 s at M5.  The first set's `D` (+0.035 s) changed its sign in the second set (-0.025 s).  So `D` in Safari is under its noise, and a limit of half of `D` (0.0175 s, 0.26 % of a chunk) is under what 2 runs of a policy can measure.
   * In Chrome, `freq` is now faster than `fused` in the separation (`D` -0.265 s), and calibration sees the same (-0.309 s).  Before P, `freq` paid more waits (744 time-axis steps against 192).
 
+* Finding i1-2 of the intent review, 2026-11-15, Chrome 157 and Safari 27.2 on the M2 Pro, at the default chunk with f16 weights (`<scratch>/m6/i1-2/runs/<side>-<browser>-<n>/` and `.stdout`).
+  * M6's base page (`5ad3f82`, whose page equals `2543abc`'s), 1 run in Chrome: the worker grew 55 MB for each song, as at the head.  It logged 31 MB at the separation's start and 86 MB at its end, as the head does.  So the 2 MB came before M6, not with P or its fixes.
+  * M5's Step 14 (`50d3ff6`) logged 30 and 87 MB (57 MB).  The `memory-budget` runs of M5.1 (2026-11-14) already logged 31 and 86 MB (55 MB).  The worker logs whole MB, so the true shift is less than 2 MB.
+  * `web-test a_chunk_of_the_default_length_holds_its_working_set` passed in Chrome at the head (`<scratch>/m6/i1-2/wasm-test-chrome.log`).  It checks the live heap of each phase against `working_set`.  A held buffer adds to the growth, and the growth went down.  So no held buffer explains the change.
+  * Cut 3's rise is still 9.44 MB (89.60 against 80.16 MB): `roformer/` has no change since M1's end (`156324a`).
+  * The head (`69241d0` with this fix, which changes only `xtask`), with `WORKER_HEADROOM_MB` -19 MB: each of the 6 runs passed its four checks.
+
+  | Runs | Worker growth (budget) | Check 3's margin | Check 1's margin | Tab total (margin under 943 MB) |
+  | - | - | - | - | - |
+  | Chrome, 3 | 55 MB (61.16 MB) each song | 6.16 MB | 4.0 MB | 756 MB (187 MB) |
+  | Safari, 3 | 55 MB (61.16 MB) each song | 6.16 MB | 4.0 MB | 758 MB (185 MB) |
+
+  * Each run logged 31 MB at the separation's start and 86 MB at its end.  The 4-minute song grew as much as the 1-minute song (check 2's margin 4.0 MB).
+  * Check 3's margin is 6.16 MB again, as at M1.  A lost cut 3 (64.44 MB) is 3.28 MB over the budget, more than the taken noise (2.16 MB).
+
 ## Decision log
 
 * 2026-11-15, agent (team leader): P's predicted gain is the same-page comparison of a prototype under a query key, in the measuring patch.  Why: no figure without `profile=1` gives the GPU's idle time between steps; the prototype gives P's effect itself at the base, with the noise rule of the comparison.
@@ -439,13 +455,15 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 * 2026-11-15, agent (implementer of review round 1): a `Steps` trait gives the submission, the signal and the end of a step.  `Window::step` and `Window::drain` drive it in one order, for `Pace`, `time_rec` and `pace_order`.  `submit` and `signal` are two calls, so the shared function sets their order.  Why: finding 1-1; each caller had its own copy of the loop, and only `pace_order` was tested.  `Pace` keeps the window apart from its checks (`Checks`), so a step's end can borrow the checks while the window is borrowed.
 
+* 2026-11-15, agent (implementer), finding i1-2 of the intent review: `WORKER_HEADROOM_MB` is -19 MB, not -17 MB.  Why: the worker grows 55 MB, not 57 MB.  With -17 MB, a lost cut 3 (64.44 MB) is only 1.28 MB over the budget, under the taken noise (2.16 MB).  By M1's rule, the margin goes midway between the taken noise and the smallest lost-cut rise (9.44 MB, cut 3): -25.16 + (2.16 + 9.44) / 2 = -19.36, rounded to -19 MB.  So the budget is 61.16 MB, 6.16 MB above 55 MB.  A lost cut 3 is 3.28 MB over it, more than the taken noise.  M6's base also gives 55 MB, and the wasm test passes.  So the change came before M6 and is not a held buffer, and case 4's rule applies.
+
 ## Outcomes and retrospective
 
 What M6 achieved, on the M2 Pro with Chrome 157 and Safari 27.2:
 
 * P lands: the worker keeps 2 GPU steps in flight.  The same-session comparison against M6's base gives a gain of 4.32 % in Chrome and 3.63 % to 3.70 % in Safari, with no loss.  The baselines went from 3.59 s to 3.43 s (Chrome) and from 5.57 s to 5.37 s (Safari).
 * Calibration times the time axis with the same 2 steps in flight (`CALIBRATION` 7).  The choice check passes in both browsers.  The bias of `freq` against `fused` holds, in Safari on the 8 forced runs (Decision log).
-* The stems are the same as at M6's base (`e2e stored-stems`), and `memory-budget` passes 9 runs with no change of the headroom.
+* The stems are the same as at M6's base (`e2e stored-stems`), and `memory-budget` passes in both browsers.  The worker grows 55 MB, so `WORKER_HEADROOM_MB` is -19 MB, not -17 MB (finding i1-2 of the intent review).
 * The test helpers `plant` and `plant_at` write in place: a whole Safari `web-test` leaves 171 fewer swap files (147.7 MB less).
 
 What M6 did not do:

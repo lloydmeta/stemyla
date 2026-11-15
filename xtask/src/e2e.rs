@@ -1828,22 +1828,25 @@ fn growth_check(part: &str, growth: Option<f64>) -> (bool, String) {
 /// pages, less the heap that is free at the separation's start.  So it
 /// can be less than 0.
 ///
-/// The proof (step 8 of M1, 2026-11-12, at the default chunk with f16
-/// weights): 3 runs of `memory-budget` in Chrome 157 and 3 in Safari 27.2
-/// gave 12 growths, each 57 MB.  The peak is 80.16 MB, so each headroom is
-/// -23.16 MB, with a spread of 0.  The worker logs whole MB, so a growth
-/// has an error of up to 1 MB.  So the measured noise is 1 MB: the spread
-/// and the log's error.  The taken noise is 2.16 MB, the orchestrator's
-/// choice: it adds the 1.16 MB margin of the earlier constant, -22
-/// MB.  The smallest rise of the peak from a lost cut in the GPU half is
-/// 9.44 MB (cut 3: the whole normalised input, 89.60 MB against 80.16
-/// MB).  The margin above the measured headroom is midway between the
-/// taken noise and that rise, so that the check is no nuisance (the
-/// maintainer, 2026-11-12): -23.16 + (2.16 + 9.44) / 2 = -17.36, rounded
-/// to -17 MB.  So the budget is 63.16 MB, 6.16 MB above the measured
-/// growth of 57 MB.  The taken noise (57 + 2.16 MB) does not fail it, and
-/// a lost cut 3 (57 + 9.44 = 66.44 MB) does.
-const WORKER_HEADROOM_MB: f64 = -17.0;
+/// The proof (Step 7 of M6 and finding i1-2 of its intent review,
+/// 2026-11-15, at the default chunk with f16 weights).  Step 7 gave 18
+/// growths in Chrome 157 and Safari 27.2, each 55 MB.  The fix of i1-2
+/// gave 12 more, each 55 MB.  M6's base gave 55 MB too, so the change
+/// came before M6.  The peak is 80.16 MB, so each headroom is -25.16 MB,
+/// with a spread of 0.  The worker logs whole MB, so a growth has an
+/// error of up to 1 MB.  The taken noise stays 2.16 MB, M1's choice: that
+/// error, plus the 1.16 MB margin of M1's first constant.  The smallest
+/// rise of the peak from a lost cut in the GPU half is 9.44 MB (cut 3:
+/// the whole normalised input, 89.60 MB against 80.16 MB).  The margin
+/// above the measured headroom is midway between the taken noise and that
+/// rise, so that the check is no nuisance (the maintainer, 2026-11-12):
+/// -25.16 + (2.16 + 9.44) / 2 = -19.36, rounded to -19 MB.  So the budget
+/// is 61.16 MB, 6.16 MB above the measured growth of 55 MB.  The taken
+/// noise (55 + 2.16 MB) does not fail it.  A lost cut 3 (55 + 9.44 =
+/// 64.44 MB) fails it, also less the taken noise (62.28 MB).
+///
+/// M1 (2026-11-12) measured 57 MB and set -17 MB by the same rule.
+const WORKER_HEADROOM_MB: f64 = -19.0;
 
 /// MEM-4's budget for the tab during a separation, in MB: page wasm,
 /// worker wasm, decoder wasm, the write worker's wasm
@@ -4012,9 +4015,17 @@ mod tests {
         );
     }
 
-    /// Check 3 of M1: the worker's growth is at most the working set's
-    /// peak plus the measured headroom, at the default chunk with f16
-    /// weights.
+    /// Check 3 of M1.  It asserts:
+    /// * the budget is the working set's peak plus the headroom;
+    /// * a growth at the budget passes, and 0.1 MB over it fails;
+    /// * the text names the peak's phase;
+    /// * M6's measured growth (55 MB) with the taken noise (2.16 MB)
+    ///   passes;
+    /// * that growth with a lost cut 3 (9.44 MB) fails, also less the
+    ///   taken noise;
+    /// * no growth fails;
+    /// * a query that sets the chunk or the overlap, or a log with f32
+    ///   weights, is not checked; another query is checked.
     #[test]
     fn the_worker_growth_must_fit_the_working_set_budget() {
         let log = chunk_log(&[92.0, 125.0], 125.0);
@@ -4029,9 +4040,9 @@ mod tests {
         let (over, over_what) = working_set_check(Some(budget + 0.1), "x=1", &log);
         assert_eq!(over, Some(false), "0.1 MB over fails: {over_what}");
         assert!(what.contains("masks"), "it names the peak's phase: {what}");
-        // The measured growth of step 8 of M1, with the noise, passes.
-        // The same growth with a lost cut 3 fails.
-        let measured = 57.0;
+        // The measured growth of Step 7 of M6, with the noise, passes.
+        // The same growth with a lost cut 3 fails, also less the noise.
+        let measured = 55.0;
         let (ok, what) = working_set_check(Some(measured + 2.16), "", &log);
         assert_eq!(
             ok,
@@ -4040,6 +4051,8 @@ mod tests {
         );
         let (ok, what) = working_set_check(Some(measured + 9.44), "", &log);
         assert_eq!(ok, Some(false), "a lost cut 3 fails: {what}");
+        let (ok, what) = working_set_check(Some(measured + 9.44 - 2.16), "", &log);
+        assert_eq!(ok, Some(false), "a lost cut 3 less the noise fails: {what}");
         assert_eq!(
             working_set_check(None, "", &log).0,
             Some(false),
