@@ -4,7 +4,7 @@
 //! `cargo test -p roformer-gpu --release --test calibration -- --ignored --nocapture`.
 //! Both time the time axis as calibration does since version 5
 //! (`time_axis_per_chunk`): whole time-transformer steps at the default
-//! budget, with a wait after each.  `attention_per_chunk` times the
+//! budget; since version 7, with 2 steps in flight.  `attention_per_chunk` times the
 //! attention dispatches alone, as `?bench` does.
 
 use roformer_gpu::bench::{

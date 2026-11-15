@@ -6,8 +6,8 @@
 
 use crate::net::{TimeStep, time_steps};
 use crate::{
-    Act, AttentionPolicy, FusedKernel, Gpu, GpuBuffer, MatMul, MatMulPolicy, Rec, TILES, View,
-    Weight, WeightFormat,
+    Act, AttentionPolicy, FusedKernel, Gpu, GpuBuffer, MatMul, MatMulPolicy, Rec, STEPS_IN_FLIGHT,
+    TILES, View, Weight, WeightFormat, Window,
 };
 use roformer::DEPTH;
 
@@ -485,9 +485,11 @@ pub async fn measure(
 pub enum Waits {
     /// Enough to cover [`WAIT_SECS`], as [`time_one`] times a kernel.
     Covering,
-    /// One: a wait after each submission, as the separation waits after
-    /// each step (`Pace::run` in the worker).
-    EachStep,
+    /// Up to this many submissions in flight, as the separation keeps
+    /// its steps (`Pace` in the worker).  Each submission takes its
+    /// signal at once, and the oldest is awaited when this many are in
+    /// flight ([`crate::Window`]).
+    InFlight(usize),
 }
 
 /// The submissions for each wait of a timed round with `waits`, when one
@@ -495,13 +497,13 @@ pub enum Waits {
 pub fn queued(waits: Waits, one: f64) -> usize {
     match waits {
         Waits::Covering => ((WAIT_SECS / one.max(1e-6)).ceil() as usize).clamp(1, 64),
-        Waits::EachStep => 1,
+        Waits::InFlight(_) => 1,
     }
 }
 
-/// How [`time_axis_per_chunk`], and so calibration, waits for the GPU: after
-/// each step, as the separation does.
-pub const STEP_WAITS: Waits = Waits::EachStep;
+/// How [`time_axis_per_chunk`], and so calibration, waits for the GPU: with
+/// [`STEPS_IN_FLIGHT`] steps in flight, as the separation does.
+pub const STEP_WAITS: Waits = Waits::InFlight(STEPS_IN_FLIGHT);
 
 /// Seconds per call of `record` (which adds dispatches to one submission),
 /// timed like [`time_one`]: `warm` seconds first, then one round of at
@@ -532,12 +534,30 @@ async fn time_rec<'g>(
             break;
         }
     }
-    let queued = queued(waits, one);
     let (t0, mut count) = (now(), 0);
-    while count == 0 || now() - t0 < round {
-        submit(queued);
-        gpu.done().await;
-        count += queued;
+    match waits {
+        Waits::Covering => {
+            let queued = queued(waits, one);
+            while count == 0 || now() - t0 < round {
+                submit(queued);
+                gpu.done().await;
+                count += queued;
+            }
+        }
+        Waits::InFlight(depth) => {
+            // The order of `crate::pace_order` for one group.
+            let mut window = Window::new(depth);
+            while count == 0 || now() - t0 < round {
+                submit(1);
+                if let Some(older) = window.submitted(gpu.done_signal()) {
+                    older.wait().await;
+                }
+                count += 1;
+            }
+            while let Some(older) = window.oldest() {
+                older.wait().await;
+            }
+        }
     }
     (now() - t0) / count as f64
 }
@@ -785,7 +805,7 @@ pub async fn measure_attention(
     ));
     let s = time_axis_per_chunk(gpu, format, budget, warm, round, rounds, &now).await;
     log(format!(
-        "bench: time axis, whole steps with a wait after each: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%), vfused {:.2} s (spread {:.1}%) per chunk",
+        "bench: time axis, whole steps, 2 in flight: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%), vfused {:.2} s (spread {:.1}%) per chunk",
         s.split.median(),
         100.0 * s.split.spread(),
         s.fused.median(),
@@ -815,7 +835,7 @@ pub struct StepTiming {
 /// `fused_ok`; `vfused` with `fused_ok` and `vfused_ok`), each step size of
 /// [`time_steps`] once, counted for each step of that size in each of the
 /// [`DEPTH`] layers.  Round 0 warms up for `warm` seconds first, and later
-/// rounds do not.  Each waits for the GPU after each step
+/// rounds do not.  Each keeps the steps in flight of the separation
 /// ([`STEP_WAITS`]).
 pub fn time_axis_round(
     rd: usize,
@@ -886,7 +906,7 @@ impl TimeAxis {
 /// Seconds per chunk of the time transformer with split attention, with
 /// the tiled fused kernel and with `vfused`, as the separation runs it:
 /// each step of [`time_steps`] at `budget`, for each of the [`DEPTH`]
-/// layers, with a wait for the GPU after each step ([`STEP_WAITS`]).  It
+/// layers, with [`STEPS_IN_FLIGHT`] steps in flight ([`STEP_WAITS`]).  It
 /// records each step with the function that `Job::run` uses
 /// ([`TimeStep`]), with zero weights in `format`.  So it covers the
 /// attention, the linear products, the other dispatches of a step and the
@@ -1001,7 +1021,9 @@ impl Choice {
 /// as the separation runs them ([`time_axis_per_chunk`]; M5, TD-101), for
 /// [`ATTENTION_ROUNDS`] rounds, with [`FUSED_MARGIN`] 1.0.  Version 6
 /// times `vfused` on the time axis too, and takes the faster fused kernel.
-pub const CALIBRATION: u32 = 6;
+/// Version 7 times the time axis with [`STEPS_IN_FLIGHT`] steps in
+/// flight, as the separation runs it since M6 ([`STEP_WAITS`]).
+pub const CALIBRATION: u32 = 7;
 
 /// The key of this GPU's stored kernel choice for weights in `format`:
 /// `"<adapter>|<kernels_id>|<CALIBRATION>|<f32 or f16>"`.  The formats
@@ -1328,7 +1350,7 @@ pub async fn calibrate(
             .join(", ")
     };
     log(format!(
-        "kernels for this GPU, {} weights: matmul {} (large products: {}; small: {}), attention {} (time axis, whole steps with a wait after each: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%), vfused {:.2} s (spread {:.1}%) per chunk)",
+        "kernels for this GPU, {} weights: matmul {} (large products: {}; small: {}), attention {} (time axis, whole steps, 2 in flight: split {:.2} s (spread {:.1}%), fused {:.2} s (spread {:.1}%), vfused {:.2} s (spread {:.1}%) per chunk)",
         format.name(),
         choice.matmul.name(),
         fmt(&l, &lt),
@@ -1553,8 +1575,8 @@ mod tests {
     /// both fused kernels usable:
     /// * round 0 times split's step of 1 band (744 a chunk), then the
     ///   tiled kernel's steps of 4 bands (180) and 2 bands (12), then
-    ///   `vfused`'s, each with a warm-up of `warm` and a wait after each
-    ///   step;
+    ///   `vfused`'s, each with a warm-up of `warm` and the steps in
+    ///   flight of the separation;
     /// * round 1 times the same with no warm-up;
     /// * each policy's steps cover the 62 bands of each of the 12 layers;
     /// * without `vfused_ok`, `vfused` is not timed; without `fused_ok`,
@@ -1567,7 +1589,7 @@ mod tests {
             bands,
             per_chunk,
             warm,
-            waits: Waits::EachStep,
+            waits: STEP_WAITS,
         };
         let (tiled, vec4) = (Some(FusedKernel::Tiled), Some(FusedKernel::Vec4));
         let all = |warm| {
@@ -1634,20 +1656,48 @@ mod tests {
         assert_eq!(per_chunk_total(&[]), 0.0);
     }
 
-    /// Asserts that calibration times the time axis with a wait after each
-    /// step, as the separation does: `STEP_WAITS` is `EachStep`, which
-    /// queues 1 submission for each wait however short a step is.
-    /// `Covering` still queues enough to cover `WAIT_SECS` (50 steps of
-    /// 1 ms, at most 64).
+    /// Asserts that calibration times the time axis with the steps in
+    /// flight of the separation: `STEP_WAITS` is `InFlight(2)`, which
+    /// submits 1 step for each wait however short a step is, and keeps
+    /// [`crate::STEPS_IN_FLIGHT`] in flight (`pace_order` tests the
+    /// order).  `Covering` still queues enough to cover `WAIT_SECS` (50
+    /// steps of 1 ms, at most 64).
     #[test]
-    fn calibration_waits_after_each_step() {
-        assert_eq!(STEP_WAITS, Waits::EachStep);
+    fn calibration_keeps_the_steps_in_flight_of_the_separation() {
+        assert_eq!(STEP_WAITS, Waits::InFlight(crate::STEPS_IN_FLIGHT));
+        assert_eq!(crate::STEPS_IN_FLIGHT, 2);
         for one in [1e-6, 1e-3, 0.02, 1.0] {
             assert_eq!(queued(STEP_WAITS, one), 1, "{one}");
         }
         assert_eq!(queued(Waits::Covering, 1e-3), 50);
         assert_eq!(queued(Waits::Covering, 1e-6), 64);
         assert_eq!(queued(Waits::Covering, 1.0), 1);
+    }
+
+    /// Asserts that the worker's `Pace` keeps the steps in flight that
+    /// calibration times (`STEPS_IN_FLIGHT`, through a `Window`), and
+    /// awaits each step in flight before it reads a stem's mask.  So the
+    /// separation and calibration run the time axis alike (case 11 of M6),
+    /// and no mask is read after a later stem's steps (case 2).
+    #[test]
+    fn the_worker_paces_as_calibration_times() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/src/web.rs");
+        let worker = std::fs::read_to_string(&path).expect("worker/src/web.rs");
+        assert!(
+            worker.contains("flight: Window::new(STEPS_IN_FLIGHT),"),
+            "Pace's window in worker/src/web.rs"
+        );
+        let mask = worker
+            .split_once("    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String> {")
+            .and_then(|(_, rest)| rest.split_once("\n    }\n"))
+            .map(|(body, _)| body)
+            .expect("GpuNetwork's mask");
+        let drain = mask.find("self.pace.drain(self.gpu, j).await?;");
+        let read = mask.find("j.mask().await?");
+        assert!(
+            matches!((drain, read), (Some(d), Some(r)) if d < r),
+            "the drain before the read of the mask: {mask}"
+        );
     }
 
     /// Asserts that the two paths of the worker that take an attention
@@ -1806,18 +1856,18 @@ mod tests {
     }
 
     /// The two formats' keys differ only in the format, and name the
-    /// calibration version: 6, which times `vfused` too, so a choice of
-    /// version 5 or older is measured again and never parses as `vfused`.
+    /// calibration version: 7, which times the time axis with 2 steps in
+    /// flight, so a choice of version 6 or older is measured again.
     #[test]
     fn choice_keys_name_the_format() {
-        assert_eq!(CALIBRATION, 6);
+        assert_eq!(CALIBRATION, 7);
         assert_eq!(
             choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F32),
-            "AMD Radeon Pro 5500M|00000000000000ab|6|f32"
+            "AMD Radeon Pro 5500M|00000000000000ab|7|f32"
         );
         assert_eq!(
             choice_key("AMD Radeon Pro 5500M", 0xab, WeightFormat::F16),
-            "AMD Radeon Pro 5500M|00000000000000ab|6|f16"
+            "AMD Radeon Pro 5500M|00000000000000ab|7|f16"
         );
     }
 

@@ -10,7 +10,7 @@ use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::net::{Job, Net, Step};
-use roformer_gpu::{Gpu, WeightFormat};
+use roformer_gpu::{Gpu, STEPS_IN_FLIGHT, Signal, WeightFormat, Window, step_secs};
 use stem_protocol::{
     self as protocol, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
 };
@@ -1020,14 +1020,23 @@ fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
 }
 
 /// Keeps the GPU from being monopolised.  Every step is one short command
-/// buffer (one sub-batch of one transformer, a few GFLOP), and the worker
-/// waits for the GPU to finish it before submitting the next, so other
-/// work, the screen included, gets the GPU in between.  If one step takes
-/// longer than the limit (default 5 s, `?step_limit=` in the page URL), the
-/// run stops instead of risking the operating system's GPU watchdog.  The
-/// first step of each kind may take up to 60 s, since it also waits for
-/// the browser to compile that step's kernels.  Any WebGPU error also
-/// stops the run.
+/// buffer (one sub-batch of one transformer, a few GFLOP).  At most
+/// [`STEPS_IN_FLIGHT`] (2) steps are in flight: the worker submits a step,
+/// takes its signal at once, and awaits the end of the step before it.  So
+/// the GPU starts the next step without a wait for the worker, and other
+/// work, the screen included, waits behind at most 2 steps.  Before a mask
+/// is read, each step in flight is awaited ([`Pace::drain`]), so the read
+/// waits for no later step.
+///
+/// A step's time runs from the later of its submission and the end of the
+/// step before, to its end, as the worker sees them ([`step_secs`]).  If
+/// one step takes longer than the limit (default 5 s, `?step_limit=` in
+/// the page URL), the run stops instead of risking the operating system's
+/// GPU watchdog.  The first step of each kind may take up to 60 s, since
+/// it also waits for the browser to compile that step's kernels.  Any
+/// WebGPU error also stops the run.  The errors and the profile are taken
+/// after each awaited end.  With `?profile=1`, the profile's read of the
+/// newer step waits for that step too, so a profile run has less overlap.
 struct Pace {
     limit: f64,
     seen: HashSet<&'static str>,
@@ -1040,6 +1049,17 @@ struct Pace {
     secs: f64,
     /// Wall time of every step, the first of each kind included.
     wall: f64,
+    /// The steps in flight, oldest first.
+    flight: Window<InFlight>,
+    /// When the worker saw the end of the last step that it awaited.
+    last_end: f64,
+}
+
+/// A step that the worker submitted and whose end it has not yet awaited.
+struct InFlight {
+    step: Step,
+    submitted: f64,
+    signal: Signal,
 }
 
 impl Pace {
@@ -1054,15 +1074,45 @@ impl Pace {
             flops: 0.0,
             secs: 0.0,
             wall: 0.0,
+            flight: Window::new(STEPS_IN_FLIGHT),
+            last_end: f64::NEG_INFINITY,
         }
     }
 
-    /// Submits `step`, waits for the GPU, and checks time and errors.
+    /// Submits `step` and takes its signal.  When [`STEPS_IN_FLIGHT`]
+    /// steps are in flight, it awaits the oldest, and checks its time and
+    /// the errors (the order of `roformer_gpu::pace_order`).
     async fn run(&mut self, gpu: &Gpu, job: &Job<'_>, step: &Step) -> Result<(), String> {
-        let t0 = now_s();
+        let submitted = now_s();
         job.run(step);
-        gpu.done().await;
-        let dt = now_s() - t0;
+        let signal = gpu.done_signal();
+        let this = InFlight {
+            step: *step,
+            submitted,
+            signal,
+        };
+        match self.flight.submitted(this) {
+            Some(older) => self.end(gpu, job, older).await,
+            None => Ok(()),
+        }
+    }
+
+    /// Awaits each step in flight, with its checks.  A read of the GPU
+    /// after it waits for no later step.
+    async fn drain(&mut self, gpu: &Gpu, job: &Job<'_>) -> Result<(), String> {
+        while let Some(older) = self.flight.oldest() {
+            self.end(gpu, job, older).await?;
+        }
+        Ok(())
+    }
+
+    /// Awaits the end of the step `f`, and checks its time and the errors.
+    async fn end(&mut self, gpu: &Gpu, job: &Job<'_>, f: InFlight) -> Result<(), String> {
+        f.signal.wait().await;
+        let ended = now_s();
+        let dt = step_secs(f.submitted, self.last_end, ended);
+        self.last_end = ended;
+        let step = &f.step;
         gpu.collect_profile().await?;
         let first = self.seen.insert(step.kind());
         self.steps += 1;
@@ -1096,11 +1146,12 @@ impl Pace {
         Ok(())
     }
 
+    /// Runs `steps`, then awaits each step in flight.
     async fn all(&mut self, gpu: &Gpu, job: &Job<'_>, steps: &[Step]) -> Result<(), String> {
         for s in steps {
             self.run(gpu, job, s).await?;
         }
-        Ok(())
+        self.drain(gpu, job).await
     }
 }
 
@@ -1325,6 +1376,9 @@ impl GpuHalf for GpuNetwork<'_> {
         for step in shared.into_iter().chain(j.mask_steps(stem)) {
             self.pace.run(self.gpu, j, &step).await?;
         }
+        // The copy of the mask goes after this stem's last mask step and
+        // before any step of the next stem, which writes the same buffer.
+        self.pace.drain(self.gpu, j).await?;
         let mask = j.mask().await?;
         trace(
             self.debug,
@@ -1630,6 +1684,7 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
     let mut pace = Pace::new(s);
     job.set_input(&feats);
     pace.run(&gpu, &job, &Step::Split).await?;
+    pace.drain(&gpu, &job).await?;
     let (_, want) = tensor_f32(&st, "band_split")?;
     report(&mut worst, "band split", snr(&job.hidden().await?, &want));
     for (i, input) in [
@@ -1652,6 +1707,7 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
     let (_, want) = tensor_f32(&st, "final_norm")?;
     job.set_hidden(&x);
     pace.run(&gpu, &job, &Step::FinalNorm).await?;
+    pace.drain(&gpu, &job).await?;
     report(&mut worst, "final norm", snr(&job.normed().await?, &want));
     let (_, x) = tensor_f32(&st, "final_norm")?;
     for (s, name) in STEMS.iter().enumerate() {
@@ -1671,6 +1727,7 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
         pace.all(&gpu, &job, &job.layer_steps(i)).await?;
     }
     pace.run(&gpu, &job, &Step::FinalNorm).await?;
+    pace.drain(&gpu, &job).await?;
     report(
         &mut worst,
         "all 12 layers chained",
@@ -1718,6 +1775,7 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
             for step in job.steps() {
                 pace.run(&gpu, &job, &step).await?;
                 if let Step::Mask { last: true, .. } = step {
+                    pace.drain(&gpu, &job).await?;
                     let out = apply_masks(&spec, &job.mask().await?);
                     let w = &want[s * 2 * n..(s + 1) * 2 * n];
                     let got: Vec<f32> = out[0].iter().chain(out[1].iter()).copied().collect();

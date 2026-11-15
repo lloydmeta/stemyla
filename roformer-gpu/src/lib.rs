@@ -21,10 +21,10 @@ pub mod net;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroU64;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
@@ -1017,6 +1017,162 @@ impl Drop for GpuBuffer {
     }
 }
 
+/// Native: drive `device` until all callbacks have run.  On the web the
+/// browser does this and the call returns at once.
+fn poll_all(device: &wgpu::Device) {
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+}
+
+/// The end of the GPU work that was submitted before
+/// [`Gpu::done_signal`].
+pub struct Signal {
+    device: wgpu::Device,
+    done: Arc<AtomicBool>,
+    ended: futures_channel::oneshot::Receiver<()>,
+}
+
+impl Signal {
+    /// Whether that work is done, as the callbacks that ran tell.
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// Resolves when that work is done.
+    pub async fn wait(self) {
+        poll_all(&self.device);
+        let _ = self.ended.await;
+    }
+}
+
+/// A read that [`Gpu::read_start`] started: its copy is submitted.
+pub struct PendingRead {
+    device: wgpu::Device,
+    staging: GpuBuffer,
+    len: usize,
+    mapped: Arc<AtomicBool>,
+    ended: futures_channel::oneshot::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    /// The submission of the copy, for the native tests.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the native tests only"))]
+    submission: wgpu::SubmissionIndex,
+}
+
+impl PendingRead {
+    /// Whether the staging buffer is mapped, as the callbacks that ran
+    /// tell.
+    pub fn is_mapped(&self) -> bool {
+        self.mapped.load(Ordering::Acquire)
+    }
+
+    /// The floats, after the copy is done.  The staging buffer is then
+    /// unmapped, and destroyed as it drops (MEM-3).
+    pub async fn finish(self) -> Result<Vec<f32>, String> {
+        poll_all(&self.device);
+        self.ended
+            .await
+            .map_err(|_| "readback cancelled".to_string())?
+            .map_err(|e| format!("readback: {e}"))?;
+        let view = self
+            .staging
+            .get_mapped_range(..)
+            .map_err(|e| format!("readback: {e}"))?;
+        let out = mapped_floats(&view, self.len);
+        drop(view);
+        self.staging.unmap();
+        Ok(out)
+    }
+}
+
+/// The most GPU steps in flight: the separation's pacing (`Pace` in the
+/// worker) and calibration's timing of the time axis
+/// ([`bench::STEP_WAITS`]) both keep this many.  A step in flight is one
+/// that was submitted and whose end is not yet awaited.
+pub const STEPS_IN_FLIGHT: usize = 2;
+
+/// The steps in flight, oldest first.  [`Window::submitted`] takes the
+/// step just submitted.  When `depth` steps are in flight, it gives the
+/// oldest, whose end to await before the next submission.  So at most
+/// `depth` steps are ever in flight.
+pub struct Window<T> {
+    depth: usize,
+    flight: VecDeque<T>,
+}
+
+impl<T> Window<T> {
+    pub fn new(depth: usize) -> Self {
+        assert!(depth >= 1, "a window of no steps");
+        Self {
+            depth,
+            flight: VecDeque::new(),
+        }
+    }
+
+    /// Takes the step just submitted.  Gives the step to await now, if
+    /// any.
+    pub fn submitted(&mut self, step: T) -> Option<T> {
+        self.flight.push_back(step);
+        if self.flight.len() >= self.depth {
+            self.flight.pop_front()
+        } else {
+            None
+        }
+    }
+
+    /// The oldest step in flight, to await, until none is left.
+    pub fn oldest(&mut self) -> Option<T> {
+        self.flight.pop_front()
+    }
+}
+
+/// One event of [`pace_order`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// Step `i` is recorded and submitted.
+    Submit(usize),
+    /// The signal of step `i` is taken ([`Gpu::done_signal`]).
+    Signal(usize),
+    /// The end of step `i` is awaited, with its checks.
+    Await(usize),
+    /// Every step of group `g` ended.  The worker reads the mask of stem
+    /// `g`; calibration reads its clock.
+    Drained(usize),
+}
+
+/// The order in which the worker's `Pace` and calibration's timing
+/// (`bench::time_rec`) run `groups[g]` steps for each group `g`, with up
+/// to `depth` steps in flight.  Steps are numbered from 0 across the
+/// groups.  After the last step of a group, each step in flight is
+/// awaited, then the group is drained.  It drives the same [`Window`]
+/// as they do.
+pub fn pace_order(groups: &[usize], depth: usize) -> Vec<Event> {
+    let mut window = Window::new(depth);
+    let mut out = Vec::new();
+    let mut i = 0;
+    for (g, &count) in groups.iter().enumerate() {
+        for _ in 0..count {
+            out.push(Event::Submit(i));
+            out.push(Event::Signal(i));
+            if let Some(older) = window.submitted(i) {
+                out.push(Event::Await(older));
+            }
+            i += 1;
+        }
+        while let Some(older) = window.oldest() {
+            out.push(Event::Await(older));
+        }
+        out.push(Event::Drained(g));
+    }
+    out
+}
+
+/// The time of a step, in seconds, from the clock's reads: when it was
+/// `submitted`, when the worker saw the end of the step `before` it, and
+/// when it saw its own end.  It runs from the later of the first two.  So
+/// a step that waited behind the step before is not charged for that
+/// wait, and the step limit checks the step's own time.
+pub fn step_secs(submitted: f64, before: f64, ended: f64) -> f64 {
+    ended - submitted.max(before)
+}
+
 /// The device, its kernels and the buffers it makes.  The device is
 /// private, so no other crate can make a buffer on it that is not a
 /// [`GpuBuffer`] (MEM-3).
@@ -1697,18 +1853,32 @@ impl Gpu {
 
     /// Resolves once the GPU has finished all submitted work.
     pub async fn done(&self) {
-        let (tx, rx) = futures_channel::oneshot::channel();
+        self.done_signal().wait().await;
+    }
+
+    /// The end of the work submitted before this call.  The call asks
+    /// WebGPU at once (`onSubmittedWorkDone`), so work submitted after it
+    /// is not in the signal.  An `async fn` would ask only at its first
+    /// poll.
+    pub fn done_signal(&self) -> Signal {
+        let (tx, ended) = futures_channel::oneshot::channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = done.clone();
         self.queue.on_submitted_work_done(move || {
+            flag.store(true, Ordering::Release);
             let _ = tx.send(());
         });
-        self.poll();
-        let _ = rx.await;
+        Signal {
+            device: self.device.clone(),
+            done,
+            ended,
+        }
     }
 
     /// Native: drive the device until all callbacks have run.  On the web
     /// the browser does this and the call returns at once.
     fn poll(&self) {
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        poll_all(&self.device);
     }
 
     /// Copies `len` f32s from `buf` (starting at element `offset`) back.
@@ -1718,9 +1888,17 @@ impl Gpu {
         offset: usize,
         len: usize,
     ) -> Result<Vec<f32>, String> {
+        self.read_start(buf, offset, len).finish().await
+    }
+
+    /// Starts the read of `len` f32s from `buf` (at element `offset`): it
+    /// submits the copy into a staging buffer and asks for its map now.
+    /// So the map waits for no work submitted after this call.
+    /// [`PendingRead::finish`] gives the floats.
+    pub fn read_start(&self, buf: &wgpu::Buffer, offset: usize, len: usize) -> PendingRead {
         let size = (len * 4) as u64;
-        // Destroyed on return, after `unmap` (or, on an error, with the
-        // mapping cancelled): the copy into it was submitted by then.
+        // Destroyed when the read drops, after `unmap` (or, on an error,
+        // with the mapping cancelled): the copy into it was submitted then.
         let staging = self.create(&wgpu::BufferDescriptor {
             label: Some("readback"),
             size,
@@ -1729,22 +1907,22 @@ impl Gpu {
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_buffer_to_buffer(buf, (offset * 4) as u64, &staging, 0, size);
-        self.queue.submit([enc.finish()]);
-        let (tx, rx) = futures_channel::oneshot::channel();
+        let submission = self.queue.submit([enc.finish()]);
+        let (tx, ended) = futures_channel::oneshot::channel();
+        let mapped = Arc::new(AtomicBool::new(false));
+        let flag = mapped.clone();
         staging.map_async(wgpu::MapMode::Read, .., move |r| {
+            flag.store(r.is_ok(), Ordering::Release);
             let _ = tx.send(r);
         });
-        self.poll();
-        rx.await
-            .map_err(|_| "readback cancelled".to_string())?
-            .map_err(|e| format!("readback: {e}"))?;
-        let view = staging
-            .get_mapped_range(..)
-            .map_err(|e| format!("readback: {e}"))?;
-        let out = mapped_floats(&view, len);
-        drop(view);
-        staging.unmap();
-        Ok(out)
+        PendingRead {
+            device: self.device.clone(),
+            staging,
+            len,
+            mapped,
+            ended,
+            submission,
+        }
     }
 
     /// Runs every matmul kernel on three small products (both operand
@@ -4163,5 +4341,151 @@ mod tests {
         assert_eq!(usable(true, false), ["split", "fused", "time", "freq"]);
         assert_eq!(usable(false, true), ["split"]);
         assert_eq!(usable(false, false), ["split"]);
+    }
+
+    /// A GPU for the native tests of the queue, or `None` after a skip.
+    fn queue_gpu() -> Option<Gpu> {
+        match pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                test_support::skip(test_support::Need::Gpu, &e);
+                None
+            }
+        }
+    }
+
+    /// Submits a copy of `from` into `to` and gives its submission.
+    fn submit_copy(gpu: &Gpu, from: &wgpu::Buffer, to: &wgpu::Buffer) -> wgpu::SubmissionIndex {
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(from, 0, to, 0, from.size());
+        gpu.queue.submit([enc.finish()])
+    }
+
+    /// Waits natively for `submission` only, and runs its callbacks.
+    fn wait_for(gpu: &Gpu, submission: wgpu::SubmissionIndex) {
+        gpu.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .expect("poll");
+    }
+
+    /// `done_signal` asks WebGPU at the call: after a wait for step A
+    /// alone, the signal taken between A and B is done.  A signal that
+    /// asks only when awaited has no callback, so it reads false.
+    #[test]
+    fn a_done_signal_covers_the_work_before_its_call() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = (gpu.buffer("a", 1 << 16), gpu.buffer("b", 1 << 16));
+        let step_a = submit_copy(&gpu, &a, &b);
+        let signal = gpu.done_signal();
+        let _step_b = submit_copy(&gpu, &b, &a);
+        wait_for(&gpu, step_a);
+        assert!(signal.is_done(), "the signal of step A is done after A");
+        pollster::block_on(signal.wait());
+    }
+
+    /// `read_start` submits its copy and maps at the call.  A copy
+    /// submitted after it overwrites the source.  After a wait for the
+    /// read's copy alone, the staging buffer is mapped, and the read gives
+    /// the old contents.  A deferred copy gives the new contents, and a
+    /// deferred map reads false.
+    #[test]
+    fn a_started_read_gives_the_contents_at_its_start() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (source, newer) = (gpu.buffer("source", 4), gpu.buffer("newer", 4));
+        gpu.write(&source, 0, &[1.0, 2.0, 3.0, 4.0]);
+        let read = gpu.read_start(&source, 0, 4);
+        gpu.write(&newer, 0, &[5.0, 6.0, 7.0, 8.0]);
+        let _overwrite = submit_copy(&gpu, &newer, &source);
+        wait_for(&gpu, read.submission.clone());
+        assert!(
+            read.is_mapped(),
+            "the staging buffer is mapped after the copy"
+        );
+        let got = pollster::block_on(read.finish()).expect("read");
+        assert_eq!(got, [1.0, 2.0, 3.0, 4.0], "the contents at the start");
+    }
+
+    /// The most steps in flight at any event of `order`.
+    fn most_in_flight(order: &[Event]) -> usize {
+        let (mut now, mut most) = (0usize, 0usize);
+        for e in order {
+            match e {
+                Event::Submit(_) => now += 1,
+                Event::Await(_) => now -= 1,
+                _ => {}
+            }
+            most = most.max(now);
+        }
+        most
+    }
+
+    /// The order of `Pace` with 2 steps in flight, for 3 stems of 3, 2 and
+    /// 2 steps:
+    /// * each `Signal(i)` comes right after `Submit(i)`;
+    /// * no `Submit(i + 2)` comes before `Await(i)`;
+    /// * 2 steps are in flight at the most, and that is reached;
+    /// * each `Drained(g)` comes after the `Await` of each step submitted
+    ///   before it, and before the first `Submit` of the next group;
+    /// * each step is awaited once.
+    #[test]
+    fn the_pace_keeps_2_steps_in_flight_and_drains_before_each_read() {
+        let order = pace_order(&[3, 2, 2], STEPS_IN_FLIGHT);
+        let at = |e: Event| order.iter().position(|x| *x == e).expect("an event");
+        for i in 0..7 {
+            assert_eq!(order[at(Event::Submit(i)) + 1], Event::Signal(i), "{i}");
+            if i + 2 < 7 {
+                assert!(at(Event::Await(i)) < at(Event::Submit(i + 2)), "{i}");
+            }
+            let awaits = order.iter().filter(|e| **e == Event::Await(i)).count();
+            assert_eq!(awaits, 1, "{i}");
+        }
+        assert_eq!(STEPS_IN_FLIGHT, 2);
+        assert_eq!(most_in_flight(&order), 2, "{order:?}");
+        for (g, (last, next)) in [(2, Some(3)), (4, Some(5)), (6, None)]
+            .into_iter()
+            .enumerate()
+        {
+            let drained = at(Event::Drained(g));
+            for i in 0..=last {
+                assert!(at(Event::Await(i)) < drained, "group {g}, step {i}");
+            }
+            if let Some(next) = next {
+                assert!(drained < at(Event::Submit(next)), "group {g}");
+            }
+        }
+    }
+
+    /// With 1 step in flight, the order is today's: each step awaited
+    /// right after its signal.
+    #[test]
+    fn a_window_of_1_awaits_each_step_at_once() {
+        use Event::*;
+        assert_eq!(
+            pace_order(&[2], 1),
+            [
+                Submit(0),
+                Signal(0),
+                Await(0),
+                Submit(1),
+                Signal(1),
+                Await(1),
+                Drained(0)
+            ]
+        );
+    }
+
+    /// A step's time runs from the later of its submission and the end of
+    /// the step before, to its end.  A step submitted at 1.0 s, behind a
+    /// step that ended at 1.5 s, that ended at 1.8 s took 0.3 s.  One
+    /// submitted at 1.0 s after the step before ended at 0.9 s, that ended
+    /// at 1.8 s, took 0.8 s.
+    #[test]
+    fn a_step_that_waited_behind_the_step_before_is_not_charged_for_it() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(step_secs(1.0, 1.5, 1.8), 0.3));
+        assert!(close(step_secs(1.0, 0.9, 1.8), 0.8));
     }
 }
