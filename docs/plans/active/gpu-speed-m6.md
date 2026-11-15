@@ -289,10 +289,15 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * `e2e stored-stems` gave the hashes of M6's base page in Chrome and Safari, with `attn=vfused` and with `attn=freq` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-stems-*`; Surprises).
 * [x] 2026-11-15: Step 5a skipped: O1 is not built (the maintainer's answer to item 2).
 * [x] 2026-11-15: Step 5b skipped: O2 is not built (Step 2).
-* [ ] Step 6: the landing rule and the baselines.
-* [ ] Step 7: memory.
-* [ ] Step 8: calibration at the head.
-* [ ] Step 9: the checks before review round 1.
+* [x] 2026-11-15: Step 6: P lands (Step 4's comparisons, and Safari's again with `--runs 8`).  The baselines: Chrome 3.59 s to 3.43 s (`d3408f5`), Safari 5.57 s to 5.37 s (`cf2e935`).  The perf gates of Step 9 are in Progress there.
+* [x] 2026-11-15: Step 7: `memory-budget` passed 3 times in each browser and 3 times in Chrome with `attn=freq`.  `WORKER_HEADROOM_MB` stays (Surprises).
+* [ ] Step 10: no build: skipped, since P is built.
+* [x] 2026-11-15: Step 8: calibration at the head.  The choice check passes in both browsers.  The bias of `freq` against `fused` holds in Chrome.  In Safari it fails the limit on the first forced set, and holds on a second set and on the 8 runs together (Surprises, Decision log).  The team leader decides.
+* [x] 2026-11-15: Step 9: the checks before review round 1, at `cf2e935` with this plan's change (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step9-push.log`).
+  * `check --tier push` passed 15 lines, with both perf gates.  Chrome's gate passed: 3.45 s against the bound 3.77 s (baseline 3.43 s), `matmul v64,v64, attention vfused`.  Safari's gate passed: 5.40 s against 5.91 s (baseline 5.37 s), `matmul v64k8,v64k8, attention vfused`.  Its line `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.
+  * `cargo build -p xtask` passed.
+  * The docs: `docs/ARCHITECTURE.md` ("Running it on the GPU" and "Short steps") and the doc of `Pace` changed in `406e819`.  P changes neither `chunk_stems` nor `working_set`, and TD-11's wasm-test bullet (`chunk_stems` with a fake GPU half) stays true.
+  * `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/parent-m6.diff` for the orchestrator; `git apply --check` passes on HEAD.  No change of `CLAUDE.md` or `.claude/` is needed.
 * [ ] Step 10: no build (if neither is built).
 
 ## Surprises and discoveries
@@ -346,6 +351,46 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Safari 27.2: gain, 3 % or more, by the mean `r` of 4 blocks, since the kernels differ: -2.80 %, -4.10 %, -3.93 %, -3.67 %; mean -3.63 %.  The base chose `v64k8,v64k8` 5 times and `v64k8,v64` 3 times, the head `v64k8,v64` 5 times and `v64k8,v64k8` 3 times (the near choice of the small products).  The head's chunk lower quartile was 5.37 to 5.39 s, against 5.54 to 5.63 s.
   * So P lands: a gain of 3 % or more in both browsers, and no loss (case 9).  Step 2's prototype predicted 4.37 % and 3.22 %.
 
+* Step 6, 2026-11-15:
+  * Safari's comparison of `406e819` against `5ad3f82`'s page, again with `--runs 8`, since Safari has a near matmul choice (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/6-safari-runs8/`): gain, 3 % or more.  Blocks -3.59 %, -3.76 %, -3.68 %, -3.76 %; mean `r` -3.70 %.  Each side chose `v64k8,v64k8` 5 times and `v64k8,v64` 3 times.  With `--runs 4` (Step 4): gain, -3.63 %.  Both comparisons run 4 blocks, since the kernels differ.
+  * Only P is built, so the whole gain of M6's head against M6's base is Step 4's comparison: 4.32 % in Chrome, and 3.63 % and 3.70 % in Safari.  It did not run again.
+  * The baselines, from 5 unforced runs each (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/6-<browser>-baseline/`): Chrome 3.43 s (was 3.59 s), bound 3.77 s (was 3.95 s); Safari 5.37 s (was 5.57 s), bound 5.91 s (was 6.13 s).  Each is a lower bound, so no `--raise`.  One Chrome run chose `v64,i64` (3.52 s), and two Safari runs `v64k8,v64`.
+* Case 1 (Step 4): `e2e stored-stems` always runs `mm=s64`.  So its hashes check P's order with that kernel.  P changes no kernel; the kernels' own checks are the start-up checks and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release`.
+* Step 7, 2026-11-15, at the head (`cf2e935`, the page of `406e819`), with the kernels that each browser chooses (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/7-<case>-<n>/`): each of the 9 runs of `memory-budget` passed its four checks.
+
+  | Case | Tab total (margin under 943 MB) | Worker growth (bound) | 4-minute peak over 1-minute |
+  | - | - | - | - |
+  | Chrome, 3 runs | 756 MB (187 MB) each | 55 MB (63.16 MB) each song | 0 MB |
+  | Safari, 3 runs | 758 MB (185 MB) each | 55 MB (63.16 MB) each song | 0 MB |
+  | Chrome, `attn=freq`, 3 runs | 799 MB (144 MB) each | 55 MB (63.16 MB) each song | 0 MB |
+
+  * The tab totals are M5's (756, 758 and 799 MB): P adds no buffer.
+  * The worker grew 55 MB in each of the 18 separations, not M1's 57 MB.  So the measured headroom is -25.16 MB, with a spread of 0, and the margin under the bound is 8.16 MB.  It stays inside the band of `WORKER_HEADROOM_MB`'s doc: above the taken noise (2.16 MB), and a lost cut 3 (55 + 9.44 = 64.44 MB) still fails the check.  So the constant stays (Step 7, item 2).  P adds no CPU buffer of a chunk's size.  This run did not measure the growth at M6's base, so the cause of the 2 MB is not known.
+
+* Step 8, 2026-11-15, the head page (`406e819`), `CALIBRATION` 7.  The calibrations: each unforced run of the head page in Steps 4, 6 and 8 (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-<browser>/perf-*-head-*`, `6-<browser>-baseline/`, `6-safari-runs8/perf-safari-head-*`, `8-<browser>-calib/`; tables `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/8-<browser>-calib.table`).
+  * The pins, the matmul policy chosen most often: Chrome `v64,v64` (12 of 14 calibrations; also `v64,i64` and `v64,v64k8` once each).  Safari `v64k8,v64k8` (14 of 24; `v64k8,v64` 10).
+  * Choosable policies: `vfused` alone, in both browsers.  Each calibration chose it.  The faster fused kernel over split: Chrome 0.710 (sd 0.003), Safari 0.690 (sd 0.002), far from the flip point 1.0.  `vfused` over `fused`: Chrome 0.638 (sd 0.005), Safari 0.691 (sd 0.002), far from 1.
+  * The choice check (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/8-<browser>-choice-vfused-<q>/`), with the pins, the head page on both sides, the head `attn=vfused`:
+
+  | Pair | Chrome | Safari |
+  | - | - | - |
+  | `vfused` against `fused` | gain, 3 % or more: -23.76 %, -24.23 % | gain, 3 % or more: -21.35 %, -21.17 % |
+  | `vfused` against `freq` | gain, 3 % or more: -19.51 %, -19.53 % | gain, 3 % or more: -21.14 %, -21.29 % |
+
+  So the choosable policy is not slower than another: the check passes in both browsers.
+  * The bias of `freq` against `fused` (Step 8, item 2).  Forced runs with the pins, in the order `fused`, `freq`, `freq`, `fused` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/8-<browser>-bias-<n>-<policy>/`); chunk lower quartiles:
+
+  | Figure | Chrome | Safari, set 1 | Safari, set 2 | Safari, 8 runs |
+  | - | - | - | - | - |
+  | `fused` | 4.54, 4.53 s | 6.82, 6.83 s | 7.04, 6.84 s | median 6.835 s |
+  | `freq` | 4.27, 4.27 s | 6.85, 6.87 s | 6.97, 6.86 s | median 6.865 s |
+  | `D`, its noise | -0.265 s, 0.010 s | +0.035 s, 0.020 s | -0.025 s, 0.200 s | +0.030 s, 0.220 s |
+  | Calibration's (split - fused), mean of the pinned runs | -0.309 s (12) | +0.002 s (14) | +0.002 s | +0.002 s |
+  | The bias, and its limit | -0.044 s, under 0.133 s: holds | -0.033 s, over 0.0175 s: fails | +0.027 s, under 0.200 s: holds | -0.028 s, under 0.220 s: holds |
+
+  * In Safari, P made `freq` and `fused` almost equal: `D` is 0.5 % of a chunk, under `T` (1 %), against about 0.3 s at M5.  The first set's `D` (+0.035 s) changed its sign in the second set (-0.025 s).  So `D` in Safari is under its noise, and a limit of half of `D` (0.0175 s, 0.26 % of a chunk) is under what 2 runs of a policy can measure.
+  * In Chrome, `freq` is now faster than `fused` in the separation (`D` -0.265 s), and calibration sees the same (-0.309 s).  Before P, `freq` paid more waits (744 time-axis steps against 192).
+
 ## Decision log
 
 * 2026-11-15, agent (team leader): P's predicted gain is the same-page comparison of a prototype under a query key, in the measuring patch.  Why: no figure without `profile=1` gives the GPU's idle time between steps; the prototype gives P's effect itself at the base, with the noise rule of the comparison.
@@ -363,6 +408,8 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-15, agent (implementer): `Waits::EachStep` becomes `Waits::InFlight(n)`, and `STEP_WAITS` is `InFlight(STEPS_IN_FLIGHT)`.  Calibration's log lines now say "whole steps, 2 in flight", and `docs/references/local-browser-testing.md` names that line.  Why: the old text "with a wait after each" is no longer true.
 * 2026-11-15, agent (implementer): `Pace::all` drains at its end, and the self-test drains before each of its reads.  Why: a step left in flight would have its errors and its time checked only at the next step, or never.
 * 2026-11-15, agent (implementer): the self-test also ran the full chunk with the pins, beyond Step 4's `e2e selftest` with the default query.  Why: the default query runs only the stages, and the full chunk is the path that reads each mask after a drain.
+
+* 2026-11-15, agent (implementer): Safari's bias in Step 8 is judged on the 8 forced runs (both sets), and holds there: -0.028 s, under the noise of `D`, 0.220 s.  By Step 8's rule on the first set alone, it fails: -0.033 s, over 0.0175 s.  Why: the first set's `D` changed its sign on a repeat, so it is under its noise, and the limit is then that noise (M5's rule).  The plan says that a failed bias is a defect of M6, to fix in the timing or by a revert of P.  This decision is the team leader's, so the report names it.
 
 ## Outcomes and retrospective
 
