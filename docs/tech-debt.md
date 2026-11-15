@@ -565,7 +565,7 @@ This entry concerns VERIFY-1.  Review round 1 of M5 of `plans/active/gpu-speed.m
 It breaks no rule.  It concerns case 11 of M6 of `plans/active/gpu-speed.md`: calibration's bias of `freq` against `fused`.  The bias must stay under half of `|D|`, or under the noise of `D` where `|D|` is smaller.  So where `|D|` passes its noise, the limit falls from the noise to half the noise.  Where `|D|` is from its noise to twice its noise, a bias of noise alone fails.  Also, the noise of 2 runs of each policy can be too small.
 
 * Evidence: in M6, in Safari, `|D|` was 0.035 s, about 0.6 % of a chunk.  Its noise was 0.020 s, so the limit was 0.0175 s, and the bias -0.033 s.  `D` changed its sign on a repeat set, so that noise was too small.  The orchestrator accepted it (i1-3 of the intent review of M6).
-* Fix: give the limit a floor of `T` (1 %) of a chunk, in the next plan that runs the check.  Not planned.
+* Fix: make the limit the larger of half of `|D|`, the noise of `D` and `T` (1 %) of a chunk.  Do it in the next plan that runs the check.  Not planned.
 
 ## Known breaches
 
