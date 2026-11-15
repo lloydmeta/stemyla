@@ -396,6 +396,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-15, agent (orchestrator), intent review of M5.1, round 3: no reason exists to wait with the sync access handles of the worker tests' `plant` and `plant_at`, so M6's first commit makes the change (i3-1).  TD-11 already calls the write worker's 1.25 MB an estimate, so it needs no fix (i3-2).
 * 2026-11-15, agent (orchestrator), intent review of M5.1, round 4 (i4-1): the sync-handle `plant` truncates first, as the write worker's test helper does, so a shorter planted file stays shorter; the saving is a whole Safari `web-test` before and after, since `web-test` cannot run two crates alone.
 * 2026-11-15, agent (orchestrator), M6: if Step 2 builds no change, Step 1's commit (the worker tests' `plant` and `plant_at` on sync access handles) still gets review rounds, on that commit alone.  Why: it is code (VERIFY-1), and "no review rounds" in M6's goal meant a milestone that lands no code.
+* 2026-11-15, maintainer: M6 keeps at most 2 steps in flight; the apply of each mask under the next stem (O1) is not built.  Why: at a depth of 2 its bound is 0.83 % (Chrome) and 0.82 % (Safari); only a deeper queue gives 3.20 % and 2.05 %, an upper bound under the 3 % rule in Safari and just over it in Chrome.
 ## Outcomes and retrospective
 
 Not yet.
