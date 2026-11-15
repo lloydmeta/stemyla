@@ -169,7 +169,7 @@ M6's first commit moves the worker tests' `plant` and `plant_at` (`worker/src/we
   5. A loss that holds is a defect of the milestone, or a reason to drop its candidate (Extra stop conditions).  A loss that does not repeat is recorded, not acted on.
   6. A gain lowers the baseline with `--update-baselines`, after M4's `--raise` change.  An update in a fast session also takes up to about 6 % of the margin; M4's flip check allows for that drift.
 * `e2e memory-budget` passes in Safari and Chrome at the default chunk.  Its check 3 headroom (`WORKER_HEADROOM_MB`) is mostly heap that is free at the separation's start, which the model load and calibration set.  M4 and M5 change calibration, and M6 changes `working_set`, so each can move it.  Goal: the constant stays a measured figure with a margin that is not too tight, and still catches a lost cut.  The milestone plans of M4, M5 and M6 design the measurement, with these cases:
-  1. The headroom is measured again at the end of M4, M5 and M6, and when check 3's margin is under the noise or over the smallest lost-cut rise.
+  1. The headroom is measured again at the end of M4, M5 and M6, and when check 3's margin is under the noise or over the smallest lost-cut rise, or when the margin plus the taken noise reaches the smallest lost-cut rise.
   2. A measurement follows proof that the cause is free heap: the wasm test passes, and a probe of the live heap at each phase (as in M1 Step 8) finds no held buffer.  A held buffer is a defect to fix.
   3. The smallest lost-cut rise is computed again from the current `working_set`, for the GPU half's cut 3 (9.44 MB at M1).  The wasm test checks the CPU half's cuts 1, 2 and 4.
   4. The constant goes midway between the noise (2.16 MB at M1) and that rise, by the rule in its doc.  If the noise is not less than the rise, decide in the Decision log.  Its doc, the figures in `the_worker_growth_must_fit_the_working_set_budget` and a Decision log line change in the same commit.
@@ -360,7 +360,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-15, M6's head `72dfd07`: `check --tier push` passed 15 lines.  Chrome's gate: 3.51 s against 3.77 s, `v64,v64` and `vfused`.  Safari's gate: 5.57 s against 5.91 s, `v64k8,v64k8` and `vfused`.  This head holds the review rounds' changes of `Pace` and `time_rec`; Steps 4 and 8 measured `406e819`, and the round 4 push check at `1d75877`, the same code, gave 3.43 s and 5.37 s.
   * `e2e stored-stems` gives the base's hashes with `attn=vfused` and `attn=freq` in both browsers.  The scenario always runs `mm=s64`, so it checks P's order with that kernel.
   * Safari's bias limit (half of `D`, 0.0175 s) fails on the first forced set and holds on a second set and on the 8 runs.  P made `freq` and `fused` almost equal in Safari (`D` 0.5 % of a chunk, against 0.305 s at M5), and `D` changed its sign on the repeat.  The team leader decides on it (M6's Decision log).
-  * The worker grew 55 MB in each separation of Step 7, not 57 MB.  The margin of `WORKER_HEADROOM_MB` (8.16 MB) stays in its band, so the constant stays.
+  * The worker grew 55 MB in each separation of Step 7, not 57 MB.  M6's base page grew 55 MB too, so the change came before M6.  With -17 MB, a lost cut 3 less the taken noise (62.28 MB) passed the budget of 63.16 MB.  So `WORKER_HEADROOM_MB` is -19 MB (finding i1-2 of the intent review, `decb0c3`): a budget of 61.16 MB, and a margin of 6.16 MB in 3 runs of each browser.
   * The measuring patch stays off the branch, in the scratchpad of the run (`measure.patch`); M6's Surprises name its fields.
 
 * 2026-11-15, M6's head `cf2e935`: `check --tier push` passed 15 lines.  Chrome's gate: 3.45 s against 3.77 s, `matmul v64,v64, attention vfused`.  Safari's gate: 5.40 s against 5.91 s, `matmul v64k8,v64k8, attention vfused`.
@@ -433,6 +433,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * 2026-11-15, agent (orchestrator), intent review of M6, round 1 (i1-3): case 11 failed its limit in Safari on the planned set (bias -0.033 s, limit 0.0175 s).  Accepted: |bias| and |D| are each under `T` (1 %) of a chunk, and neither policy is choosable on this Mac, since `vfused` is about 21 % ahead.  The 8-run noise (0.220 s) rests on one slow run, so it is not the reason.  Half of |D| has no floor when |D| is near 0; a later plan gives it `T` as a floor.  For the PR's "Needs your attention".
 * 2026-11-15, agent (orchestrator), intent review of M6, round 1: the gate verdicts of the shipped code are recorded (i1-1).  P's reliance on `writeBuffer` order and the optional Radeon runs are in Surprises (i1-4).  Check 3's headroom goes back to M6's team with a test that fails first (i1-2).  The retrospective takes i1-5's facts at close-out.
+* 2026-11-15, agent (team leader of M6), intent review of M6, round 1 (i1-2): `WORKER_HEADROOM_MB` goes from -17 to -19 MB.  Why: the worker grows 55 MB since before M6, so with -17 MB a lost cut 3 less the taken noise passed check 3.  M1's rule gives -25.16 + (2.16 + 9.44) / 2 = -19.36, rounded to -19 MB.
 ## Outcomes and retrospective
 
 Not yet.
