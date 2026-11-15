@@ -679,22 +679,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             targets: &["--lib"],
             filter: None,
             browser: Browser::Chrome,
-            driver: std::path::Path::new("/Users/lloyd/chromedriver"),
-            capabilities: Some(std::path::Path::new("/Users/lloyd/web-test-chrome.json")),
+            driver: std::path::Path::new("/opt/drivers/chromedriver"),
+            capabilities: Some(std::path::Path::new("/opt/drivers/web-test-chrome.json")),
             chrome_folder: Some(std::path::Path::new("/tmp/stemyla-chrome/4242-0")),
         };
-        let cmd = chrome.command(std::path::Path::new("/Users/lloyd/stemyla"));
+        let cmd = chrome.command(std::path::Path::new("/srv/stemyla"));
         assert_eq!(
             env_of(&cmd, crate::webdriver::CHROME_TMP_VAR).as_deref(),
             Some("/tmp/stemyla-chrome/4242-0")
         );
         assert_eq!(
             env_of(&cmd, "CHROMEDRIVER").as_deref(),
-            Some("/Users/lloyd/chromedriver")
+            Some("/opt/drivers/chromedriver")
         );
         assert_eq!(
             env_of(&cmd, "WASM_BINDGEN_TEST_WEBDRIVER_JSON").as_deref(),
-            Some("/Users/lloyd/web-test-chrome.json")
+            Some("/opt/drivers/web-test-chrome.json")
         );
         let safari = CrateRun {
             browser: Browser::Safari,
@@ -703,7 +703,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
             chrome_folder: None,
             ..chrome
         };
-        let cmd = safari.command(std::path::Path::new("/Users/lloyd/stemyla"));
+        let cmd = safari.command(std::path::Path::new("/srv/stemyla"));
         assert_eq!(env_of(&cmd, crate::webdriver::CHROME_TMP_VAR), None);
         assert_eq!(env_of(&cmd, "WASM_BINDGEN_TEST_WEBDRIVER_JSON"), None);
         assert_eq!(

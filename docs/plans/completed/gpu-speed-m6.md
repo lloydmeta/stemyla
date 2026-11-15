@@ -52,12 +52,12 @@ The state at the start, on 2026-11-15, at commit `2543abc` on branch `gpu-speed/
 
 ### The paths of this run
 
-* The scratchpad of M6: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/`.  Write each path in full in each command and each brief.  The scratchpad is not kept, so each figure also goes into this plan's Surprises at the end of its step.
-* The logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/<step>-<browser>-<n>/`.  Each figure in a table names its log.
-* The measuring worktree of Step 2: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/measure-wt`, detached at M6's base, with `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/measure.patch` applied.  Build its page with `CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/measure-wt/target`, then `trunk build --release` in its `app/`.
-* The base worktree of each comparison: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/base-wt`, detached at the base commit, built the same way with its own `target`.  Its page is `.../m6/base-wt/app/dist`.  Remove each worktree after its use with `git worktree remove`.
-* The head page: `/Users/lloyd/Documents/rustt/stemyla/app/dist`, from `(cd /Users/lloyd/Documents/rustt/stemyla/app && trunk build --release)`.
-* Weights: `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors`, also given as `--weights`.  Never commit it (ASSET-1).  `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.  Set both for each `check --tier push` and each `e2e` run.
+* The scratchpad of M6: `<scratch>/m6/`.  Write each path in full in each command and each brief.  The scratchpad is not kept, so each figure also goes into this plan's Surprises at the end of its step.
+* The logs: `<scratch>/m6/runs/<step>-<browser>-<n>/`.  Each figure in a table names its log.
+* The measuring worktree of Step 2: `<scratch>/m6/measure-wt`, detached at M6's base, with `<scratch>/m6/measure.patch` applied.  Build its page with `CARGO_TARGET_DIR=<scratch>/m6/measure-wt/target`, then `trunk build --release` in its `app/`.
+* The base worktree of each comparison: `<scratch>/m6/base-wt`, detached at the base commit, built the same way with its own `target`.  Its page is `.../m6/base-wt/app/dist`.  Remove each worktree after its use with `git worktree remove`.
+* The head page: `app/dist`, from `(cd app && trunk build --release)`.
+* Weights: `$STEMYLA_PERF_WEIGHTS`, the main checkout's `third_party/models/bs_roformer_sw.f16.safetensors`, also given as `--weights`.  Never commit it (ASSET-1).  `$CHROMEDRIVER`, the driver of Chrome for Testing 157 (mac-arm64).  Set both for each `check --tier push` and each `e2e` run.
 * `<scratch>` is the session's scratchpad folder, which the brief of each agent names.
 * `caffeinate -dimsu` runs; never stop it.  Before each browser run, check with `ps -A -o pid,etime,command` that no other `e2e`, `web-test` or `check --tier push` runs.  Read `docs/references/local-browser-testing.md` first.
 
@@ -101,7 +101,7 @@ Acceptance: the spy tests fail first, then pass.  The guard's failure without th
 
 The figures that decide each build, from runs without `profile=1`.  `<pins>` is `v64,v64` in Chrome and `v64k8,v64` in Safari (the `kernels:` lines of M5.1's gates); check them against the `kernels:` line of the first unforced run, and use that line if it differs.
 
-1. The measuring patch, `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/measure.patch`, on M6's base.  It stays off the branch (the parent).  It holds the two methods above with their native tests, and adds these fields after the text of each chunk line, so `perf_result` still reads the chunk time:
+1. The measuring patch, `<scratch>/m6/measure.patch`, on M6's base.  It stays off the branch (the parent).  It holds the two methods above with their native tests, and adds these fields after the text of each chunk line, so `perf_result` still reads the chunk time:
    * `input <s>`: the time of the chunk's `next_input`, which is outside today's chunk time;
    * `paced <s>` and `steps <n>`: the chunk's paced time and step count;
    * `shared <s>`, and `stem<k> <s>` for each stem: the paced time of the shared steps (386 at the default chunk) and of each stem's mask steps (14 each);
@@ -113,9 +113,9 @@ The figures that decide each build, from runs without `profile=1`.  `<pins>` is 
    * `inflight <n>`: the most steps in flight during the chunk.
    It also adds a query key, `pace_ahead=1`, the prototype of P.  With it, `Pace` submits a step, takes its `done_signal`, and awaits the signal of the step before, so 2 steps are in flight.  It awaits each signal before each mask read, so the read stays correct.  The key goes in `protocol/src/lib.rs` (`mod field`) and in `MEASURE_KEYS` of `xtask/src/e2e/perf.rs`, since it changes what a run measures, so a gate refuses it.
 2. Build the measuring page in the measuring worktree.  Then, in each browser, one at a time:
-   * 4 runs: `STEMYLA_PERF_WEIGHTS=<weights> cargo run -p xtask -- e2e perf --browser <chrome|safari> --weights <weights> --runs 4 --dist <the measuring page> --query "mm=<pins>&attn=vfused" --out /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-<browser>-fields`.  For each field: the median over chunks 2 to N of each run, then the median of the 4 runs.
-   * The prototype of P: `STEMYLA_PERF_WEIGHTS=<weights> cargo run -p xtask -- e2e perf --browser <b> --weights <weights> --base-dist <the measuring page> --dist <the measuring page> --query "mm=<pins>&attn=vfused" --head-query "pace_ahead=1" --runs 4 --out /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-<browser>-pace`.  The verdict and the mean `r` of the blocks.  The head runs' `inflight` field must read 2, else the prototype is wrong: fix it and run again.
-   * `<weights>` is `/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors`.
+   * 4 runs: `STEMYLA_PERF_WEIGHTS=<weights> cargo run -p xtask -- e2e perf --browser <chrome|safari> --weights <weights> --runs 4 --dist <the measuring page> --query "mm=<pins>&attn=vfused" --out <scratch>/m6/runs/2-<browser>-fields`.  For each field: the median over chunks 2 to N of each run, then the median of the 4 runs.
+   * The prototype of P: `STEMYLA_PERF_WEIGHTS=<weights> cargo run -p xtask -- e2e perf --browser <b> --weights <weights> --base-dist <the measuring page> --dist <the measuring page> --query "mm=<pins>&attn=vfused" --head-query "pace_ahead=1" --runs 4 --out <scratch>/m6/runs/2-<browser>-pace`.  The verdict and the mean `r` of the blocks.  The head runs' `inflight` field must read 2, else the prototype is wrong: fix it and run again.
+   * `<weights>` is `$STEMYLA_PERF_WEIGHTS`, the main checkout's `third_party/models/bs_roformer_sw.f16.safetensors`.
 3. P's predicted gain in a browser: the size of the comparison's mean `r`, if its verdict is a gain; else 0.  It is the effect of P itself, at the base, with no profile.
 4. O's predicted gains in a browser, from the field medians.  Each CPU piece hides at most the paced time of the 2 steps that run under it in Step 5's lists.
    * First the bound: `(input + stft + apply0 + ... + apply5) / (input + chunk time)`.  If it is under 3 % in both browsers, O is not built.
@@ -138,7 +138,7 @@ Acceptance: the table of the field medians and the predicted gains in each brows
 1. A source test first, in the form of `chunk_times_have_two_decimals` (`xtask/src/e2e/perf.rs`): the worker's chunk timer starts at the end of the line of the chunk before, and chunk 1's just before its first `next_input`.  It fails first on the old form, on an assert.
 2. The code: in `separate_chunks`, the timer `tc` is set before the first `next_input`, and set again just after each chunk line.  The line keeps its format, `"chunk {done}/{total}: {:.2} s; {}"`.
 3. `cargo run -p xtask -- check --tier commit`, then commit, signed.  This commit is the oldest base of M6's comparisons.
-4. Build its parent's page in the base worktree.  Then, in each browser: `STEMYLA_PERF_WEIGHTS=<weights> cargo run -p xtask -- e2e perf --browser <b> --weights <weights> --base-dist /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/base-wt/app/dist --runs 4 --out /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/3-<browser>`.  If the verdict is not "no change", measure the baselines again with `e2e perf --browser <b> --weights <weights> --runs 5 --update-baselines --raise "the chunk time covers the input read"`, in a commit of its own.
+4. Build its parent's page in the base worktree.  Then, in each browser: `STEMYLA_PERF_WEIGHTS=<weights> cargo run -p xtask -- e2e perf --browser <b> --weights <weights> --base-dist <scratch>/m6/base-wt/app/dist --runs 4 --out <scratch>/m6/runs/3-<browser>`.  If the verdict is not "no change", measure the baselines again with `e2e perf --browser <b> --weights <weights> --runs 5 --update-baselines --raise "the chunk time covers the input read"`, in a commit of its own.
 
 Acceptance: the source test failed first, then passes.  The verdicts are in Surprises, and the baselines are new if a verdict was not "no change".
 
@@ -161,7 +161,7 @@ Then:
 
 1. Before the commit: `e2e selftest --browser <b> --weights <weights>` passes in Safari and Chrome.  `e2e stored-stems --browser <b> --weights <weights>` gives the same hashes as at the base, with `--query attn=vfused` and with `--query attn=freq`, in Chrome and Safari (case 1).  The base hashes come from the base page (Step 3's commit, or M6's base if Step 3 is skipped), in the same browser.
 2. `cargo run -p xtask -- check --tier commit`, then commit, signed.
-3. The comparison (case 9), in each browser: `e2e perf --browser <b> --weights <weights> --base-dist <the page of the commit before> --runs 4 --out /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-<browser>`.  A gain of 3 % or more in one browser, and no loss in either.  Else revert the commit, and give the figures to Surprises (the parent's gain case 4).
+3. The comparison (case 9), in each browser: `e2e perf --browser <b> --weights <weights> --base-dist <the page of the commit before> --runs 4 --out <scratch>/m6/runs/4-<browser>`.  A gain of 3 % or more in one browser, and no loss in either.  Else revert the commit, and give the figures to Surprises (the parent's gain case 4).
 
 Acceptance: the tests failed first, then pass, the two native tests with `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release`.  The self-tests, the hashes and the verdicts are in Surprises.
 
@@ -185,7 +185,7 @@ O1 changes no input read, no `Demixer`, no `working_set` and no time-axis step. 
 * Cases 2 and 4: a pure order function gives the list above.  Its test: each `read_start` of stem k comes after the last `W` of `M(k)`, and before the first `S` of `M(k + 1)`.  No `S` comes between a copy and its `map_async`.  At most 2 steps are in flight at each event.  The native tests of the two methods cover the GPU side.
 * Case 3: the wasm test's fake GPU half counts the masks that the CPU holds, and fails over 1.  `GpuHalf` and the fake change with the order, so the fake records it.
 
-Then, as Step 4, items 1 to 3: the self-tests, the hashes of case 1, `check --tier commit`, the commit, and the comparison against the commit before, with `--out /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/5a-<browser>`.
+Then, as Step 4, items 1 to 3: the self-tests, the hashes of case 1, `check --tier commit`, the commit, and the comparison against the commit before, with `--out <scratch>/m6/runs/5a-<browser>`.
 
 #### Step 5b: O2, the next chunk's input under the last stem (only if O2 is built)
 
@@ -213,7 +213,7 @@ The parts of the design that the cases need:
 * Case 7: each new buffer has a fixed size from chunk to chunk: the next chunk's input is padded as `next_input` pads it.  `memory-budget`'s flat check covers it.
 * The memory cost: the next chunk's spectra (18.9 MB) at the peak of the masks phase, and the next input and features at the STFT moment.  The tab total with `freq` in Chrome would be about 799 + 19 = 818 MB, under `TAB_BUDGET_MB` (943 MB); Step 7 measures it.
 
-Step 3 landed before the first change (case 10).  Then, as Step 4, items 1 to 3, with `--out /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/5b-<browser>`.
+Step 3 landed before the first change (case 10).  Then, as Step 4, items 1 to 3, with `--out <scratch>/m6/runs/5b-<browser>`.
 
 #### The step limit during a CPU piece (Steps 5a and 5b)
 
@@ -237,20 +237,20 @@ Acceptance of Step 5: the tests failed first, then pass, the native ones with `S
 
 1. The check of "Each calibration choice is not slower" on the head page alone (the parent's case 5 of that goal), as `docs/references/local-browser-testing.md` says.
 2. The bias of `freq` against `fused`, as Step 5, item 6 of `plans/completed/gpu-speed-m5.md` does, in each browser: forced runs of `fused` and `freq` with the pins (4 each, in the order `fused`, `freq`, `freq`, `fused`), for `D` and its noise.  Then 12 unforced calibrations whose `kernels:` line gives the pins.  The bias is the mean of calibration's (split - fused) minus `D`.  Its size stays under half of `|D|`, or under the noise of `D` where `|D|` is smaller.  Else it is a defect of M6: fix the timing (case 11), or revert P.
-3. Each run's logs go in `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/8-<browser>-<n>/` (`--out`).
+3. Each run's logs go in `<scratch>/m6/runs/8-<browser>-<n>/` (`--out`).
 
 ### Step 9: the checks before review round 1
 
-* `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver cargo run -p xtask -- check --tier push` passes, with both perf gates run.  Progress gives both verdicts.  A skip line is not a pass (VERIFY-1).
+* `cargo run -p xtask -- check --tier push`, with `$STEMYLA_PERF_WEIGHTS` set and `$CHROMEDRIVER` set to the driver of Chrome for Testing 157 (mac-arm64), passes, with both perf gates run.  Progress gives both verdicts.  A skip line is not a pass (VERIFY-1).
 * `cargo build -p xtask` passes.
 * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passes.
 * Docs in the commits of the changes: `docs/ARCHITECTURE.md` ("Running it on the GPU": the pacing and the order of a chunk), the docs of `Pace`, `chunk_stems` and `working_set`, and TD-11's wasm-test bullet.
-* `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/parent-m6.diff` for the orchestrator, with `git apply --check` passing on HEAD.  It holds a Surprises entry with the tables of Steps 1, 2 and 4 to 8, and Decision log lines for each build decision.
+* `<scratch>/m6/parent-m6.diff` for the orchestrator, with `git apply --check` passing on HEAD.  It holds a Surprises entry with the tables of Steps 1, 2 and 4 to 8, and Decision log lines for each build decision.
 
 ### Step 10: no build (only if Step 2 builds neither)
 
 1. `STEMYLA_PERF_WEIGHTS=... CHROMEDRIVER=... cargo run -p xtask -- check --tier push` (with the paths of Step 9) passes, with both perf gates run, since Step 1's commit is code.  Progress gives both verdicts.
-2. `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/parent-m6.diff` for the orchestrator: a Surprises entry with Step 1's counts and Step 2's table, its Outcomes text, and a Decision log line.  The Surprises entry names the measuring patch (the parent).
+2. `<scratch>/m6/parent-m6.diff` for the orchestrator: a Surprises entry with Step 1's counts and Step 2's table, its Outcomes text, and a Decision log line.  The Surprises entry names the measuring patch (the parent).
 3. The parent's headroom case 1 ("measured again at the end of M6") does not apply: Step 1 changes only test code, so the worker's heap does not change.  The Decision log gives this reason.
 4. The review rounds, by item 1 of "Decisions for the maintainer".  Then the plan moves to `completed/`.
 
@@ -279,25 +279,25 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] 2026-11-15: the plan written, at `2543abc`.
 * [x] 2026-11-15: plan review round 1: 1 blocker, 7 should-fix and 2 nits, each applied.
 * [x] 2026-11-15: plan review round 2: 1 blocker, 4 should-fix and 2 nits, each applied.
-* [x] 2026-11-15: Step 1: the test helpers use sync access handles.  The spy tests `plant_helpers_open_no_write_stream` failed first in Chrome, with 2 calls (worker) and 1 call (decoder) of `createWritable` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-fail-spy.log`).  The guard `plant_helpers_truncate_a_longer_file` failed with helpers that had no `truncate(0)`: it read `[2, 2, 2, 1, 1, 1, 1, 1]`, not `[2, 2, 2]`, in both crates (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-fail-truncate.log`).  Then all four tests passed (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-pass.log`).  The whole Safari and Chrome `web-test` runs after the change passed (Surprises).
-* [x] 2026-11-15: Step 2: the measurement at M6's base, with `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/measure.patch` on `5ad3f82`.  The native tests of `done_signal` and `read_start` failed first with forms that ask WebGPU only at the await, on their flag asserts (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step2-fail-native.log`).  Then `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed with the patch (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step2-gpu-suite.log`).  P is to be built; O1 and O2 are not, at a depth of 2.  O1's bound at an unlimited depth is 3.20 % in Chrome, so item 2 of "Decisions for the maintainer" is open: a checkpoint for the orchestrator (Surprises, Decision log).
+* [x] 2026-11-15: Step 1: the test helpers use sync access handles.  The spy tests `plant_helpers_open_no_write_stream` failed first in Chrome, with 2 calls (worker) and 1 call (decoder) of `createWritable` (`<scratch>/m6/step1-fail-spy.log`).  The guard `plant_helpers_truncate_a_longer_file` failed with helpers that had no `truncate(0)`: it read `[2, 2, 2, 1, 1, 1, 1, 1]`, not `[2, 2, 2]`, in both crates (`<scratch>/m6/step1-fail-truncate.log`).  Then all four tests passed (`<scratch>/m6/step1-pass.log`).  The whole Safari and Chrome `web-test` runs after the change passed (Surprises).
+* [x] 2026-11-15: Step 2: the measurement at M6's base, with `<scratch>/m6/measure.patch` on `5ad3f82`.  The native tests of `done_signal` and `read_start` failed first with forms that ask WebGPU only at the await, on their flag asserts (`<scratch>/m6/step2-fail-native.log`).  Then `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed with the patch (`<scratch>/m6/step2-gpu-suite.log`).  P is to be built; O1 and O2 are not, at a depth of 2.  O1's bound at an unlimited depth is 3.20 % in Chrome, so item 2 of "Decisions for the maintainer" is open: a checkpoint for the orchestrator (Surprises, Decision log).
 * [x] 2026-11-15: Step 3 skipped: O2 is not built (Step 2).
 * [x] 2026-11-15: Step 4: P, 2 steps in flight, in `406e819`.  Its comparison against M6's base page shows a gain of 3 % or more in Chrome and in Safari (Surprises).  Done before the commit:
-  * The tests failed first, each on an assert (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step4-fail-gpu.log`): `a_done_signal_covers_the_work_before_its_call` and `a_started_read_gives_the_contents_at_its_start` on their flags, with forms that ask WebGPU only at the await.  `the_pace_keeps_2_steps_in_flight_and_drains_before_each_read` found 1 step in flight at most, with a window that ignored its depth.  `a_step_that_waited_behind_the_step_before_is_not_charged_for_it` failed with the old step time.  `calibration_keeps_the_steps_in_flight_of_the_separation` read `InFlight(1)`, and `choice_keys_name_the_format` read `CALIBRATION` 6.  `a_window_of_1_awaits_each_step_at_once` passed before and after: it pins today's order.
-  * `the_worker_paces_as_calibration_times` failed on the worker of M6's base (no window, `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step4-fail-source.log`), and on a worker with no drain before the read of a mask (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step4-fail-source-drain.log`).
-  * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step4-gpu-suite.log`).
-  * `e2e selftest` passed in Chrome and Safari, with the default query (`mm=s64`, stages) and with the full chunk and the pins (`selftest=1&mm=<pins>&attn=vfused`) (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-selftest-*`).
-  * `e2e stored-stems` gave the hashes of M6's base page in Chrome and Safari, with `attn=vfused` and with `attn=freq` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-stems-*`; Surprises).
+  * The tests failed first, each on an assert (`<scratch>/m6/step4-fail-gpu.log`): `a_done_signal_covers_the_work_before_its_call` and `a_started_read_gives_the_contents_at_its_start` on their flags, with forms that ask WebGPU only at the await.  `the_pace_keeps_2_steps_in_flight_and_drains_before_each_read` found 1 step in flight at most, with a window that ignored its depth.  `a_step_that_waited_behind_the_step_before_is_not_charged_for_it` failed with the old step time.  `calibration_keeps_the_steps_in_flight_of_the_separation` read `InFlight(1)`, and `choice_keys_name_the_format` read `CALIBRATION` 6.  `a_window_of_1_awaits_each_step_at_once` passed before and after: it pins today's order.
+  * `the_worker_paces_as_calibration_times` failed on the worker of M6's base (no window, `<scratch>/m6/step4-fail-source.log`), and on a worker with no drain before the read of a mask (`<scratch>/m6/step4-fail-source-drain.log`).
+  * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed (`<scratch>/m6/step4-gpu-suite.log`).
+  * `e2e selftest` passed in Chrome and Safari, with the default query (`mm=s64`, stages) and with the full chunk and the pins (`selftest=1&mm=<pins>&attn=vfused`) (`<scratch>/m6/runs/4-selftest-*`).
+  * `e2e stored-stems` gave the hashes of M6's base page in Chrome and Safari, with `attn=vfused` and with `attn=freq` (`<scratch>/m6/runs/4-stems-*`; Surprises).
 * [x] 2026-11-15: Step 5a skipped: O1 is not built (the maintainer's answer to item 2).
 * [x] 2026-11-15: Step 5b skipped: O2 is not built (Step 2).
 * [x] 2026-11-15: Step 6: P lands (Step 4's comparisons, and Safari's again with `--runs 8`).  The baselines: Chrome 3.59 s to 3.43 s (`d3408f5`), Safari 5.57 s to 5.37 s (`cf2e935`).  The perf gates of Step 9 are in Progress there.
 * [x] 2026-11-15: Step 7: `memory-budget` passed 3 times in each browser and 3 times in Chrome with `attn=freq`.  `WORKER_HEADROOM_MB` stays (Surprises).
 * [x] 2026-11-15: Step 8: calibration at the head.  The choice check passes in both browsers.  The bias of `freq` against `fused` holds in Chrome.  In Safari it fails the limit on the planned set of 4 forced runs.  The orchestrator accepts it (i1-3 of the intent review, the parent's Decision log).
-* [x] 2026-11-15: Step 9: the checks before review round 1, at `cf2e935` with this plan's change (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step9-push.log`).
+* [x] 2026-11-15: Step 9: the checks before review round 1, at `cf2e935` with this plan's change (`<scratch>/m6/step9-push.log`).
   * `check --tier push` passed 15 lines, with both perf gates.  Chrome's gate passed: 3.45 s against the bound 3.77 s (baseline 3.43 s), `matmul v64,v64, attention vfused`.  Safari's gate passed: 5.40 s against 5.91 s (baseline 5.37 s), `matmul v64k8,v64k8, attention vfused`.  Its line `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.
   * `cargo build -p xtask` passed.
   * The docs: `docs/ARCHITECTURE.md` ("Running it on the GPU" and "Short steps") and the doc of `Pace` changed in `406e819`.  P changes neither `chunk_stems` nor `working_set`, and TD-11's wasm-test bullet (`chunk_stems` with a fake GPU half) stays true.
-  * `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/parent-m6.diff` for the orchestrator; `git apply --check` passes on HEAD.  No change of `CLAUDE.md` or `.claude/` is needed.
+  * `<scratch>/m6/parent-m6.diff` for the orchestrator; `git apply --check` passes on HEAD.  No change of `CLAUDE.md` or `.claude/` is needed.
 * [x] 2026-11-15: Step 10 skipped: P is built.
 * [x] 2026-11-15: the fixes of review round 1 (`<scratch>/m6/r1/fixes.txt`).  Each new or changed test failed first on an assert, against a mutant (`<scratch>/m6/r1/fail-*.log`):
   * 1-1: `Pace` and `time_rec` run their steps through `Window::step` and `Window::drain` (a `Steps` trait).  `pace_order` drives them too.  `the_pace_keeps_2_steps_in_flight_and_drains_before_each_read` failed against four mutants.  Two are a dropped older step (`fail-1-1-a-drop-older.log`) and no await in the round (`fail-1-1-b-no-await-in-round.log`).  The others are an await of each step at once (`fail-1-1-c-await-at-once.log`) and a signal before the submission (`fail-1-1-d-signal-before-submit.log`).
@@ -330,10 +330,10 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 ## Surprises and discoveries
 
-* Step 1, 2026-11-15, Safari 27.2 and Chrome 157 on the M2 Pro.  A whole Safari `web-test` at M6's base left 1,320 swap files, 1,697.2 MB, and 9 blob folders (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-safari-before.log`).  After the change, it left 1,149 swap files, 1,549.5 MB, and 9 blob folders (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-safari-after.log`).  So the change saves 171 swap files, 147.7 MB, for each whole Safari run.  Each crate passed in both runs: the stem worker 111 tests before and 113 after, the decode worker 13 before and 15 after.  The whole Chrome `web-test` after the change passed in each crate (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-chrome-after.log`).  The tests that read Safari's `lastModified` after a write in place (`a_mix_file_written_again_after_the_last_read_ends_with_unstored`, `the_end_check_sees_a_mix_file_written_again_at_its_size`) passed in Safari.
+* Step 1, 2026-11-15, Safari 27.2 and Chrome 157 on the M2 Pro.  A whole Safari `web-test` at M6's base left 1,320 swap files, 1,697.2 MB, and 9 blob folders (`<scratch>/m6/step1-safari-before.log`).  After the change, it left 1,149 swap files, 1,549.5 MB, and 9 blob folders (`<scratch>/m6/step1-safari-after.log`).  So the change saves 171 swap files, 147.7 MB, for each whole Safari run.  Each crate passed in both runs: the stem worker 111 tests before and 113 after, the decode worker 13 before and 15 after.  The whole Chrome `web-test` after the change passed in each crate (`<scratch>/m6/step1-chrome-after.log`).  The tests that read Safari's `lastModified` after a write in place (`a_mix_file_written_again_after_the_last_read_ends_with_unstored`, `the_end_check_sees_a_mix_file_written_again_at_its_size`) passed in Safari.
 
-* Step 2, 2026-11-15, Chrome 157.0.8103.51 and Safari 27.2 on the M2 Pro, at M6's base with the measuring patch, no `profile=1`.  Each field is the median over chunks 2 to 11 of a run, then the median of 4 runs (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-<browser>-fields/`).  The full table: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step2-table.md`.  The patch: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/measure.patch`; the branch has no commit of it.
-  * The pins: Chrome's unforced run chose `v64,v64` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-chrome-unforced/`), as planned.  Safari's unforced run chose `v64k8,v64k8`, not `v64k8,v64` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-safari-unforced/`).  So Safari's runs used `mm=v64k8,v64k8`, by the rule of Step 2.  Its small products were near: `v64` 1.18 s, `v64k8` 1.16 s.
+* Step 2, 2026-11-15, Chrome 157.0.8103.51 and Safari 27.2 on the M2 Pro, at M6's base with the measuring patch, no `profile=1`.  Each field is the median over chunks 2 to 11 of a run, then the median of 4 runs (`<scratch>/m6/runs/2-<browser>-fields/`).  The full table: `<scratch>/m6/step2-table.md`.  The patch: `<scratch>/m6/measure.patch`; the branch has no commit of it.
+  * The pins: Chrome's unforced run chose `v64,v64` (`<scratch>/m6/runs/2-chrome-unforced/`), as planned.  Safari's unforced run chose `v64k8,v64k8`, not `v64k8,v64` (`<scratch>/m6/runs/2-safari-unforced/`).  So Safari's runs used `mm=v64k8,v64k8`, by the rule of Step 2.  Its small products were near: `v64` 1.18 s, `v64k8` 1.16 s.
 
   | Field (median) | Chrome | Safari |
   | - | - | - |
@@ -353,7 +353,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
   | Predicted gain | Chrome | Safari |
   | - | - | - |
-  | P: verdict and mean `r` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-<browser>-pace/`) | gain, 3 % or more; -4.37 % (blocks -4.55 %, -4.19 %) | gain, 3 % or more; -3.22 % (blocks -3.17 %, -3.26 %; block 1, -2.34 %, spoiled at 1.45 %) |
+  | P: verdict and mean `r` (`<scratch>/m6/runs/2-<browser>-pace/`) | gain, 3 % or more; -4.37 % (blocks -4.55 %, -4.19 %) | gain, 3 % or more; -3.22 % (blocks -3.17 %, -3.26 %; block 1, -2.34 %, spoiled at 1.45 %) |
   | O's bound | 4.86 % | 3.07 % |
   | O1, depth 2 | 0.83 % | 0.82 % |
   | O2's addition, depth 2 | 0.68 % | 0.62 % |
@@ -369,22 +369,22 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Safari's worker clock gives whole milliseconds, so its fields are on a grid of 1 ms.  O's bound in Safari (3.07 %) is near 3 %, but Chrome's 4.86 % already passes the bound, so no decision hangs on it.
 
 * 2026-11-15: the maintainer chose a) for item 2 of "Decisions for the maintainer": at most 2 steps in flight.  So O1 is not built, by its figures of Step 2 (0.83 % in Chrome, 0.82 % in Safari at a depth of 2).  O2 is not built at any depth (Step 2).  The steps left after Step 4 are 6, 7, 8 and 9.
-* Step 4, 2026-11-15, `e2e stored-stems` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-stems-*`): the base page is M6's base, `5ad3f82`, and the head page is the tree of Step 4.  The scenario runs `mm=s64` on both sides.  The six SHA-256 of each pair are the same, in Chrome and in Safari:
+* Step 4, 2026-11-15, `e2e stored-stems` (`<scratch>/m6/runs/4-stems-*`): the base page is M6's base, `5ad3f82`, and the head page is the tree of Step 4.  The scenario runs `mm=s64` on both sides.  The six SHA-256 of each pair are the same, in Chrome and in Safari:
   * `attn=vfused`: bass `04b942ca...`, drums `bcfb3645...`, other `771b34e0...`, vocals `f1b79d87...`, guitar `5f9f7bd6...`, piano `3166e0de...`.
-  * `attn=freq`: the same six in each browser, base and head (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-stems-<browser>-freq-<side>.hashes`).
+  * `attn=freq`: the same six in each browser, base and head (`<scratch>/m6/runs/4-stems-<browser>-freq-<side>.hashes`).
   * The scenario took `mm=s64` although the query gave each browser's pins.  So the pins in the query changed nothing; both sides ran the same kernels.
 
-* Step 4, 2026-11-15, the comparison of item 3 (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-<browser>/`), with no query.  The base page is M6's base (`5ad3f82`), whose page is the page of `0c2e554`, the commit before Step 4: Steps 1 and 2 changed only tests and docs.
+* Step 4, 2026-11-15, the comparison of item 3 (`<scratch>/m6/runs/4-<browser>/`), with no query.  The base page is M6's base (`5ad3f82`), whose page is the page of `0c2e554`, the commit before Step 4: Steps 1 and 2 changed only tests and docs.
   * Chrome 157: gain, 3 % or more.  Blocks: -4.18 %, -4.70 % (spoiled, 1.67 %), -4.45 %; mean `r` of the unspoiled blocks -4.32 %.  Each run chose `v64,v64` and `vfused`.  The head's chunk lower quartile was 3.43 to 3.47 s, against 3.59 to 3.65 s.
   * Safari 27.2: gain, 3 % or more, by the mean `r` of 4 blocks, since the kernels differ: -2.80 %, -4.10 %, -3.93 %, -3.67 %; mean -3.63 %.  The base chose `v64k8,v64k8` 5 times and `v64k8,v64` 3 times, the head `v64k8,v64` 5 times and `v64k8,v64k8` 3 times (the near choice of the small products).  The head's chunk lower quartile was 5.37 to 5.39 s, against 5.54 to 5.63 s.
   * So P lands: a gain of 3 % or more in both browsers, and no loss (case 9).  Step 2's prototype predicted 4.37 % and 3.22 %.
 
 * Step 6, 2026-11-15:
-  * Safari's comparison of `406e819` against `5ad3f82`'s page, again with `--runs 8`, since Safari has a near matmul choice (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/6-safari-runs8/`): gain, 3 % or more.  Blocks -3.59 %, -3.76 %, -3.68 %, -3.76 %; mean `r` -3.70 %.  Each side chose `v64k8,v64k8` 5 times and `v64k8,v64` 3 times.  With `--runs 4` (Step 4): gain, -3.63 %.  Both comparisons run 4 blocks, since the kernels differ.
+  * Safari's comparison of `406e819` against `5ad3f82`'s page, again with `--runs 8`, since Safari has a near matmul choice (`<scratch>/m6/runs/6-safari-runs8/`): gain, 3 % or more.  Blocks -3.59 %, -3.76 %, -3.68 %, -3.76 %; mean `r` -3.70 %.  Each side chose `v64k8,v64k8` 5 times and `v64k8,v64` 3 times.  With `--runs 4` (Step 4): gain, -3.63 %.  Both comparisons run 4 blocks, since the kernels differ.
   * Only P is built, so the whole gain of M6's head against M6's base is Step 4's comparison: 4.32 % in Chrome, and 3.63 % and 3.70 % in Safari.  It did not run again.
-  * The baselines, from 5 unforced runs each (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/6-<browser>-baseline/`): Chrome 3.43 s (was 3.59 s), bound 3.77 s (was 3.95 s); Safari 5.37 s (was 5.57 s), bound 5.91 s (was 6.13 s).  Each is a lower bound, so no `--raise`.  One Chrome run chose `v64,i64` (3.52 s), and two Safari runs `v64k8,v64`.
+  * The baselines, from 5 unforced runs each (`<scratch>/m6/runs/6-<browser>-baseline/`): Chrome 3.43 s (was 3.59 s), bound 3.77 s (was 3.95 s); Safari 5.37 s (was 5.57 s), bound 5.91 s (was 6.13 s).  Each is a lower bound, so no `--raise`.  One Chrome run chose `v64,i64` (3.52 s), and two Safari runs `v64k8,v64`.
 * Case 1 (Step 4): `e2e stored-stems` always runs `mm=s64`.  So its hashes check P's order with that kernel.  P changes no kernel; the kernels' own checks are the start-up checks and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release`.
-* Step 7, 2026-11-15, at the head (`cf2e935`, the page of `406e819`), with the kernels that each browser chooses (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/7-<case>-<n>/`): each of the 9 runs of `memory-budget` passed its four checks.
+* Step 7, 2026-11-15, at the head (`cf2e935`, the page of `406e819`), with the kernels that each browser chooses (`<scratch>/m6/runs/7-<case>-<n>/`): each of the 9 runs of `memory-budget` passed its four checks.
 
   | Case | Tab total (margin under 943 MB) | Worker growth (bound) | 4-minute peak over 1-minute |
   | - | - | - | - |
@@ -395,10 +395,10 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * The tab totals are M5's (756, 758 and 799 MB): P adds no buffer.
   * The worker grew 55 MB in each of the 18 separations, not M1's 57 MB.  So the measured headroom is -25.16 MB, with a spread of 0, and the margin under the bound is 8.16 MB.  It stays inside the band of `WORKER_HEADROOM_MB`'s doc: above the taken noise (2.16 MB), and a lost cut 3 (55 + 9.44 = 64.44 MB) still fails the check.  So the constant stays (Step 7, item 2).  P adds no CPU buffer of a chunk's size.  This run did not measure the growth at M6's base, so the cause of the 2 MB is not known.  Finding i1-2 of the intent review changed the constant later (the entry of i1-2, below).
 
-* Step 8, 2026-11-15, the head page (`406e819`), `CALIBRATION` 7.  The calibrations: each unforced run of the head page in Steps 4, 6 and 8 (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/4-<browser>/perf-*-head-*`, `6-<browser>-baseline/`, `6-safari-runs8/perf-safari-head-*`, `8-<browser>-calib/`; tables `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/8-<browser>-calib.table`).
+* Step 8, 2026-11-15, the head page (`406e819`), `CALIBRATION` 7.  The calibrations: each unforced run of the head page in Steps 4, 6 and 8 (`<scratch>/m6/runs/4-<browser>/perf-*-head-*`, `6-<browser>-baseline/`, `6-safari-runs8/perf-safari-head-*`, `8-<browser>-calib/`; tables `<scratch>/m6/runs/8-<browser>-calib.table`).
   * The pins, the matmul policy chosen most often: Chrome `v64,v64` (12 of 14 calibrations; also `v64,i64` and `v64,v64k8` once each).  Safari `v64k8,v64k8` (14 of 24; `v64k8,v64` 10).
   * Choosable policies: `vfused` alone, in both browsers.  Each calibration chose it.  The faster fused kernel over split: Chrome 0.710 (sd 0.003), Safari 0.690 (sd 0.002), far from the flip point 1.0.  `vfused` over `fused`: Chrome 0.638 (sd 0.005), Safari 0.691 (sd 0.002), far from 1.
-  * The choice check (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/8-<browser>-choice-vfused-<q>/`), with the pins, the head page on both sides, the head `attn=vfused`:
+  * The choice check (`<scratch>/m6/runs/8-<browser>-choice-vfused-<q>/`), with the pins, the head page on both sides, the head `attn=vfused`:
 
   | Pair | Chrome | Safari |
   | - | - | - |
@@ -406,7 +406,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   | `vfused` against `freq` | gain, 3 % or more: -19.51 %, -19.53 % | gain, 3 % or more: -21.14 %, -21.29 % |
 
   So the choosable policy is not slower than another: the check passes in both browsers.
-  * The bias of `freq` against `fused` (Step 8, item 2).  Forced runs with the pins, in the order `fused`, `freq`, `freq`, `fused` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/8-<browser>-bias-<n>-<policy>/`); chunk lower quartiles:
+  * The bias of `freq` against `fused` (Step 8, item 2).  Forced runs with the pins, in the order `fused`, `freq`, `freq`, `fused` (`<scratch>/m6/runs/8-<browser>-bias-<n>-<policy>/`); chunk lower quartiles:
 
   | Figure | Chrome | Safari, set 1 | Safari, set 2 | Safari, 8 runs |
   | - | - | - | - | - |

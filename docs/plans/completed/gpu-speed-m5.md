@@ -72,12 +72,12 @@ The state at the start, on 2026-11-13, at commit `b7f980f` on branch `gpu-speed/
 
 ### The paths of this run
 
-* The scratchpad of M5: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/`.  Write each path in full in each command and each brief.  The scratchpad is not kept, so each figure also goes into this plan's Surprises at the end of its step.
-* The logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/<step>-<browser>-<n>/`.  Each figure in a table names its log.
-* The base worktree of each comparison: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/base-wt`, detached at the base commit.  Build its page with `CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/base-wt/target`, then `trunk build --release` in its `app/`.  Its page is `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/base-wt/app/dist`.  Remove it after each comparison with `git worktree remove`.
-* The head page: `/Users/lloyd/Documents/rustt/stemyla/app/dist`, from `(cd /Users/lloyd/Documents/rustt/stemyla/app && trunk build --release)`.
-* Weights: `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors`, also given as `--weights`.  Never commit it (ASSET-1).
-* Chrome: `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.  Safari: through `safaridriver`, which `xtask` drives.  Never quit the maintainer's Safari.  Read `docs/references/local-browser-testing.md` first.
+* The scratchpad of M5: `<scratch>/m5/`.  Write each path in full in each command and each brief.  The scratchpad is not kept, so each figure also goes into this plan's Surprises at the end of its step.  `<scratch>` is the session scratchpad folder of the run, outside the repo.
+* The logs: `<scratch>/m5/runs/<step>-<browser>-<n>/`.  Each figure in a table names its log.
+* The base worktree of each comparison: `<scratch>/m5/base-wt`, detached at the base commit.  Build its page with `CARGO_TARGET_DIR=<scratch>/m5/base-wt/target`, then `trunk build --release` in its `app/`.  Its page is `<scratch>/m5/base-wt/app/dist`.  Remove it after each comparison with `git worktree remove`.
+* The head page: `app/dist`, from `(cd app && trunk build --release)`.
+* Weights: `$STEMYLA_PERF_WEIGHTS`, the main checkout's `third_party/models/bs_roformer_sw.f16.safetensors`, also given as `--weights`.  Never commit it (ASSET-1).
+* Chrome: `$CHROMEDRIVER`, the driver of Chrome for Testing 157 (mac-arm64).  Safari: through `safaridriver`, which `xtask` drives.  Never quit the maintainer's Safari.  Read `docs/references/local-browser-testing.md` first.
 * `caffeinate -dimsu` runs; never stop it.  Before each browser run, check with `ps -A -o pid,etime,command` that no other `e2e` or `check --tier push` runs.
 
 ## Plan of work
@@ -247,7 +247,7 @@ Tests first, each failing on an assert:
 * The native GPU tests: `vfused` against `attention_cpu` on the time axis shape and on ragged shapes (a sequence that is not a multiple of 64 or of 4); and `vfused` equal to the current fused kernel bit for bit on the same inputs.  The doc says the claim is for the native test only, since Safari compiles with `MTLMathModeRelaxed`.
 * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passes on this Mac (Metal).
 
-Do not commit on the branch yet.  Run `git add -N` on each new file, and write `git diff` to `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/candidate.patch`.  Check it with `git apply --check` in a clean worktree at HEAD.
+Do not commit on the branch yet.  Run `git add -N` on each new file, and write `git diff` to `<scratch>/m5/candidate.patch`.  Check it with `git apply --check` in a clean worktree at HEAD.
 
 Acceptance: the tests fail first, then pass, natively on Metal.
 
@@ -259,13 +259,13 @@ The rule of Step 7 of `plans/completed/gpu-speed-m4.md`, for an attention kernel
 2. For each browser and page: `R` = the candidate's time for each chunk over the reference's, in Step 5's form: the figure on which calibration chooses (the parent's gain case 2).  The references are each policy that calibration chose at M5's base in that browser: `fused` and `freq` in Safari, `freq` in Chrome.  `S` is the largest spread of the figures in `R`.  The attention-only ratios are recorded too, as evidence.  If TD-101 is still open after Step 6, `R` against `freq` does not count.  Then a forced comparison decides against `freq`: `--query "mm=<pins>&attn=freq" --head-query "attn=vfused"`, with the head page as both pages; a gain is needed.
 3. A gain in a browser: `R < 1` and `1 - R > S` against each reference, in both pages.  A loss: `R > 1 + S` in both pages.
 4. `vfused` lands only with a gain in at least one browser.  Then each browser's comparison (Step 11) must show no loss, and each browser that chooses it must have its gain.
-5. With no gain: `vfused` does not land.  Its figures go in Surprises, and its code to `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/vfused.patch`.  Skip Steps 10 to 13.
+5. With no gain: `vfused` does not land.  Its figures go in Surprises, and its code to `<scratch>/m5/vfused.patch`.  Skip Steps 10 to 13.
 
 Acceptance: a table in Surprises of `R`, `S` and the verdict for each browser, page and reference.
 
 ### Step 10: the self-tests, then the commit of `vfused`
 
-With the candidate page, before the commit (GPU-2): `cargo run -p xtask -- e2e selftest --browser <b> --weights /Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors --query attn=vfused`, in Safari and in Chrome.  Also with no query, with the kernels that each browser chooses.
+With the candidate page, before the commit (GPU-2): `cargo run -p xtask -- e2e selftest --browser <b> --weights "$STEMYLA_PERF_WEIGHTS" --query attn=vfused`, in Safari and in Chrome.  Also with no query, with the kernels that each browser chooses.
 
 Then commit `vfused` with its tests, `CALIBRATION`, its pinned hashes (move it from `NEW_KERNELS` to `PINNED_WGSL`), and the docs that name the kernels (`docs/ARCHITECTURE.md`, "Running it on the GPU"; the doc of `AttentionPolicy`).  Add the attention case to "A kernel lands only with a shown gain" in `docs/references/local-browser-testing.md`.
 
@@ -298,10 +298,10 @@ Acceptance: `memory-budget` passes 3 times in each browser.  The growths and the
 
 ### Step 15: the checks before review round 1
 
-* `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver cargo run -p xtask -- check --tier push` passes, with both perf gates run.  Progress gives both verdicts.  A skip line is not a pass (VERIFY-1).
+* `cargo run -p xtask -- check --tier push`, with `$STEMYLA_PERF_WEIGHTS` set and `$CHROMEDRIVER` set to the driver of Chrome for Testing 157 (mac-arm64), passes, with both perf gates run.  Progress gives both verdicts.  A skip line is not a pass (VERIFY-1).
 * `cargo build -p xtask` passes.
-* `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/parent-m5.diff` for the orchestrator, with `git apply --check` passing on HEAD.  It holds Surprises entries with the tables of Steps 3 to 7, 9, 11, 12 and 14, and Decision log lines for the cause, the fix, `FUSED_MARGIN` and the candidate.  It changes M6's case 11 if Step 5 changes what M6 must keep in step with `Pace`.
-* Each change of `.claude/**` or `CLAUDE.md` that no step checkpoint carried, as a diff in `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/`.  For example, `.claude/rules/gpu.md` can name the attention case of the gain rule.
+* `<scratch>/m5/parent-m5.diff` for the orchestrator, with `git apply --check` passing on HEAD.  It holds Surprises entries with the tables of Steps 3 to 7, 9, 11, 12 and 14, and Decision log lines for the cause, the fix, `FUSED_MARGIN` and the candidate.  It changes M6's case 11 if Step 5 changes what M6 must keep in step with `Pace`.
+* Each change of `.claude/**` or `CLAUDE.md` that no step checkpoint carried, as a diff in `<scratch>/m5/`.  For example, `.claude/rules/gpu.md` can name the attention case of the gain rule.
 
 ## Validation and acceptance
 
@@ -346,24 +346,24 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * `fused_attention_margin` now asserts the margin 1.0.  With `FUSED_MARGIN` 1.1 it failed: `assertion failed: !time(1.0, 1.01)`.
   * `ATTENTION_ROUNDS` (12) sets the timed rounds of the time axis, 4 times the 3 of before.  Calibration takes about 24.5 s in Chrome and 23.9 s in Safari, against 15.0 s and 13.6 s at `253d775`: about 9.5 to 10.3 s more.
   * Item 6 again at 1.0, with 12 rounds: both limits hold in each browser, and item 7 has no wrong choice (Surprises).
-  * Item 8, with the head page of the working tree on `1e1c2cc`: `e2e selftest --query selftest=stages` passes in Safari (`v64k8,v64`, `fused`, worst stage 69.4 dB) and in Chrome (`v64,v64`, `freq`, 69.4 dB).  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-selftest-<browser>/`.
-  * Item 8: `e2e stored-stems` in Chrome gives the same six hashes at `1e1c2cc` and at the head, with `attn=fused` and with `attn=freq`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-stored2-<base or head>-<policy>/`.  `stored-stems` took `attn` from `--query` only after a fix (Surprises).  Its test `stored_stems_takes_attn_from_the_query` failed first: `left: "split"`, `right: "fused"`.
+  * Item 8, with the head page of the working tree on `1e1c2cc`: `e2e selftest --query selftest=stages` passes in Safari (`v64k8,v64`, `fused`, worst stage 69.4 dB) and in Chrome (`v64,v64`, `freq`, 69.4 dB).  Logs: `<scratch>/m5/runs/step5-selftest-<browser>/`.
+  * Item 8: `e2e stored-stems` in Chrome gives the same six hashes at `1e1c2cc` and at the head, with `attn=fused` and with `attn=freq`.  Logs: `<scratch>/m5/runs/step5-stored2-<base or head>-<policy>/`.  `stored-stems` took `attn` from `--query` only after a fix (Surprises).  Its test `stored_stems_takes_attn_from_the_query` failed first: `left: "split"`, `right: "fused"`.
 * [x] Step 6 (2026-11-14): the comparison of the fix gives no change in Chrome and in Safari (`--runs 8`).  The head's 12 calibrations in each browser give one choosable policy: `freq` in Chrome and `fused` in Safari.  The check of Step 3 passes in each browser.  No gain, so no new Safari baseline.  TD-101 is closed.
 * [x] Step 7 (2026-11-14): the predictor of C1.  `i64` over `v64` on `time scores` is an effect in both browsers: 1.31 to 1.35 in Chrome, and 0.84 in Safari, where vec4 reads are slower.  So C1 is built (Chrome), and Safari is predicted to lose.
-* [x] Step 8 (2026-11-14): `vfused`, not committed: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/candidate.patch` (code only), which `git apply --check` accepts on a clean worktree at `1c232b6`.  `AttentionPolicy` is an enum of `split`, `fused`, `time`, `freq` and `vfused`; `FusedKernel` names the kernel of each axis; `Gpu::vfused_ok`; `decide` takes the faster fused kernel; `CALIBRATION` is 6.  Each new test failed first on an assert:
+* [x] Step 8 (2026-11-14): `vfused`, not committed: `<scratch>/m5/candidate.patch` (code only), which `git apply --check` accepts on a clean worktree at `1c232b6`.  `AttentionPolicy` is an enum of `split`, `fused`, `time`, `freq` and `vfused`; `FusedKernel` names the kernel of each axis; `Gpu::vfused_ok`; `decide` takes the faster fused kernel; `CALIBRATION` is 6.  Each new test failed first on an assert:
   * `every_kernel_fits_the_default_limits`, before `generated_sources` named `vfused`: `left: [..., "attention", "softmax.wgsl", ...]`, `right: [..., "attention", "vfused", "softmax.wgsl", ...]`.  Also `every_shader_file_is_checked` (the new template not in `GENERATED_FROM`), `current_kernels_keep_their_wgsl` (`vfused: no such source`) and `workgroup_memory_within_defaults` (`left: None`, `right: Some(10240)`).
   * `vfused_matches_cpu` (`Vec4 attention seq 1151 x4: index 0: got -0.025935719, want 0.0023692255`), `vfused_equals_the_tiled_kernel_bit_for_bit` (`2357248 outputs differ`) and `check_attention_accepts_all` (`vfused gives wrong results on this GPU (relative error 1.1e1)`), on the first kernel, whose threads raced (Surprises).
   * By mutation: `decide_takes_the_faster_fused_kernel`, with `decide` that never takes `vfused` (`left: Fused`, `right: VFused`); `attention_policy_names`, without `vfused` in `ALL` (`left: [..., "split"]`, `right: [..., "vfused"]`); `a_policy_is_usable_only_with_its_kernels`, with `vfused` usable on the tiled kernel's check alone (`left: [..., "vfused"]`, `right: [..., "freq"]`); `profile_labels_attention_by_its_shape`, with `vfused` not labelled by `attention_label` (`left: Some(1)`, `right: Some(2)`).
   * `the_worker_takes_a_policy_only_when_its_kernels_passed` (a source test), on the worker's source at `1c232b6`: `Some(p) if p.usable(...) => gpu.attention.set(p), in worker/src/web.rs`.  `choice_keys_name_the_format`, with `CALIBRATION` 5: `left: 5`, `right: 6`.
   * Then `cargo test -p roformer-gpu --lib` (58) and `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` pass on the M2 Pro (Metal), `vfused` equal to the tiled kernel bit for bit.
-  * `e2e stored-stems` in Chrome gives the same hashes at `1c232b6` and with the candidate, with `attn=fused` and with `attn=freq`.  With `attn=vfused` it gives the hashes of `attn=fused`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step8-stored-<side>-<policy>/`.
+  * `e2e stored-stems` in Chrome gives the same hashes at `1c232b6` and with the candidate, with `attn=fused` and with `attn=freq`.  With `attn=vfused` it gives the hashes of `attn=fused`.  Logs: `<scratch>/m5/runs/step8-stored-<side>-<policy>/`.
 * [x] Step 9 (2026-11-14): the gain rule for `vfused`.  A gain in each browser, in both pages, against each reference: `R` 0.66 to 0.70, with `S` 2.3 % or less.  So `vfused` lands.
-* [x] Step 10 (2026-11-14): with the candidate page, before the commit, `e2e selftest` passes in Safari and in Chrome, each with `--query attn=vfused` and with `--query selftest=stages` (the kernels that each browser chooses), worst stage 69.4 dB.  Safari chose `v64k8,v64` and `vfused`; Chrome `v64,v64` and `vfused`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step10-selftest-<browser>-<attn or selftest>/`.  Then the commit of `vfused`, with `vfused` moved from `NEW_KERNELS` to `PINNED_WGSL` (`0xed9b_5bcb_7b74_65a1`).
+* [x] Step 10 (2026-11-14): with the candidate page, before the commit, `e2e selftest` passes in Safari and in Chrome, each with `--query attn=vfused` and with `--query selftest=stages` (the kernels that each browser chooses), worst stage 69.4 dB.  Safari chose `v64k8,v64` and `vfused`; Chrome `v64,v64` and `vfused`.  Logs: `<scratch>/m5/runs/step10-selftest-<browser>-<attn or selftest>/`.  Then the commit of `vfused`, with `vfused` moved from `NEW_KERNELS` to `PINNED_WGSL` (`0xed9b_5bcb_7b74_65a1`).
 * [x] Step 11 (2026-11-14): the comparison of `vfused` (`9d6d447`) against `d244d57`, `--runs 8`: a gain of 3 % or more in each browser, Chrome -22.4 % and Safari -20.3 % (the mean `r` of 4 blocks).  Each head run chose `vfused`.
 * [x] Step 12 (2026-11-14): at the head, `vfused` is the one choosable policy in each browser (12 of 12 calibrations), and the check passes: a gain of 20 % to 23 % against `fused` and against `freq`.  No two choices are near, so no flip cost is measured.
 * [x] Step 13 (2026-11-14): both browsers chose `vfused`, so both baselines are measured again with `e2e perf --runs 5 --update-baselines` at `9d6d447`.  Each bound is lower, so no `--raise`: Chrome 157 4.70 s to 3.59 s, Safari 27.2 7.38 s to 5.57 s.
 * [x] Step 14 (2026-11-14): `memory-budget` passed 3 times in each browser at `50d3ff6`.  Each growth is 57 MB, so check 3's margin is 6.16 MB, and `WORKER_HEADROOM_MB` stays.  `roformer/` does not change.
-* [x] Step 15 (2026-11-14): `check --tier push` passes at `0af5ef8`, with both perf gates run: Chrome 3.59 s (bound 3.95 s), Safari 5.58 s (bound 6.13 s).  `cargo build -p xtask` passes.  The parent's diff is `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/parent-m5.diff`, and the diff of `.claude/rules/gpu.md` is `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/claude-gpu-rules.diff`; `git apply --check` accepts each on HEAD.
+* [x] Step 15 (2026-11-14): `check --tier push` passes at `0af5ef8`, with both perf gates run: Chrome 3.59 s (bound 3.95 s), Safari 5.58 s (bound 6.13 s).  `cargo build -p xtask` passes.  The parent's diff is `<scratch>/m5/parent-m5.diff`, and the diff of `.claude/rules/gpu.md` is `<scratch>/m5/claude-gpu-rules.diff`; `git apply --check` accepts each on HEAD.
 * [x] Review round 1 fixes (2026-11-14, `eadebd9`).  Each new test failed first on an assert, against a stub or the old code, or is a guard that a mutant fails:
   * 1-1: `the_time_axis_is_timed_as_the_separation_runs_it` (`time_axis_round`, a stub: `left: []`) and `a_chunk_total_sums_each_call_times_its_count` (`per_chunk_total`, a stub: `assertion failed: close(per_chunk_total(&[(0.004, 744)]), 2.976)`).  `time_axis_per_chunk` and `attention_per_chunk` use both.  The guard `the_time_axis_adds_up_one_wait_for_each_step` (a fake clock) fails with `Covering` in the glue (`split: 2.4800000000000004, want 14.88`), with `time_rec` giving 1.0 (`split: 744`), and with the totals of the usable kernels left out (`left: 0`).
   * 1-59: `calibration_records_the_step_of_the_separation` (profile labels of `TimeStep` against `Job::run`, and against fixed lists): with `TimeStep::record` recording nothing, `left: []`.
@@ -372,11 +372,11 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * 1-2: `a_run_must_run_the_policy_that_its_query_forces` (`forced_attn_problem`, a stub: an empty reason) and `a_comparison_fails_a_run_of_the_wrong_policy` (`run_comparison` with each side's query: `Ok(Comparison { ... })`).
   * 1-5, 1-16: `stored_stems_checks_the_workers_policy` (`stored_stems_attention_problem`, a stub: `""`); the guard `the_stored_stems_script_takes_its_attn` fails on the old script line (`a fixed attn in the script`).
   * 1-6: `a_choice_is_kept_only_at_the_default_budget` (`keep_choice`, a stub: `4194304`); `the_run_and_calibration_share_one_budget` now also needs `keep_choice` in the worker (`!roformer_gpu::bench::keep_choice(budget) in worker/src/web.rs`).
-  * Each confirmed mutant, applied by hand in a scratch worktree with its own target folder, fails its test: 1-21, 1-31, 1-38, 1-43, 1-70, 1-77 (at their new places in `time_axis_round` and `per_chunk_total`), 1-50, 1-52, 1-58 (by `per_chunk_total`), 1-59, and the pre-existing 1-25, 1-40, 1-44 and 1-28 (`time_rec`).  The case (37, 2) in `check_fused` fails `the_start_up_check_rejects_a_broken_vfused` too.  Results: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/r1-mutant-results.tsv`, `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/r1-net-results.tsv`.
+  * Each confirmed mutant, applied by hand in a scratch worktree with its own target folder, fails its test: 1-21, 1-31, 1-38, 1-43, 1-70, 1-77 (at their new places in `time_axis_round` and `per_chunk_total`), 1-50, 1-52, 1-58 (by `per_chunk_total`), 1-59, and the pre-existing 1-25, 1-40, 1-44 and 1-28 (`time_rec`).  The case (37, 2) in `check_fused` fails `the_start_up_check_rejects_a_broken_vfused` too.  Results: `<scratch>/m5/r1-mutant-results.tsv`, `<scratch>/m5/r1-net-results.tsv`.
   * Of the 28 network mutants, the test of 1-59 kills 7 (1-17, 1-20, 1-26, 1-32, 1-46, 1-48, 1-71); 21 stay, in TD-8.  The calibration mutants that no test kills are in TD-102.
   * With the start-up check on (133, 2), `e2e selftest --query selftest=stages` passes in Safari and in Chrome, each with both fused kernels checked OK and `vfused` chosen.  `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release`, `cargo test -p xtask`, `cargo build -p xtask` and `check --tier commit` pass.
-  * Docs: 1-4 (about 33 s), 1-7, 1-8, 1-9, 1-10, 1-11, 1-12, 1-13 and 1-14 (WGSL §8.5.1.3; `vfused`'s pinned hash changes with its header comment, now `0x672c_1875_5e66_f53f`).  1-14 and 1-15 change `.claude/rules/gpu.md` by `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/r1-gpu-rules.diff`, and the parent by `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/parent-r1.diff`.
-* [x] Review round 2 fixes (2026-11-14, `426d206`).  Each new test failed first on an assert, against a stub, or is a guard that the named mutant fails (applied by hand in a scratch worktree with its own target folder; `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/r2-mutant-results.tsv`):
+  * Docs: 1-4 (about 33 s), 1-7, 1-8, 1-9, 1-10, 1-11, 1-12, 1-13 and 1-14 (WGSL §8.5.1.3; `vfused`'s pinned hash changes with its header comment, now `0x672c_1875_5e66_f53f`).  1-14 and 1-15 change `.claude/rules/gpu.md` by `<scratch>/m5/r1-gpu-rules.diff`, and the parent by `<scratch>/m5/parent-r1.diff`.
+* [x] Review round 2 fixes (2026-11-14, `426d206`).  Each new test failed first on an assert, against a stub, or is a guard that the named mutant fails (applied by hand in a scratch worktree with its own target folder; `<scratch>/m5/r2-mutant-results.tsv`):
   * 2-1: `vfused`'s dispatches have the label `attention seq <S> x<N> vfused`; the tiled kernel's stay as they were, and `profile_groups` counts both as attention.  `calibration_records_the_step_of_the_separation` failed first on the old label (`left: [("attention seq 9 x28", 1), ...]` for `VFused`), as did `profile_labels_attention_by_its_shape` (`left: Some(2)`, `right: Some(1)`) and `each_profile_line_goes_to_its_group` (`left: 15.0`, `right: 8207.0`).  Mutants A (`Job::run` runs the tiled kernel for `vfused`) and B (`TimeStep::record` does) fail it: `left: [("attention seq 9 x28", 1), ...]`.  `TimeAxis::of_policies` maps each timing to its policy; `each_timing_goes_to_its_policy` failed first on a stub (`left: [[], [], []]`), and mutant C fails it (`left: [[1.0], [3.0], [2.0]]`).
   * 2-2: `auto` asks for no policy in `stored_stems_attention_problem`; without the case, `stored_stems_checks_the_workers_policy` fails (`left: Some("the worker runs attention vfused, not the asked auto")`).
   * 2-3: the policy check is in `stored_stems_checks`; `the_stored_stems_checks_pass_a_good_reply_and_fail_wrong_ones` failed first (`left: 15`, `right: 16`), and fails with the check replaced by `None` (`/replies/0/text: []`).
@@ -385,7 +385,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * 2-10: the fake-clock test expects each fused kernel's rounds only when it passed its check.
   * Docs: 2-5 (TD-8 names the 5 `timestamps` tests that run on the M2 Pro; TD-8 and TD-102 say which coverage needs `timestamps` in `STEMYLA_REQUIRE`), 2-6 (Decision log), 2-7 (the two new failures in the reference, `README.md` and `xtask/src/e2e.rs`), 2-8 (ARCHITECTURE.md).
 
-* [x] Review round 3 fixes (2026-11-14).  Each test is a guard that the named mutant fails, applied by hand in a scratch worktree with its own target folder (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/r3-mutant-results.tsv`):
+* [x] Review round 3 fixes (2026-11-14).  Each test is a guard that the named mutant fails, applied by hand in a scratch worktree with its own target folder (`<scratch>/m5/r3-mutant-results.tsv`):
   * 3-1: `the_run_and_calibration_share_one_budget` reads the worker's source with its whitespace collapsed, and needs `KEEP_PER_GPU, budget, ) else`.  With `roformer_gpu::net::BUDGET` in place of `budget`: `KEEP_PER_GPU, budget, ) else in worker/src/web.rs`.
   * 3-6: `the_stored_stems_checks_pass_a_good_reply_and_fail_wrong_ones` has a case of `attn` `fused` and a reply that names `fused`.  With `split` fixed in the check: `attn fused: ["the worker runs attention fused, not the asked split"]`.
   * 3-7: `vfused_waits_between_its_row_writes_and_reads` (no GPU) needs a `workgroupBarrier()` between each write of `buf[ty * 16u + tx]` and the next read of that region.  Without the barrier after the maxima, or after the sums in `FINISH`: `no barrier between the write at 9090 and its read`, and `... at 14067 ...`.
@@ -411,10 +411,10 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   | Chrome 157, `v64,v64` | 1 | 4.68, 4.62, 4.63, 4.68 | -1.18 % | gain |
   | | 2 | 4.68, 4.62, 4.62, 4.68 | -1.28 % | gain |
 
-  * Safari: the verdict is a loss, 3 % or more.  `freq` is choosable there (M4), so the check fails, as the goal's case 2 needs.  Whole times: `fused` 77.0 to 79.7 s, `freq` 80.3 to 86.7 s.  Chunk medians: `fused` 6.99 to 7.23 s, `freq` 7.29 to 7.46 s.  Log: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step3-safari-1/output.log`.
-  * Chrome: the verdict is a gain of `freq` (2 blocks), so the check passes.  Whole times: `fused` 51.9 to 52.9 s, `freq` 51.3 to 52.4 s.  Chunk medians: `fused` 4.69 to 4.71 s, `freq` 4.62 to 4.63 s.  `freq` is about 0.06 s faster for each chunk, not 0.10 s as M2 gave.  Log: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step3-chrome-1/output.log`.
+  * Safari: the verdict is a loss, 3 % or more.  `freq` is choosable there (M4), so the check fails, as the goal's case 2 needs.  Whole times: `fused` 77.0 to 79.7 s, `freq` 80.3 to 86.7 s.  Chunk medians: `fused` 6.99 to 7.23 s, `freq` 7.29 to 7.46 s.  Log: `<scratch>/m5/runs/step3-safari-1/output.log`.
+  * Chrome: the verdict is a gain of `freq` (2 blocks), so the check passes.  Whole times: `fused` 51.9 to 52.9 s, `freq` 51.3 to 52.4 s.  Chunk medians: `fused` 4.69 to 4.71 s, `freq` 4.62 to 4.63 s.  `freq` is about 0.06 s faster for each chunk, not 0.10 s as M2 gave.  Log: `<scratch>/m5/runs/step3-chrome-1/output.log`.
   * Safari's two `fused` runs of block 2 were 7.21 and 6.98 s.  From then on, both policies ran about 0.22 to 0.23 s faster for each chunk.  The cause is not known; the GPU clock is a guess.
-* 2026-11-13, Step 4: where the separation's cost of `freq` goes.  The page of `e25402d`, with the pins of Step 3.  In each browser, runs 1 to 4 have `profile=1` and runs 5 to 8 have none, each in the order `fused`, `freq`, `freq`, `fused`.  Runs 9 and later are unforced.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step4-<browser>-<n>/`, and the tables in `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step4-safari-table.txt` and `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step4-chrome-table.txt`.
+* 2026-11-13, Step 4: where the separation's cost of `freq` goes.  The page of `e25402d`, with the pins of Step 3.  In each browser, runs 1 to 4 have `profile=1` and runs 5 to 8 have none, each in the order `fused`, `freq`, `freq`, `fused`.  Runs 9 and later are unforced.  Logs: `<scratch>/m5/runs/step4-<browser>-<n>/`, and the tables in `<scratch>/m5/runs/step4-safari-table.txt` and `<scratch>/m5/runs/step4-chrome-table.txt`.
 
   | Figure, seconds for each chunk | Safari 27.2 | Chrome 157 |
   | - | - | - |
@@ -440,7 +440,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * The gaps by difference take each group's part without the profile to be as with it.  A profile adds time to each step, so the profile's gaps are an upper bound.
   * Calibration's attention-only times match the profile's well: split 3.074 against 3.062 in Safari, 1.825 against 1.817 in Chrome.  So the attention timing is not the cause; the parts that it leaves out are.
   * Safari's calibration chose `fused` in each of 8 unforced runs today (ratio 1.061 to 1.081), and `v64k8,v64k8` in 5 of 8.  M4 had split in about 10 of 22.  Chrome chose `v64,v64` and `freq` in 4 of 4 (ratio 1.186 to 1.203).
-* 2026-11-14, Step 5, item 6: the accuracy of form (c), from unforced runs of the head page (the working tree on `253d775`).  `D` and its noise are from Step 4.  The ratio is calibration's fused time over its split time.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-<browser>-<n>/`; tables: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-safari-calib.txt` and `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5-chrome-calib.txt`.
+* 2026-11-14, Step 5, item 6: the accuracy of form (c), from unforced runs of the head page (the working tree on `253d775`).  `D` and its noise are from Step 4.  The ratio is calibration's fused time over its split time.  Logs: `<scratch>/m5/runs/step5-<browser>-<n>/`; tables: `<scratch>/m5/runs/step5-safari-calib.txt` and `<scratch>/m5/runs/step5-chrome-calib.txt`.
 
   | Figure | Safari 27.2 | Chrome 157 |
   | - | - | - |
@@ -460,7 +460,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Calibration with form (c) takes about 15.9 s in Chrome, against 15.0 s before (run 1).
   * Chrome's run 8 timed both policies about 0.4 s higher (split 3.57, fused 3.45), so its ratio was 0.966.  Without it, the standard deviation is about 0.013.
   * Item 7: Safari's one choosable policy is `fused`, the faster one: no wrong choice.  Chrome's one choosable policy is `fused`, which is 1.49 % slower than `freq` by Step 4's forced runs, over `T`: a wrong choice.  `freq` is not choosable in Chrome: 1.1 is outside 0.980 to 1.060.
-* 2026-11-14, Step 5, item 6 again, at `FUSED_MARGIN` 1.0 with `ATTENTION_ROUNDS` 12 (the maintainer's option A).  The head page of the working tree on `1e1c2cc`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5b-<browser>-<n>/`; tables: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5b-safari-calib.txt` and `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step5b-chrome-calib.txt`.
+* 2026-11-14, Step 5, item 6 again, at `FUSED_MARGIN` 1.0 with `ATTENTION_ROUNDS` 12 (the maintainer's option A).  The head page of the working tree on `1e1c2cc`.  Logs: `<scratch>/m5/runs/step5b-<browser>-<n>/`; tables: `<scratch>/m5/runs/step5b-safari-calib.txt` and `<scratch>/m5/runs/step5b-chrome-calib.txt`.
 
   | Figure | Safari 27.2 | Chrome 157 |
   | - | - | - |
@@ -476,7 +476,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * The 12 rounds cut Chrome's standard deviation from 0.020 to 0.0032, and Safari's from 0.0079 to 0.0052.
   * Item 7: Safari's one choosable policy is `fused`, the faster one.  Chrome's one choosable policy is `freq`, the faster one.  No browser has a wrong choice.
   * Safari chose `v64k8,v64` for the small products in 8 of 21 runs.  The two kernels time within 1 % there (1.16 to 1.18 s), so it is noise, not a defect.
-* 2026-11-14, Step 6: the same-session comparison of the fix.  Base: the page of `1e1c2cc`, whose `app/` is that of `a058eb6`, the commit before Step 5's commit.  Head: `745a62b`.  `--runs 8`, unforced.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step6-<browser>-1/output.log`.
+* 2026-11-14, Step 6: the same-session comparison of the fix.  Base: the page of `1e1c2cc`, whose `app/` is that of `a058eb6`, the commit before Step 5's commit.  Head: `745a62b`.  `--runs 8`, unforced.  Logs: `<scratch>/m5/runs/step6-<browser>-1/output.log`.
 
   | Browser | Block `r` | Kernels, base | Kernels, head | Verdict |
   | - | - | - | - | - |
@@ -485,21 +485,21 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
   * The base already chose the faster policy in each of its runs today: `freq` in Chrome, and `fused` in Safari.  So the fix gives no gain here.  At the base, Safari chose `freq` in about 10 of 22 calibrations of M4, and in none of 8 + 8 of M5.
   * Chunk lower quartiles: Chrome 4.62 to 4.63 s on both sides; Safari 6.98 to 7.01 s on both sides.
-* 2026-11-14, Step 6, item 2: the head's calibrations, from the 8 head runs of item 1 and 4 more unforced runs in each browser (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step6free-<browser>-<n>/`).
+* 2026-11-14, Step 6, item 2: the head's calibrations, from the 8 head runs of item 1 and 4 more unforced runs in each browser (`<scratch>/m5/runs/step6free-<browser>-<n>/`).
 
   | Browser | N | Policies | Matmul policies | Ratio: mean, SD | Mean plus or minus 2 SD | Choosable |
   | - | - | - | - | - | - | - |
   | Chrome 157 | 12 | `freq` x12 | `v64,v64` x9, `v64,v64k8` x3 | 1.0215, 0.0038 | 1.014 to 1.029 | `freq` |
   | Safari 27.2 | 12 | `fused` x12 | `v64k8,v64k8` x8, `v64k8,v64` x4 | 0.9418, 0.0034 | 0.935 to 0.949 | `fused` |
 
-* 2026-11-14, Step 6, item 3: the check at the head page (`745a62b`), the same page on both sides, `--runs 4`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step6check-<browser>-1/output.log`.
+* 2026-11-14, Step 6, item 3: the check at the head page (`745a62b`), the same page on both sides, `--runs 4`.  Logs: `<scratch>/m5/runs/step6check-<browser>-1/output.log`.
 
   | Browser, pins | Base, head | Block `r` | Verdict | The check |
   | - | - | - | - | - |
   | Chrome 157, `v64,v64` | `fused`, `freq` | -1.39 %, -1.39 % | gain of `freq` | passes: `freq` is not slower |
   | Safari 27.2, `v64k8,v64k8` | `freq`, `fused` | -3.98 %, -4.05 % | gain of `fused`, 3 % or more | passes: `fused` is not slower |
 
-* 2026-11-14, Step 7: the predictor of C1.  One set of `e2e bench --query "bench=i64,v64&bench_rounds=5&mm=<pins>&attn=fused"` at `040dbea`, in the order Safari, Chrome, Safari, Chrome; pins `v64k8,v64k8` in Safari and `v64,v64` in Chrome.  The figure is `i64`'s time over `v64`'s (the rate of `v64` over the rate of `i64`), with the larger spread of the two.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step7-<browser>-<n>/`; table: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step7-table.txt`.
+* 2026-11-14, Step 7: the predictor of C1.  One set of `e2e bench --query "bench=i64,v64&bench_rounds=5&mm=<pins>&attn=fused"` at `040dbea`, in the order Safari, Chrome, Safari, Chrome; pins `v64k8,v64k8` in Safari and `v64,v64` in Chrome.  The figure is `i64`'s time over `v64`'s (the rate of `v64` over the rate of `i64`), with the larger spread of the two.  Logs: `<scratch>/m5/runs/step7-<browser>-<n>/`; table: `<scratch>/m5/runs/step7-table.txt`.
 
   | Page | `time scores` (K 64) | `time qkv` (K 256), f32 weights | `time qkv`, f16 weights |
   | - | - | - | - |
@@ -512,7 +512,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * In Safari, the effect on `time scores` goes the other way: `v64` takes 1.19 times `i64`'s time at K 64, though it takes 0.80 times at K 256.  So vec4 reads are predicted to help C1 in Chrome and to slow it in Safari.  C1's loops have K 16 for each slice, nearer K 64 than K 256.
   * The attention-only figures of `measure_attention` (time axis, seconds for each chunk): Safari split 3.06 to 3.09, fused 3.24 to 3.30; Chrome split 1.82 to 1.84, fused 2.17 to 2.19.
 
-* 2026-11-14, Step 14: `memory-budget` at `50d3ff6`, 3 runs in Chrome 157 and 3 in Safari 27.2.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step14-<browser>-<n>/output.log`.
+* 2026-11-14, Step 14: `memory-budget` at `50d3ff6`, 3 runs in Chrome 157 and 3 in Safari 27.2.  Logs: `<scratch>/m5/runs/step14-<browser>-<n>/output.log`.
 
   | Browser | Runs passed | Worker growth in each separation | Check 3: budget, margin | Tab total (page, worker, decoder, GPU live) | Kernels |
   | - | - | - | - | - | - |
@@ -522,14 +522,14 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Each growth is as at M1 and M4, so the parent's case 1 holds and `WORKER_HEADROOM_MB` stays.  Calibration's new peak (about 113 MB, freed before the separation) does not move the worker's heap.
   * Chrome's tab total fell from 799 MB with `freq` to 756 MB with `vfused`: `vfused` holds no scores buffer, as `fused` does not.  Both are under `TAB_BUDGET_MB` (943 MB, MEM-4).
 
-* 2026-11-14, Step 13: the baselines, from 5 runs in each browser at `9d6d447`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step13-<browser>/output.log`.
+* 2026-11-14, Step 13: the baselines, from 5 runs in each browser at `9d6d447`.  Logs: `<scratch>/m5/runs/step13-<browser>/output.log`.
 
   | Browser | Chunk lower quartiles | Kernels | Baseline, bound | Before |
   | - | - | - | - | - |
   | Chrome 157 | 3.58, 3.59, 3.59, 3.60, 3.61 | `v64,v64` x4, `v64,v64k8` x1; `vfused` x5 | 3.59 s, 3.95 s | 4.70 s, 5.17 s |
   | Safari 27.2 | 5.58, 5.55, 5.57, 5.57, 5.58 | `v64k8,v64k8` x4, `v64k8,v64` x1; `vfused` x5 | 5.57 s, 6.13 s | 7.38 s, 8.12 s |
 
-* 2026-11-14, Step 12: the head's calibrations, from the 8 head runs of Step 11 and 4 more unforced runs in each browser (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step12free-<browser>-<n>/`).  The ratios are calibration's `vfused` time over its `fused` time, and over its split time.
+* 2026-11-14, Step 12: the head's calibrations, from the 8 head runs of Step 11 and 4 more unforced runs in each browser (`<scratch>/m5/runs/step12free-<browser>-<n>/`).  The ratios are calibration's `vfused` time over its `fused` time, and over its split time.
 
   | Browser | N | Policies | Matmul policies | `vfused` / `fused`: mean, SD | `vfused` / split: mean, SD | Choosable |
   | - | - | - | - | - | - | - |
@@ -539,7 +539,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Calibration's times for each chunk: Chrome split 3.05 to 3.07 s, `fused` 3.12 to 3.14 s, `vfused` 2.03 to 2.04 s; Safari split 4.93 to 5.17 s, `fused` 4.71 to 4.95 s, `vfused` 3.28 to 3.45 s.
   * No two choices are near by Terms: the two fused kernels are 30 % to 35 % apart, and the faster one over split is 0.66, not 0.99 to 1.21.  So Step 12 measures no flip cost.  The forced runs of the check give the cost of each flip from `vfused` anyway: about 30 % in Chrome and 25 % to 31 % in Safari.
 
-* 2026-11-14, Step 12: the check at the head page (`9d6d447`), `vfused` on the head, the same page on both sides, `--runs 4`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step12check-<browser>-<policy>/output.log`.
+* 2026-11-14, Step 12: the check at the head page (`9d6d447`), `vfused` on the head, the same page on both sides, `--runs 4`.  Logs: `<scratch>/m5/runs/step12check-<browser>-<policy>/output.log`.
 
   | Browser, pins | Base | Block `r` | Verdict | The check |
   | - | - | - | - | - |
@@ -548,7 +548,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   | Safari 27.2, `v64k8,v64k8` | `fused` | -20.14 %, -20.23 % | gain, 3 % or more | passes |
   | Safari 27.2, `v64k8,v64k8` | `freq` | -23.47 %, -23.42 % | gain, 3 % or more | passes |
 
-* 2026-11-14, Step 11: the same-session comparison of `vfused`.  Base: the page of `1c232b6`, whose `app/` is that of `d244d57`, the commit before Step 10's commit.  Head: `9d6d447`.  `--runs 8`, unforced.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step11-<browser>-1/output.log`.
+* 2026-11-14, Step 11: the same-session comparison of `vfused`.  Base: the page of `1c232b6`, whose `app/` is that of `d244d57`, the commit before Step 10's commit.  Head: `9d6d447`.  `--runs 8`, unforced.  Logs: `<scratch>/m5/runs/step11-<browser>-1/output.log`.
 
   | Browser | Block `r` | Kernels, base | Kernels, head | Chunk lower quartiles, base; head | Verdict |
   | - | - | - | - | - | - |
@@ -558,7 +558,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * Whole times: Chrome 51.1 to 51.2 s at the base, 39.7 to 39.8 s at the head; Safari 77.0 to 77.7 s, 61.1 to 61.6 s.
   * Each browser that chooses `vfused` has its gain of Step 9.
 
-* 2026-11-14, Step 9: the gain rule for `vfused`.  One set of `e2e bench --query "bench=v64&bench_rounds=5&mm=<pins>&attn=fused"` with the candidate page (the working tree on `d244d57`), in the order Safari, Chrome, Safari, Chrome; pins as in Step 7.  `R` is `vfused`'s time for each chunk over the reference's, in Step 5's form (whole time-transformer steps with a wait after each, as calibration times them).  `S` is the largest spread of the figures in `R`.  Logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m5/runs/step9-<browser>-<n>/`.
+* 2026-11-14, Step 9: the gain rule for `vfused`.  One set of `e2e bench --query "bench=v64&bench_rounds=5&mm=<pins>&attn=fused"` with the candidate page (the working tree on `d244d57`), in the order Safari, Chrome, Safari, Chrome; pins as in Step 7.  `R` is `vfused`'s time for each chunk over the reference's, in Step 5's form (whole time-transformer steps with a wait after each, as calibration times them).  `S` is the largest spread of the figures in `R`.  Logs: `<scratch>/m5/runs/step9-<browser>-<n>/`.
 
   | Page | Whole steps, seconds for each chunk: split, `fused`, `vfused` | `R` against `fused` | `R` against `freq` (split) | `S` | Verdict |
   | - | - | - | - | - | - |

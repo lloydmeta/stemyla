@@ -50,8 +50,8 @@ The state at the start, on 2026-11-12, at commit `91923ae` on branch `gpu-speed/
 
 ### The paths of this run
 
-* Weights: `~/Downloads/bs_roformer_sw.f16.safetensors`, outside the repo (ASSET-1).
-* Chrome: `CHROMEDRIVER=~/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.
+* Weights: `$STEMYLA_PERF_WEIGHTS` (`bs_roformer_sw.f16.safetensors`), outside the repo (ASSET-1).
+* Chrome: `$CHROMEDRIVER`, the driver of Chrome for Testing 157 (mac-arm64).
 * Safari: through `safaridriver`, which `xtask` drives.  Never quit the maintainer's Safari.  Read `docs/references/local-browser-testing.md` first.
 * Build the page with `(cd app && trunk build --release)` before each e2e run.  Run one browser GPU run at a time.
 

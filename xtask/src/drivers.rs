@@ -600,7 +600,7 @@ mod tests {
                   50712 50699 /usr/bin/safaridriver\n\
                   50713     1 /System/Library/PrivateFrameworks/WebDriver.framework/Versions/A/XPCServices/com.apple.WebDriver.HTTPService.xpc/Contents/MacOS/com.apple.WebDriver.HTTPService\n\
                   50801     1 /usr/bin/safaridriver\n\
-                  50802     1 /Users/lloyd/bin/not-safaridriver\n";
+                  50802     1 /usr/local/bin/not-safaridriver\n";
         assert_eq!(stale_safaridrivers(ps), [50801]);
         assert_eq!(stale_safaridrivers(""), Vec::<u32>::new());
     }
@@ -694,7 +694,7 @@ mod tests {
 
     #[test]
     fn the_line_gives_the_counts_and_the_megabytes() {
-        let folder = Path::new("/var/folders/lloyd/T/com.apple.WebKit.Networking+com.apple.Safari");
+        let folder = Path::new("/tmp/T/com.apple.WebKit.Networking+com.apple.Safari");
         let left = Left {
             swap_files: 12,
             swap_bytes: 350_070_000,
@@ -704,7 +704,7 @@ mod tests {
         };
         assert_eq!(
             left_line(&left, folder),
-            "browser data: Safari left 12 swap files (350.1 MB) and 1 blob folder (0.0 MB) in /var/folders/lloyd/T/com.apple.WebKit.Networking+com.apple.Safari; xtask does not remove them (TD-103)"
+            "browser data: Safari left 12 swap files (350.1 MB) and 1 blob folder (0.0 MB) in /tmp/T/com.apple.WebKit.Networking+com.apple.Safari; xtask does not remove them (TD-103)"
         );
         let one = Left {
             swap_files: 1,
@@ -715,11 +715,11 @@ mod tests {
         };
         assert_eq!(
             left_line(&one, folder),
-            "browser data: Safari left 1 swap file (349.5 MB) and 2 blob folders (0.0 MB) in /var/folders/lloyd/T/com.apple.WebKit.Networking+com.apple.Safari, and its older ones grew by 1.3 MB; xtask does not remove them (TD-103)"
+            "browser data: Safari left 1 swap file (349.5 MB) and 2 blob folders (0.0 MB) in /tmp/T/com.apple.WebKit.Networking+com.apple.Safari, and its older ones grew by 1.3 MB; xtask does not remove them (TD-103)"
         );
         assert_eq!(
             left_line(&Left::default(), folder),
-            "browser data: Safari left 0 swap files (0.0 MB) and 0 blob folders (0.0 MB) in /var/folders/lloyd/T/com.apple.WebKit.Networking+com.apple.Safari; xtask does not remove them (TD-103)"
+            "browser data: Safari left 0 swap files (0.0 MB) and 0 blob folders (0.0 MB) in /tmp/T/com.apple.WebKit.Networking+com.apple.Safari; xtask does not remove them (TD-103)"
         );
     }
 

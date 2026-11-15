@@ -199,7 +199,7 @@ These pass the guard.  Each item gives examples only, and the list is not comple
 
 * `git --exec-path=`, and `git grep -O`, which starts a pager program;
 * `find -exec` and `find -delete`;
-* a wide search in another form, such as `cd / && find .`, `find ~/Pictures`, `find /U*`, `find /Users/lloyd/..`, `grep -r x /`, `ls -R ~` or `rg x /`.  The guard also passes the home folders of a volume, such as `find "/Volumes/Macintosh HD/Users/lloyd"`;
+* a wide search in another form, such as `cd / && find .`, `find ~/Pictures`, `find /U*`, `find /Users/<name>/..`, `grep -r x /`, `ls -R ~` or `rg x /`.  The guard also passes the home folders of a volume, such as `find "/Volumes/Macintosh HD/Users/<name>"`;
 * `$(...)` inside double quotes, `$'...'` quoting, `$"..."` quoting such as `$"git" commit`, and an unquoted `$(...)` as an argument, such as `git -C $(pwd) stash`;
 * a redirection before the command, such as `2>/dev/null git commit`;
 * a command in a variable, a function or an alias, such as `function f { git commit -m x; }; f`;
@@ -566,6 +566,14 @@ It breaks no rule.  It concerns case 11 of M6 of `plans/active/gpu-speed.md`: ca
 
 * Evidence: in M6, in Safari, `|D|` was 0.035 s, about 0.6 % of a chunk.  Its noise was 0.020 s, so the limit was 0.0175 s, and the bias -0.033 s.  `D` changed its sign on a repeat set, so that noise was too small.  The orchestrator accepted it (i1-3 of the intent review of M6).
 * Fix: make the limit the larger of half of `|D|`, the noise of `D` and `T` (1 %) of a chunk.  Do it in the next plan that runs the check.  Not planned.
+
+### TD-107: the check of machine paths does not see a session ID
+
+It breaks no rule.  It concerns `no_tracked_file_holds_a_machine_path` in `xtask/tests/rules.rs`.  The test finds home folders, temporary folders of macOS and Claude Code, and `~/.local/`.  It does not find the ID of a Claude Code session, which is a plain UUID.
+
+* Evidence: the review of the change that added the test.  A UUID is also a normal value in tests and logs, so a mark for it would give false hits.
+* What guards it: the convention in `working-with-agents.md`, and review.
+* Fix: none is planned.  Write `<scratch>/...`, which holds no session ID.
 
 ## Known breaches
 

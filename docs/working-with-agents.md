@@ -34,6 +34,10 @@ Phase 3 added eight read-only review agents in `.claude/agents/`: `reviewer`, `g
 4. The agent makes small signed commits, then runs review rounds with `/review-rounds` until the stop rule of decision 0024 holds.
 5. Do what only a person can do (see below).  Push, or ask the agent to push, then merge.
 
+## Conventions
+
+* No committed file holds a path of one machine.  Write `$TMPDIR/...`, a path from the repo root, `$STEMYLA_PERF_WEIGHTS` or `third_party/models/<file>`, and `$CHROMEDRIVER`.  A slot such as `<scratch>` is allowed only when the plan defines it.  Each brief fills every slot with its absolute path.  No agent searches for the value of a slot (`plans/completed/gpu-speed-m3.md`, Surprises and Outcomes).  `no_tracked_file_holds_a_machine_path` in `xtask/tests/rules.rs` checks the paths.
+
 ## Recipes
 
 Each recipe gives a prompt to start from, what the agent does, and what to check.

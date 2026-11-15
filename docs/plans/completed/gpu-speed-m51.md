@@ -31,11 +31,11 @@ The state at the start, on 2026-11-14, at commit `8b16df7` on branch `gpu-speed/
 
 ### The paths of this run
 
-* `$TMPDIR` is `/var/folders/qr/1phzsw110tjdbfjhxbx6qmrh0000gn/T` on this Mac.  `getconf DARWIN_USER_TEMP_DIR` gives the same folder.
+* `$TMPDIR` is a folder under `/var/folders/` on this Mac, which is the macOS default.  `getconf DARWIN_USER_TEMP_DIR` gives the same folder.
 * Chrome's leaked profiles: `$TMPDIR/org.chromium.Chromium.scoped_dir.*`.  Count them with `ls -d "$TMPDIR"/org.chromium.Chromium.scoped_dir.* 2>/dev/null | wc -l`.  Do not use another glob.
 * Safari's folder: `$TMPDIR/com.apple.WebKit.Networking+com.apple.Safari/`.  Count its `FileSystemWritableStream*` files and its `BlobRegistryFiles-*` folders, and give their bytes (`du -sk` of that folder only).
-* Weights: `/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors` (349,521,256 bytes; never commit it, ASSET-1).  `STEMYLA_PERF_WEIGHTS` names it.  `CHROMEDRIVER` is `/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.
-* Scratch files and logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m51/`.
+* Weights: `third_party/models/bs_roformer_sw.f16.safetensors` (349,521,256 bytes; never commit it, ASSET-1).  `STEMYLA_PERF_WEIGHTS` names it.  `CHROMEDRIVER` names the driver of Chrome for Testing 157 (mac-arm64).
+* Scratch files and logs: `<scratch>/m51/`.  `<scratch>` is the session scratchpad folder of the run, outside the repo.
 
 ### What is known
 

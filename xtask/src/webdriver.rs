@@ -1511,7 +1511,7 @@ mod tests {
     ///   other name.
     #[test]
     fn the_sweep_removes_only_a_folder_of_an_ended_run() {
-        let ps = "    1 /sbin/launchd\n 4242 /Users/lloyd/stemyla/target/debug/xtask e2e storage\n 5151 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/stemyla-chrome/777-0/.org.chromium.Chromium.lloyd\n";
+        let ps = "    1 /sbin/launchd\n 4242 /srv/stemyla/target/debug/xtask e2e storage\n 5151 /Applications/Google Chrome.app/Contents/MacOS/Google Chrome --user-data-dir=/tmp/stemyla-chrome/777-0/.org.chromium.Chromium.lloyd\n";
         let entry = |name: &'static str, is_dir: bool, owner: u32| SweptEntry {
             name,
             path: Box::leak(format!("/tmp/stemyla-chrome/{name}").into_boxed_str()),

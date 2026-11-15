@@ -151,6 +151,8 @@ Each case run used the model `claude-opus-5-5` with the effort `high`.  `STEMYLA
 
 H is under `/private/tmp`, which macOS clears at a restart.  So the full text of the two scripts follows.
 
+Before a run, replace `<repo>` in each script with the path of the main checkout.  `replay-check.sh` stops if `<repo>` is not replaced.  It gets the user ID from `id -u`, and the folder that holds the checkout from `<repo>`.
+
 `replay-clone.sh <case> <clone>` makes the clone of one case.  The clone holds only the history up to the reviewed commit, and the script checks that the fix commit is not in it:
 
 ```bash
@@ -162,7 +164,7 @@ H is under `/private/tmp`, which macOS clears at a restart.  So the full text of
 # Usage: replay-clone.sh <case> <clone>
 set -euo pipefail
 
-repo=/Users/lloyd/Documents/rustt/stemyla
+repo='<repo>'
 harness=/private/tmp/stemyla-harness
 min_free_gib=30
 
@@ -250,6 +252,15 @@ set -euo pipefail
 
 harness=/private/tmp/stemyla-harness
 guard=$harness/bin/read-only-bash.sh
+repo='<repo>'
+case $repo in
+  "<"*)
+    echo "replay-check: set repo to the path of the main checkout" >&2
+    exit 1
+    ;;
+esac
+uid=$(id -u)
+parent=$(basename "$(dirname "$repo")")
 
 if [ $# -lt 1 ] || [ $# -gt 2 ]; then
   echo "usage: replay-check.sh <clone> [<transcript>]" >&2
@@ -458,15 +469,15 @@ read -r -d '' path_program << 'JQ' || true
   def own_tmp($p):
     ($p | ltrimstr("/private")) as $q
     | ("/tmp/stemyla-harness/" + $own) as $a
-    | ("/tmp/claude-501/" + $own_tmp) as $b
+    | ("/tmp/claude-" + $uid + "/" + $own_tmp) as $b
     | $q == $a or ($q | startswith($a + "/")) or $q == $b or ($q | startswith($b + "/"));
   def hits:
-    [ (if contains("rustt/stemyla") then "rustt/stemyla" else empty end),
+    [ (if contains($parent + "/stemyla") then $parent + "/stemyla" else empty end),
       (if contains("target/review/run") then "target/review/run" else empty end),
       (if test("\\.claude/projects(?!/)") then ".claude/projects" else empty end),
       (names(".claude/projects/")[] | select(. != $own_tmp) | ".claude/projects/" + .),
       (names("stemyla-harness/")[] | select(. != $own and . != "bin") | "stemyla-harness/" + .),
-      (names("claude-501/")[] | select(. != $own_tmp) | "claude-501/" + .) ];
+      (names("claude-" + $uid + "/")[] | select(. != $own_tmp) | "claude-" + $uid + "/" + .) ];
   def checks:
     [ (if contains("../") then "../" else empty end),
       (if contains("~/") then "~/" else empty end),
@@ -487,7 +498,7 @@ read -r -d '' path_program << 'JQ' || true
       "  CHECK (c) \($checks | join(", ")): \($call.name) \($call.id): \($text)"
     else empty end
 JQ
-path_findings=$(tq -r --arg own "$clone_name" --arg own_tmp "$own_tmp_folder" "$path_program")
+path_findings=$(tq -r --arg own "$clone_name" --arg own_tmp "$own_tmp_folder" --arg uid "$uid" --arg parent "$parent" "$path_program")
 if [ -n "$path_findings" ]; then
   tripwire_hits="$tripwire_hits$path_findings"$'\n'
 fi

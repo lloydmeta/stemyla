@@ -46,6 +46,8 @@ Take each value from the lines of `review start`.  Do not make a path from the b
 
 Each prompt template below names a path only through a slot that holds an absolute path, such as `<target>`.  Fill in each slot before you start the agent.  The text that the agent gets holds no unfilled slot.
 
+No committed file holds a path of one machine.  In the log and in each fix, write `$TMPDIR/...`, a path from the repo root, `$STEMYLA_PERF_WEIGHTS` or `third_party/models/<file>`, and `$CHROMEDRIVER`.  A slot such as `<scratch>` is allowed only when the plan defines it.  Each brief fills every slot with its absolute path.  No agent searches for the value of a slot (`docs/working-with-agents.md`, Conventions).
+
 The round's folder is `<run>/$1`.  `review start` wrote `branch.diff`, `since.diff`, `route.txt` and `state.json` there.  The mutants run writes `mutants.txt`, `missed.txt`, `known.txt` and `mutants.out/` there.  Step 9 writes the findings file `<run>/$1/findings.md`.  The log of the branch is `<run>/log.md`.
 
 ## Steps

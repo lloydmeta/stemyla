@@ -47,7 +47,7 @@ The state at the start, on 2026-11-13, at commit `9769916` on branch `gpu-speed/
 * `worker/src/web.rs` logs each chunk as `chunk <done>/<total>: <s> s; ...` with one decimal (`{:.1}`).  `chunk_times` in `perf.rs` reads it with `number_after`, which reads any decimals.
 * `xtask/src/e2e/perf.rs`: `PerfResult` (the chunk times, `chunk_median`, `chunk_lower_quartile`, `whole_secs` from the line `separator: 6 stems in <s> s`, the kernels), `gate`, `tolerance_pct`, `new_entry` and `update_refusal`.  `update_refusal` lets a raise of the bound through without `--raise` when the browser version differs.  The test `a_raise_over_the_tolerance_needs_a_reason` asserts that.  `e2e perf --dist <dir>` runs a page from another folder.  Each run writes `<out>/perf-<browser>-<n>.json`.
 * The text on `--raise` today: `.claude/rules/gpu.md` ("Speed"), `README.md` (the `perf` paragraph), `docs/references/local-browser-testing.md` (the perf lines), the module doc of `xtask/src/e2e.rs`, and the doc of `update_refusal`.
-* The M3 harness for the controls is not on the branch.  It is in patches 0001 and 0003 of `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/variants/`.  Patch 0001 adds `roformer-gpu/src/m3.rs` (`EXTRAS`, `extra_source`, `controls`), `Kernel::Extra`, `Kernels::extra_pipeline`, `Rec::extra`, a `pub(crate)` `bench::time_rec`, and the two `controls` calls in `bench` of `worker/src/web.rs`.  Patch 0003 adds `wg_source` and the `wg10k` and `wg0` controls.  Port only these parts.
+* The M3 harness for the controls is not on the branch.  It is in patches 0001 and 0003 of `<scratch>/m3/variants/`.  Patch 0001 adds `roformer-gpu/src/m3.rs` (`EXTRAS`, `extra_source`, `controls`), `Kernel::Extra`, `Kernels::extra_pipeline`, `Rec::extra`, a `pub(crate)` `bench::time_rec`, and the two `controls` calls in `bench` of `worker/src/web.rs`.  Patch 0003 adds `wg_source` and the `wg10k` and `wg0` controls.  Port only these parts.  `<scratch>` is the session scratchpad folder of the run, outside the repo.
 * `xtask/src/e2e.rs`, `WORKER_HEADROOM_MB` (-17 MB) and its doc: the proof of M1.  The parent's "Validation and acceptance" gives the cases of its measurement.
 
 ### Terms
@@ -61,13 +61,13 @@ The state at the start, on 2026-11-13, at commit `9769916` on branch `gpu-speed/
 
 ### The paths of this run
 
-* The scratchpad of M4: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/`.  It belongs to one session, and is not kept.  So each figure also goes into this plan's Surprises at the end of its step.
-* The logs: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/runs/<step>-<browser>-<n>/`.  Each figure in a table names its log.
-* The scratch worktree of Step 4: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/wt`, on the local branch `scratch/m4-controls`.  Never push it (GIT-1).  Its target folder: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/wt/target`.
-* The base worktree of each same-session comparison: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/base-wt`, detached at the base commit.  Build its page with `CARGO_TARGET_DIR=/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/base-wt/target`, then `trunk build --release` in its `app/`.  Its page is `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/base-wt/app/dist`.  Remove it after each comparison with `git worktree remove`.
-* The head page: `/Users/lloyd/Documents/rustt/stemyla/app/dist`, from `(cd /Users/lloyd/Documents/rustt/stemyla/app && trunk build --release)`.
-* Weights: `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors`, also given as `--weights`.  Git ignores it.  Never commit it (ASSET-1).
-* Chrome: `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.  Safari: through `safaridriver`, which `xtask` drives.  Never quit the maintainer's Safari.  Read `docs/references/local-browser-testing.md` first.
+* The scratchpad of M4: `<scratch>/m4/`.  It belongs to one session, and is not kept.  So each figure also goes into this plan's Surprises at the end of its step.
+* The logs: `<scratch>/m4/runs/<step>-<browser>-<n>/`.  Each figure in a table names its log.
+* The scratch worktree of Step 4: `<scratch>/m4/wt`, on the local branch `scratch/m4-controls`.  Never push it (GIT-1).  Its target folder: `<scratch>/m4/wt/target`.
+* The base worktree of each same-session comparison: `<scratch>/m4/base-wt`, detached at the base commit.  Build its page with `CARGO_TARGET_DIR=<scratch>/m4/base-wt/target`, then `trunk build --release` in its `app/`.  Its page is `<scratch>/m4/base-wt/app/dist`.  Remove it after each comparison with `git worktree remove`.
+* The head page: `app/dist`, from `(cd app && trunk build --release)`.
+* Weights: `$STEMYLA_PERF_WEIGHTS`, the main checkout's `third_party/models/bs_roformer_sw.f16.safetensors`, also given as `--weights`.  Git ignores it.  Never commit it (ASSET-1).
+* Chrome: `$CHROMEDRIVER`, the driver of Chrome for Testing 157 (mac-arm64).  Safari: through `safaridriver`, which `xtask` drives.  Never quit the maintainer's Safari.  Read `docs/references/local-browser-testing.md` first.
 * Run one browser run or perf gate at a time.  `caffeinate -dimsu` runs; never stop it.  Before each browser run, check with `ps -A -o pid,etime,command` that no other `e2e` or `check --tier push` runs.
 
 ## Plan of work
@@ -113,7 +113,7 @@ Acceptance: the test fails on the planted byte and passes without it.  `cargo te
 
 Does the zero-init cost go down with the bytes, at the same grid?  M3 measured only 10 KiB and 0 KiB.  The parent asks for this control first.  It is evidence for the quirk entry and a prediction of `v64k8`'s gain.  It is not a gate: Step 6 builds `v64k8` in any case, and Step 7's own ratios decide.
 
-1. `git worktree add /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/wt -b scratch/m4-controls HEAD`.
+1. `git worktree add <scratch>/m4/wt -b scratch/m4-controls HEAD`.
 2. On that branch only, port by hand from patches 0001 and 0003 the parts that "The code today" names.  Patch 0003 does not apply on 0001 alone: its context holds patch 0002's `attention-u`, and its indices (`WG10K = 4`, `WG0 = 5`) count it.  Leave out `attention-u`, the variants and the FMA and copy controls.  Give `wg_source` the count of vec4s as an argument, not a fixed 640.  `EXTRAS` holds three controls, each with almost no work, at `v64`'s grid on `freq qkv` (24 x 86 workgroups, 2,064):
    * `wg10k`: 640 vec4s (10 KiB), as M3's;
    * `wg6k`: 384 vec4s (6 KiB), as `v64k8` has;
@@ -132,7 +132,7 @@ Acceptance: the table in Surprises, each figure with its log.  The quirk entry g
 The tool that shows "no loss" and a gain of 3 % or more, for M4, M5 and M6.  The goal and the cases are in the parent's "Validation and acceptance".  The design:
 
 * `cargo run -p xtask -- e2e perf --browser <b> --weights <w> --base-dist <dir> --runs <n>`.  The base runs use the page in `<dir>`, and the head runs use `--dist` (default `app/dist`).  Both use HEAD's `xtask`.  `--runs` is the count of each side: even, and 4 or more.  `--base-dist` refuses `--gate`, `--update-baselines` and `--swiftshader`.  It refuses a run on a fallback or a software adapter (GPU-3), and a run whose chunk times have 1 decimal (a page from before `59da862`).  `--query` applies to both sides.
-* The base worktree: `git -C /Users/lloyd/Documents/rustt/stemyla worktree add --detach /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/base-wt <base commit>`.  Build its page as "The paths of this run" says.
+* The base worktree: `git worktree add --detach <scratch>/m4/base-wt <base commit>`, from the repo's root.  Build its page as "The paths of this run" says.
 * The order: blocks of 4 runs, B H H B.  Each run writes `<out>/perf-<browser>-<base or head>-<n>.json`.  The output gives each run in its order, with the kernels that it chose.
 * The figure of each run is its chunk lower quartile, as the gate reads it.  The groups of slow chunks go into the whole time, but not into the lower quartile.  In M2's runs, groups of slow chunks added about 9 % to a Chrome run's whole time, and the lower quartile stayed at 4.70 s (`plans/completed/gpu-speed-m2.md`, Surprises, Step 5.1).  The output also gives the chunk median and the whole time of each run.
 * The chunk times are logged to 0.1 s today: steps of 1.4 % to 2.1 %, too coarse for 3 %.  So the first change of this step logs them to 0.01 s (`{:.2}` in the chunk line of `worker/src/web.rs`), with a parse test of a line with 2 decimals.  It lands before the A/A session, so each later base page has it.
@@ -191,7 +191,7 @@ For each candidate:
    * The native GPU tests (`roformer-gpu/tests/`) check each `TILES` entry against the CPU.  Add a test that each candidate gives `v64`'s output bit for bit, in f32 and f16.  Use the calibration shapes and the ragged shapes of `matmul_vec4_variants` (`roformer-gpu/tests/kernels.rs`): a K that is a multiple of 4 but not of 16 is where `v64` adds zero terms, and `fma(0, 0, acc)` is `acc`.  The reason, in the test's doc: each output adds an explicit `fma` chain in K order in the three kernels, and no form changes that order.  The claim is for the native test only: Safari compiles with `MTLMathModeRelaxed` (M3, Step 1).  If the native GPU gives a difference, record it in Surprises and decide in the Decision log; decision 0022 needs only the f16 variant to equal its own f32 kernel.
 2. The code.  Bump `CALIBRATION` to 4, with a line in its doc: version 4 adds the candidates of M4.  Change its test.
 3. `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passes on this Mac (Metal).
-4. Do not commit on the branch yet.  Step 7 decides which candidate lands.  Run `git add -N` on each new file, for example `roformer-gpu/src/shaders/matmul_vec4_direct.wgsl`, then write `git diff` to `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m4/candidates.patch`, so that a new session can go on.  Check it with `git apply --check` in a clean worktree at HEAD.
+4. Do not commit on the branch yet.  Step 7 decides which candidate lands.  Run `git add -N` on each new file, for example `roformer-gpu/src/shaders/matmul_vec4_direct.wgsl`, then write `git diff` to `<scratch>/m4/candidates.patch`, so that a new session can go on.  Check it with `git apply --check` in a clean worktree at HEAD.
 
 Acceptance: the tests above fail first and then pass, natively on Metal.
 
@@ -211,7 +211,7 @@ Acceptance: a table in Surprises of `R`, `S` and the ratio of each shape, for ea
 
 ### Step 8: the self-tests
 
-For each candidate that landed: `cargo run -p xtask -- e2e selftest --browser <b> --weights /Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors --query mm=<kernel>`, in Safari and in Chrome.  Also with `--query selftest=stages`, the kernels that each browser chooses.
+For each candidate that landed: `cargo run -p xtask -- e2e selftest --browser <b> --weights "$STEMYLA_PERF_WEIGHTS" --query mm=<kernel>`, in Safari and in Chrome.  Also with `--query selftest=stages`, the kernels that each browser chooses.
 
 Acceptance: each run passes.  Progress names each run.
 
@@ -258,7 +258,7 @@ Acceptance: `memory-budget` passes 3 times in each browser.  The growths and the
 
 ### Step 13: the checks before review round 1
 
-* `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver cargo run -p xtask -- check --tier push` passes, with both perf gates run.  Progress gives both verdicts.  A skip line is not a pass (VERIFY-1).
+* `cargo run -p xtask -- check --tier push`, with `$STEMYLA_PERF_WEIGHTS` set and `$CHROMEDRIVER` set to the driver of Chrome for Testing 157 (mac-arm64), passes, with both perf gates run.  Progress gives both verdicts.  A skip line is not a pass (VERIFY-1).
 * `cargo build -p xtask` passes.
 * `m4/parent-m4.diff` for the orchestrator, with `git apply --check` passing on HEAD.  It holds Surprises entries with the tables of Steps 4, 5, 7, 9, 10 and 12, and Decision log lines for the rules of Steps 5 and 7 and for each candidate.  One line says that the chunk times have 2 decimals, which reverses the parent's "Not taken: chunk times in 2 decimals".  It also makes the M5 and M6 sections and "Validation and acceptance" point to the rules: Step 7 of this plan and `e2e perf --base-dist`.
 * Each change of `.claude/**` or `CLAUDE.md` that no step checkpoint carried, as a diff in `m4/`.

@@ -73,18 +73,18 @@ Chrome's compiler, Tint, also clamps indices by default (its robustness transfor
 
 ### The paths of this run
 
-* The session scratchpad: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad`.  This folder belongs to one session, and is not kept.
-* The scratch worktree: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt`, on the local branch `scratch/m3-variants` from `1be7a18`.  Never push it (GIT-1).
-* The logs are in `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/runs/`.  Each page has three:
+* The session scratchpad: `<scratch>`.  This folder belongs to one session, and is not kept.
+* The scratch worktree: `<scratch>/m3/wt`, on the local branch `scratch/m3-variants` from `1be7a18`.  Never push it (GIT-1).
+* The logs are in `<scratch>/m3/runs/`.  Each page has three:
   * `<step>-<browser>-<n>/bench.log`: the bench log, in the folder that `e2e --out` names;
   * `<step>-<browser>-<n>.log`: a copy of that bench log;
   * `<step>-<browser>-<n>.stdout`: the output of `e2e`.
 * The native runs of Step 5.2 have no browser part: `s5native-<n>.log`.  The check pages of Step 2 are in `smoke/` and `smoke-safari/`.
 * Each figure in the tables names its log.  The scratchpad belongs to this session, so the tables of each step also go into this plan's Surprises at the end of the step.  The logs and `m3/findings.md` stayed in the session scratchpad, and are not kept.  This plan's Surprises hold the tables.
-* Weights (Step 8 only): `/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors` (git-ignored, ASSET-1).
-* Chrome: `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.
+* Weights (Step 8 only): `third_party/models/bs_roformer_sw.f16.safetensors` (git-ignored, ASSET-1).
+* Chrome: `$CHROMEDRIVER`, the driver of Chrome for Testing 157 (mac-arm64).
 * Safari: through `safaridriver`, which `xtask` drives.  Never quit the maintainer's Safari.  Read `docs/references/local-browser-testing.md` first.
-* Build the page of the worktree with `(cd /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt/app && trunk build --release)`, and pass `--dist /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt/app/dist` to `e2e`.  Run one browser GPU run at a time.  `caffeinate -dimsu` runs.
+* Build the page of the worktree with `(cd <scratch>/m3/wt/app && trunk build --release)`, and pass `--dist <scratch>/m3/wt/app/dist` to `e2e`.  Run one browser GPU run at a time.  `caffeinate -dimsu` runs.
 
 ## Plan of work
 
@@ -106,7 +106,7 @@ Read these, and record each fact with the file, the commit SHA and the date chec
 
 ### Step 2: the scratch worktree and its harness
 
-1. `git worktree add /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt -b scratch/m3-variants 1be7a18`.
+1. `git worktree add <scratch>/m3/wt -b scratch/m3-variants 1be7a18`.
 2. On that branch only:
    * Each matmul variant of Step 4 is a new `TILES` entry, with its f16 variant, so that the bench times both formats.  `s64-c` needs a source of its own, since a `hand_written` tile always gives `matmul.wgsl`: for example a source field on `Tile`.
    * Each attention variant of Step 6 is a new source timed in `attention_per_chunk`, beside split and fused.
@@ -167,7 +167,7 @@ At most two fused attention variants, from what Steps 3 to 5 found, each within 
 2. The design that M4 and M5 start from: tile shape, outputs for each thread, the memory layout and index form.  Also the number of barriers, and the attention structure.  Each choice names its figure.  The parent's M4 gives 8 KiB for the 128 x 128 tile, without a pad; with `v64`'s pad of one vec4 it is 12 KiB.  The diff of item 3 corrects it, or says why the pad goes.
 3. `m3/parent-m3.diff` for the orchestrator, `git apply --check` passing on HEAD.  It holds a Surprises entry with the summary table, and Decision log lines for the cause and the design.  It changes the M4 and M5 sections where the design changes their start point.
 4. If the cause is in WebKit: an entry in `docs/references/browser-quirks.md` in the form of the other entries.  It gives what was seen, where and when, the code, and the rule.  Also `m3/webkit-bug.md`, a bug text for the maintainer to file.  The text gives a small WGSL case, the figures in both browsers, and the WebKit source lines with the commit.  Review round 1 put it in the repo as `docs/references/webkit-bug-workgroup-zero-init.md`.
-5. `git -C /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/wt format-patch 1be7a18..scratch/m3-variants -o /private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m3/variants/`.  M4 and M5 can start from it.  Then remove the worktree and the scratch branch.
+5. `git -C <scratch>/m3/wt format-patch 1be7a18..scratch/m3-variants -o <scratch>/m3/variants/`.  M4 and M5 can start from it.  Then remove the worktree and the scratch branch.
 6. If a variant or the bench harness is worth keeping on the branch, do not commit it: say so in the report, with the reason.  The team leader decides, and then this plan gets a code step with tests that fail first, and review rounds over the code.
 
 ### Step 8: the checks before the review round
@@ -360,6 +360,7 @@ What M3 did not do:
 What to do differently:
 
 * Never put a placeholder such as `<scratchpad>` in a plan or a brief.  A reviewer ran `find /` from one for 3.6 hours.
+  * 2026-11-15: the convention of this date keeps this lesson.  Committed text holds slots such as `<scratch>`, and each brief fills each slot with its absolute path (`docs/working-with-agents.md`, Conventions).
 * Before a report, check each subagent's background work, not only its report.
 * Build in a worktree with its own `--target-dir`.  A shared target folder left test binaries that pointed at a removed worktree.
 * Give each review agent a worktree name of its own.  Rounds 2, 6 and 7 each had two reviewers in one worktree (TD-34).

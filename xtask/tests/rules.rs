@@ -257,6 +257,183 @@ fn no_build_file_updates_snapshots() {
     );
 }
 
+/// What follows a mark when the mark names one machine.
+#[derive(Clone, Copy)]
+enum MarkEnd {
+    /// The name of a folder: an ASCII letter or digit, `.`, `_` or `-`.
+    Name,
+    /// A digit, such as a user ID.
+    Digit,
+}
+
+/// The marks of a path that belongs to one machine, in lower case: a home
+/// folder, in plain and in Claude Code's encoded form, the temporary
+/// folders of macOS and of Claude Code, `~/.local/` and `~/Downloads/`.
+/// The match ignores case.  A mark names a machine only when its end
+/// follows it, so `/Users/<name>`, `/Users/*`, `claude-<uid>` and a bare
+/// `/Users/` stay generic.
+const MACHINE_PATH_MARKS: [(&str, MarkEnd); 9] = [
+    ("/users/", MarkEnd::Name),
+    ("-users-", MarkEnd::Name),
+    ("/home/", MarkEnd::Name),
+    ("-home-", MarkEnd::Name),
+    ("/var/folders/", MarkEnd::Name),
+    ("/private/tmp/claude-", MarkEnd::Name),
+    ("claude-", MarkEnd::Digit),
+    ("~/.local/", MarkEnd::Name),
+    ("~/downloads/", MarkEnd::Name),
+];
+
+/// The generic fixtures that hold a mark: (file, text, reason).  A mark in
+/// one of these texts, in that file, is not a machine path, when no name
+/// character follows the text.
+const MACHINE_PATH_FIXTURES: [(&str, &str, &str); 1] = [(
+    "xtask/tests/rules.rs",
+    "/Users/user",
+    "the cases of the read-only guard need a macOS home folder, and `user` is no real account",
+)];
+
+fn is_name_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || "._-".contains(c)
+}
+
+/// The line and the text of each mark in `text` that is a machine path and
+/// that no text in `fixtures` covers.
+fn machine_paths(text: &str, fixtures: &[&str]) -> Vec<(usize, String)> {
+    let lower = text.to_ascii_lowercase();
+    let next_char = |at: usize| lower[at..].chars().next();
+    let covered = |start: usize, end: usize| {
+        fixtures.iter().any(|fixture| {
+            lower
+                .match_indices(&fixture.to_ascii_lowercase())
+                .any(|(at, _)| {
+                    let fixture_end = at + fixture.len();
+                    at <= start
+                        && end <= fixture_end
+                        && !next_char(fixture_end).is_some_and(is_name_char)
+                })
+        })
+    };
+    let names_a_machine = |mark_end: MarkEnd, end: usize| {
+        next_char(end).is_some_and(|c| match mark_end {
+            MarkEnd::Name => is_name_char(c),
+            MarkEnd::Digit => c.is_ascii_digit(),
+        })
+    };
+    let mut found: Vec<(usize, String)> = MACHINE_PATH_MARKS
+        .iter()
+        .flat_map(|&(mark, mark_end)| {
+            lower
+                .match_indices(mark)
+                .map(move |(start, _)| (mark_end, start, start + mark.len()))
+        })
+        .filter(|&(mark_end, start, end)| names_a_machine(mark_end, end) && !covered(start, end))
+        .map(|(_, start, _)| {
+            let line_start = text[..start].rfind('\n').map_or(0, |at| at + 1);
+            let line_end = text[start..].find('\n').map_or(text.len(), |at| start + at);
+            let line = text[..start].matches('\n').count() + 1;
+            (line, text[line_start..line_end].trim().to_string())
+        })
+        .collect();
+    found.sort();
+    found.dedup();
+    found
+}
+
+/// Samples for `machine_paths`.  A `|` marks where a mark ends; the test
+/// removes it, so this file holds no machine path of its own.
+const MACHINE_PATH_SAMPLES: [&str; 11] = [
+    "see ~/Downloads/|x.safetensors",
+    "see -home-|name-src-x",
+    "see /Users/|name/x",
+    "see /users/|name/x",
+    "see -Users-|name-Documents-x",
+    "see /home/|name/x",
+    "see /var/folders/|qr/T",
+    "see /private/tmp/claude-|x/y",
+    "see /tmp/claude-|1234/x",
+    "see ~/.local/|bin/x",
+    "see /Users/|username/x",
+];
+
+/// Generic forms that name no machine.
+const GENERIC_PATH_SAMPLES: [&str; 10] = [
+    "saves it in `~/Downloads`",
+    "/Users/",
+    "/Users/<name>/x",
+    "/home/*/x",
+    "`/var/folders/`",
+    "/private/tmp/claude-<uid>/x",
+    "claude-<uid>",
+    "claude-opus-5-5",
+    "/private/tmp/stemyla-harness/x",
+    "/Users/|user/x",
+];
+
+#[test]
+fn machine_paths_finds_each_mark_and_skips_generic_forms() {
+    let fixtures = ["/Users/user"];
+    let missed = MACHINE_PATH_SAMPLES
+        .iter()
+        .map(|sample| sample.replace('|', ""))
+        .filter(|text| machine_paths(text, &fixtures).len() != 1);
+    let flagged = GENERIC_PATH_SAMPLES
+        .iter()
+        .map(|sample| sample.replace('|', ""))
+        .filter(|text| !machine_paths(text, &fixtures).is_empty());
+    let wrong: Vec<String> = missed
+        .map(|text| format!("missed: {text}"))
+        .chain(flagged.map(|text| format!("flagged: {text}")))
+        .collect();
+    assert!(wrong.is_empty(), "wrong results:\n{}", wrong.join("\n"));
+    let two_lines = "a\nb /home/|name/x\n".replace('|', "");
+    assert_eq!(
+        machine_paths(&two_lines, &[]),
+        [(2, "b /home/|name/x".replace('|', ""))]
+    );
+}
+
+/// No tracked file holds a path that belongs to one machine.  Write
+/// `$TMPDIR/...`, `<scratch>/...`, a path from the repo's root,
+/// `$STEMYLA_PERF_WEIGHTS` or `$CHROMEDRIVER` instead.
+#[test]
+fn no_tracked_file_holds_a_machine_path() {
+    let texts = xtask::rules::tracked_texts(&xtask::workspace_root(), tracked_files())
+        .expect("the tracked files can be read");
+    assert!(
+        texts.iter().any(|(file, _)| file == "docs/tech-debt.md"),
+        "the texts do not hold docs/tech-debt.md"
+    );
+    for (fixture_file, fixture, reason) in MACHINE_PATH_FIXTURES {
+        assert!(
+            texts
+                .iter()
+                .any(|(file, text)| file == fixture_file && text.contains(fixture)),
+            "the fixture {fixture:?} ({reason}) is not in {fixture_file}; remove it"
+        );
+    }
+    let problems: Vec<String> = texts
+        .iter()
+        .flat_map(|(file, text)| {
+            let fixtures: Vec<&str> = MACHINE_PATH_FIXTURES
+                .iter()
+                .filter(|(fixture_file, _, _)| fixture_file == file)
+                .map(|(_, fixture, _)| *fixture)
+                .collect();
+            machine_paths(text, &fixtures)
+                .into_iter()
+                .map(move |(line, found)| format!("{file}:{line}: {found}"))
+        })
+        .collect();
+    assert!(
+        problems.is_empty(),
+        "{} line(s) hold a machine path; write a portable form \
+         (`docs/working-with-agents.md`):\n{}",
+        problems.len(),
+        problems.join("\n")
+    );
+}
+
 #[test]
 fn no_audio_or_weights_are_tracked() {
     let problems = xtask::rules::assets_in_the_index(tracked_files());
@@ -700,8 +877,8 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (WIDE_SEARCH, "find /Users -name x"),
     (WIDE_SEARCH, "find /Users/ -name x"),
     (WIDE_SEARCH, "find \"/Users/\" -name x"),
-    (WIDE_SEARCH, "find /Users/lloyd -name x"),
-    (WIDE_SEARCH, "find /Users/lloyd/ -name x"),
+    (WIDE_SEARCH, "find /Users/user -name x"),
+    (WIDE_SEARCH, "find /Users/user/ -name x"),
     (WIDE_SEARCH, "find /users -name x"),
     (WIDE_SEARCH, "find /Volumes -name x"),
     (WIDE_SEARCH, "find /Volumes/ -name x"),
@@ -714,13 +891,13 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (WIDE_SEARCH, "du -sh ~/*"),
     (WIDE_SEARCH, "find /*"),
     (WIDE_SEARCH, "find /."),
-    (WIDE_SEARCH, "find /Users/lloyd/."),
+    (WIDE_SEARCH, "find /Users/user/."),
     (WIDE_SEARCH, "find ~lloyd -name x"),
     (WIDE_SEARCH, "find /System/Volumes/Data -name x"),
-    (WIDE_SEARCH, "find /System/Volumes/Data/Users/lloyd -name x"),
+    (WIDE_SEARCH, "find /System/Volumes/Data/Users/user -name x"),
     (WIDE_SEARCH, "nice find / -name x"),
     (WIDE_SEARCH, "sudo find / -name x"),
-    (WIDE_SEARCH, "find /Users/lloyd/* -name x"),
+    (WIDE_SEARCH, "find /Users/user/* -name x"),
     (WIDE_SEARCH, "find $HOME/. -name x"),
     (WIDE_SEARCH, "find ~lloyd/ -name x"),
     (WIDE_SEARCH, "find /system/volumes/data/users -name x"),
@@ -759,7 +936,7 @@ const GUARD_REFUSES: &[(&str, &str)] = &[
     (WIDE_SEARCH, "mdfind -onlyin /Volumes x"),
     (
         WIDE_SEARCH,
-        "mdfind -onlyin /Users/lloyd/Documents/rustt/stemyla -onlyin / x",
+        "mdfind -onlyin /Users/user/src/stemyla -onlyin / x",
     ),
     (WIDE_SEARCH, "rtk mdfind x"),
     (WIDE_SEARCH, "timeout 60 mdfind x"),
@@ -828,26 +1005,26 @@ const GUARD_PASSES: &[&str] = &[
     "for f in a b; do grep -n x \"$f\"; done",
     "export FOO=1",
     // A search in the repo, or in a named folder under a home folder.
-    "find /Users/lloyd/Documents/rustt/stemyla -name x",
+    "find /Users/user/src/stemyla -name x",
     "find . -name x",
     "find docs -name '~'",
     "find -L . -name x -path /",
     "find . ! -name x",
     "find ./. -name x",
     "find docs/* -name x",
-    "find ~/Documents/rustt/stemyla -name x",
-    "find /Users/lloyd/Documents/rustt/stemyla/. -name x",
-    "find /System/Volumes/Data/Users/lloyd/Documents -name x",
+    "find ~/src/stemyla -name x",
+    "find /Users/user/src/stemyla/. -name x",
+    "find /System/Volumes/Data/Users/user/Documents -name x",
     "nice -n 10 find . -name x",
     "sudo -u lloyd du -sh target",
     "rtk find . -name x",
     "du -sh target",
-    "du -sh /Users/lloyd/Documents/rustt/stemyla/target",
+    "du -sh /Users/user/src/stemyla/target",
     "du -d 1 .",
-    "mdfind -onlyin /Users/lloyd/Documents/rustt/stemyla x",
+    "mdfind -onlyin /Users/user/src/stemyla x",
     "mdfind -onlyin . x",
-    "find \"/Volumes/Macintosh HD/Users/lloyd/Documents\" -name x",
-    "find \"/System/Volumes/Data/Volumes/Macintosh HD/Users/lloyd/Documents\" -name x",
+    "find \"/Volumes/Macintosh HD/Users/user/Documents\" -name x",
+    "find \"/System/Volumes/Data/Volumes/Macintosh HD/Users/user/Documents\" -name x",
     "",
 ];
 
