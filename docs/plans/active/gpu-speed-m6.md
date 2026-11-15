@@ -322,6 +322,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * 3-5: the source test pins the whole body of `Pace::all`, and a drain before each read of `selftest`.  It failed against `Pace::all` with no drain (`fail-3-5-a-all-no-drain.log`), and against the removal of each of the 4 drains of `selftest` (`fail-3-5-b-selftest-no-drain-*.log`).
   * 3-2: `step_check` removes the shadow of `first`.  3-3, 3-4 and 3-6: the docs, the comment before the drain of the mask, and this plan.
   * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  `e2e selftest` passed in Chrome and Safari (`<scratch>/m6/r3/selftest-*.log`).
+* [x] 2026-11-15: the fixes of review round 4.  `a_step_check_gives_the_errors_first_then_the_limit` gained a step on the limit and a limit of 120 s.  It failed against `dt >= limit` (4-2) and against a fixed 60 s for a first step (4-1) (`<scratch>/m6/r4/fail-4-*.log`).
 
 ## Surprises and discoveries
 

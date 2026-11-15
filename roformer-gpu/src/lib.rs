@@ -4875,8 +4875,12 @@ mod tests {
     ///   newer step;
     /// * one error, 70 s: the rejection, not the limit text;
     /// * no error, 5.5 s: the limit text of 5 s;
+    /// * no error, 5 s, on the limit: Ok;
     /// * the first step of its kind, 59 s: Ok;
-    /// * the first step of its kind, 61 s: the limit text of 60 s.
+    /// * the first step of its kind, 60 s, on its limit: Ok;
+    /// * the first step of its kind, 61 s: the limit text of 60 s;
+    /// * the first step of its kind, with a limit of 120 s: 90 s gives Ok,
+    ///   and 121 s gives the limit text of 120 s.
     #[test]
     fn a_step_check_gives_the_errors_first_then_the_limit() {
         let one = ["bad bind".to_string()];
@@ -4901,10 +4905,20 @@ mod tests {
             check(&[], false, 5.5, false),
             Err("one GPU step (layer 3) took 5.5 s, over the 5 s limit; stopped so the computer stays responsive".into())
         );
+        assert_eq!(check(&[], false, 5.0, false), Ok(()));
         assert_eq!(check(&[], false, 59.0, true), Ok(()));
+        assert_eq!(check(&[], false, 60.0, true), Ok(()));
         assert_eq!(
             check(&[], false, 61.0, true),
             Err("one GPU step (layer 3) took 61.0 s, over the 60 s limit; stopped so the computer stays responsive".into())
+        );
+        assert_eq!(
+            step_check(&"layer 3", false, &[], 90.0, 120.0, true),
+            Ok(())
+        );
+        assert_eq!(
+            step_check(&"layer 3", false, &[], 121.0, 120.0, true),
+            Err("one GPU step (layer 3) took 121.0 s, over the 120 s limit; stopped so the computer stays responsive".into())
         );
     }
 
