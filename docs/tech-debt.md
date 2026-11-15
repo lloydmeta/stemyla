@@ -560,11 +560,11 @@ This entry concerns VERIFY-1.  Review round 1 of M5 of `plans/active/gpu-speed.m
   * `calibration_records_the_step_of_the_separation`: what a time-axis step records, and which fused kernel it runs, by its profile labels.  It runs on an adapter with `timestamp-query`.  On an adapter without it, it skips with a pass, unless `timestamps` is in `STEMYLA_REQUIRE`.  By default, `check --tier push` and the command of GPU-2 do not set `timestamps` (TD-8).
 * Fix: a GPU test of `calibrate` and `measure_attention` with a clock that moves a fixed step at each read, and a captured log, as the time axis's test does.  A profile-label test of `attention_per_chunk`, as the time-axis step's test does.
 
-### TD-106: the bias limit of the calibration check has no floor
+### TD-106: the bias limit of the calibration check falls under the noise of `D`
 
-It breaks no rule.  It concerns case 11 of M6 of `plans/active/gpu-speed.md`: calibration's bias of `freq` against `fused`.  The bias must stay under half of `|D|`, or under the noise of `D` where `|D|` is smaller.  When `|D|` is near 0, half of `|D|` is near 0 too.  So the limit can fail on noise alone.
+It breaks no rule.  It concerns case 11 of M6 of `plans/active/gpu-speed.md`: calibration's bias of `freq` against `fused`.  The bias must stay under half of `|D|`, or under the noise of `D` where `|D|` is smaller.  So where `|D|` passes its noise, the limit falls from the noise to half the noise.  Where `|D|` is from its noise to twice its noise, a bias of noise alone fails.  Also, the noise of 2 runs of each policy can be too small.
 
-* Evidence: in M6, in Safari, `|D|` was 0.035 s, about 0.6 % of a chunk.  The limit was 0.0175 s, and the bias -0.033 s.  The orchestrator accepted it (i1-3 of the intent review of M6).
+* Evidence: in M6, in Safari, `|D|` was 0.035 s, about 0.6 % of a chunk.  Its noise was 0.020 s, so the limit was 0.0175 s, and the bias -0.033 s.  `D` changed its sign on a repeat set, so that noise was too small.  The orchestrator accepted it (i1-3 of the intent review of M6).
 * Fix: give the limit a floor of `T` (1 %) of a chunk, in the next plan that runs the check.  Not planned.
 
 ## Known breaches
