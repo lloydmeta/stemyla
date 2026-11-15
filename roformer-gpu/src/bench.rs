@@ -1712,20 +1712,32 @@ mod tests {
         matches!((body.find(first), body.find(second)), (Some(f), Some(s)) if f < s)
     }
 
-    /// Asserts that the worker's `Pace` and `time_rec` run their steps
-    /// through `Window::step` and `Window::drain`, whose order
-    /// `pace_order`'s tests check, and that:
-    /// * `Pace` keeps `STEPS_IN_FLIGHT` in flight, and `time_rec` the
-    ///   depth of its `Waits`;
+    /// The code of `body`: its comment lines dropped, and its whitespace
+    /// collapsed to single spaces.
+    fn code(body: &str) -> String {
+        body.lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .flat_map(str::split_whitespace)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Asserts, from the source with comment lines dropped and whitespace
+    /// collapsed:
+    /// * `Pace` keeps `STEPS_IN_FLIGHT` in flight;
+    /// * the whole bodies of `Pace::run`, `Pace::drain` and `time_rec`'s
+    ///   `InFlight` arm, which call only `Window::new`, `Window::step` and
+    ///   `Window::drain` (the order of `pace_order`);
+    /// * `GpuNetwork::mask` has one `self.pace.drain`, just after its step
+    ///   loop and just before its read of the mask;
     /// * each `submit` records and submits, and takes no signal;
+    ///   `Timed::submit` calls `record`, then submits;
     /// * each `signal` takes `Gpu::done_signal`;
-    /// * each `end` awaits the signal before it reads the clock (the
-    ///   worker) or returns (`time_rec`);
-    /// * the worker's checks take each step's time from a `StepClock`;
-    /// * `GpuNetwork::mask` drains before it reads the mask.
-    ///
-    /// So the separation and calibration run the time axis alike (case 11
-    /// of M6), and no mask is read after a later stem's steps (case 2).
+    /// * the whole body of `OnGpu::end`: it awaits the signal, reads the
+    ///   clock, then gives `newer` to `Checks::ended`;
+    /// * `Timed::end` awaits the signal before it returns;
+    /// * `Checks::ended` takes each step's time from a `StepClock`, and
+    ///   gives `newer` to `rejected_text`.
     #[test]
     fn the_worker_paces_as_calibration_times() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/src/web.rs");
@@ -1741,19 +1753,20 @@ mod tests {
             "    async fn run(&mut self, gpu: &Gpu, job: &Job<'_>, step: &Step) -> Result<(), String> {",
             "    ",
         );
-        let squeezed: String = run.split_whitespace().collect();
-        assert!(
-            squeezed.contains("self.flight.step(&mutOnGpu{gpu,job,checks},*step).await"),
-            "Pace::run: {run}"
+        assert_eq!(
+            code(run),
+            "let checks = &mut self.checks; self.flight .step(&mut OnGpu { gpu, job, checks }, *step) .await",
+            "Pace::run"
         );
         let drain = body_of(
             &worker,
             "    async fn drain(&mut self, gpu: &Gpu, job: &Job<'_>) -> Result<(), String> {",
             "    ",
         );
-        assert!(
-            drain.contains("self.flight.drain(&mut OnGpu { gpu, job, checks }).await"),
-            "Pace::drain: {drain}"
+        assert_eq!(
+            code(drain),
+            "let checks = &mut self.checks; self.flight.drain(&mut OnGpu { gpu, job, checks }).await",
+            "Pace::drain"
         );
         let submit = body_of(
             &worker,
@@ -1771,43 +1784,52 @@ mod tests {
             "    async fn end(&mut self, s: Submitted, signal: Signal, newer: bool) -> Result<(), String> {",
             "    ",
         );
-        assert!(
-            in_order(end, "signal.wait().await;", "let ended = now_s();"),
-            "OnGpu::end: {end}"
+        assert_eq!(
+            code(end),
+            "signal.wait().await; let ended = now_s(); self.checks.ended(self.gpu, self.job, s, ended, newer).await",
+            "OnGpu::end"
         );
         let ended = body_of(&worker, "    async fn ended(", "    ");
-        assert!(
-            ended.contains("let dt = self.clock.ended(s.at, ended);"),
-            "Checks::ended: {ended}"
-        );
+        for want in [
+            "let dt = self.clock.ended(s.at, ended);",
+            "return Err(rejected_text(step, newer, errors.len(), first));",
+        ] {
+            assert!(ended.contains(want), "{want} in Checks::ended: {ended}");
+        }
         let mask = body_of(
             &worker,
             "    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String> {",
             "    ",
         );
+        assert_eq!(
+            mask.matches("self.pace.drain(").count(),
+            1,
+            "one drain in GpuNetwork::mask: {mask}"
+        );
         assert!(
-            in_order(
-                mask,
-                "self.pace.drain(self.gpu, j).await?;",
-                "j.mask().await?"
+            code(mask).contains(
+                "for step in shared.into_iter().chain(j.mask_steps(stem)) { self.pace.run(self.gpu, j, &step).await?; } self.pace.drain(self.gpu, j).await?; let mask = j.mask().await?;"
             ),
-            "the drain before the read of the mask: {mask}"
+            "the step loop, then the drain, then the read of the mask: {mask}"
         );
         let time_rec = body_of(&bench, "async fn time_rec<'g>(", "");
         let in_flight = time_rec
             .split_once("Waits::InFlight(depth) => {")
-            .map(|(_, arm)| arm)
+            .and_then(|(_, rest)| rest.split_once("\n        }\n"))
+            .map(|(arm, _)| arm)
             .expect("time_rec's InFlight arm");
-        for want in [
-            "let mut window = Window::new(depth);",
-            "let Ok(()) = window.step(&mut steps, ()).await;",
-            "let Ok(()) = window.drain(&mut steps).await;",
-        ] {
-            assert!(in_flight.contains(want), "{want} in time_rec: {in_flight}");
-        }
+        assert_eq!(
+            code(in_flight),
+            "let mut window = Window::new(depth); while count == 0 || now() - t0 < round { let Ok(()) = window.step(&mut steps, ()).await; count += 1; } let Ok(()) = window.drain(&mut steps).await;",
+            "time_rec's InFlight arm"
+        );
         let timed_submit = body_of(&bench, "    fn submit(&mut self, (): ()) {", "    ");
         assert!(
             !timed_submit.contains("done_signal"),
+            "Timed::submit: {timed_submit}"
+        );
+        assert!(
+            in_order(timed_submit, "(self.record)(&mut r);", "r.submit();"),
             "Timed::submit: {timed_submit}"
         );
         let timed_signal = body_of(&bench, "    fn signal(&mut self) -> Signal {", "    ");
@@ -1838,17 +1860,19 @@ mod tests {
         }
     }
 
-    /// `time_rec` with no warm-up, a `record` that records nothing, and a
-    /// clock that moves 1 s at each read (it panics after 1000 reads, so a
-    /// loop that never ends fails):
-    /// * a round of 3 s gives 4 s for 3 steps, 1.333 s, from 9 reads;
-    /// * a round of 4 s gives 5 s for 4 steps, 1.25 s, from 10 reads;
+    /// `time_rec` with no warm-up, a `record` that records nothing and
+    /// counts its calls, and a clock that moves 1 s at each read (it panics
+    /// after 1000 reads, so a loop that never ends fails):
+    /// * a round of 3 s gives 4 s for 3 steps, 1.333 s, from 9 reads and
+    ///   4 calls of `record` (1 to warm up);
+    /// * a round of 4 s gives 5 s for 4 steps, 1.25 s, from 10 reads and
+    ///   5 calls of `record`;
     /// * each holds for `Covering` and for `InFlight(2)`.
     #[test]
     fn time_rec_counts_the_steps_of_a_round() {
         let Some(gpu) = bench_gpu() else { return };
         for waits in [Waits::Covering, Waits::InFlight(2)] {
-            for (round, secs, reads) in [(3.0, 4.0 / 3.0, 9), (4.0, 1.25, 10)] {
+            for (round, secs, reads, calls) in [(3.0, 4.0 / 3.0, 9, 4), (4.0, 1.25, 10, 5)] {
                 let clock = std::cell::Cell::new(0u32);
                 let now = || {
                     let t = clock.get();
@@ -1856,12 +1880,19 @@ mod tests {
                     clock.set(t + 1);
                     f64::from(t)
                 };
-                let got = pollster::block_on(time_rec(&gpu, 0.0, round, waits, &now, &|_| {}));
+                let recorded = std::cell::Cell::new(0u32);
+                let record = |_: &mut Rec| recorded.set(recorded.get() + 1);
+                let got = pollster::block_on(time_rec(&gpu, 0.0, round, waits, &now, &record));
                 assert!(
                     (got - secs).abs() < 1e-12,
                     "{waits:?}, round {round}: {got} s, not {secs} s"
                 );
                 assert_eq!(clock.get(), reads, "{waits:?}, round {round}: the reads");
+                assert_eq!(
+                    recorded.get(),
+                    calls,
+                    "{waits:?}, round {round}: the calls of record"
+                );
             }
         }
     }

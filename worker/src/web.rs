@@ -10,7 +10,9 @@ use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::net::{Job, Net, Step};
-use roformer_gpu::{Gpu, STEPS_IN_FLIGHT, Signal, StepClock, Steps, WeightFormat, Window};
+use roformer_gpu::{
+    Gpu, STEPS_IN_FLIGHT, Signal, StepClock, Steps, WeightFormat, Window, rejected_text,
+};
 use stem_protocol::{
     self as protocol, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
 };
@@ -1123,17 +1125,8 @@ impl Checks {
             self.worst_what = step.to_string();
         }
         let errors = gpu.take_errors();
-        if !errors.is_empty() {
-            let during = if newer {
-                format!("{step} or the step in flight after it")
-            } else {
-                step.to_string()
-            };
-            return Err(format!(
-                "the GPU rejected {} operation(s) during {during}, so the result would be wrong; first: {}",
-                errors.len(),
-                errors[0]
-            ));
+        if let Some(first) = errors.first() {
+            return Err(rejected_text(step, newer, errors.len(), first));
         }
         let limit = if first {
             self.limit.max(60.0)
@@ -1415,8 +1408,9 @@ impl GpuHalf for GpuNetwork<'_> {
         for step in shared.into_iter().chain(j.mask_steps(stem)) {
             self.pace.run(self.gpu, j, &step).await?;
         }
-        // The copy of the mask goes after this stem's last mask step and
-        // before any step of the next stem, which writes the same buffer.
+        // Each step in flight ends, with its checks, before the mask is read
+        // and used.  So a GPU error of the last mask step stops the run
+        // before the mask is accepted.  The read waits for no later step.
         self.pace.drain(self.gpu, j).await?;
         let mask = j.mask().await?;
         trace(

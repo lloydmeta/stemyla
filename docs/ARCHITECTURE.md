@@ -225,7 +225,7 @@ A time-transformer step with split attention runs 12 dispatches on one band's `[
 12  matmul   h . W2^T + b2, accumulate     -> x       (residual)
 ```
 
-The worker (`worker/src/web.rs`) paces the steps, with at most 2 in flight (`roformer_gpu::STEPS_IN_FLIGHT`, M6 of `plans/active/gpu-speed.md`).  It submits a step and takes its signal at once (`Gpu::done_signal`).  Then it awaits the end of the step before it, and checks that step's time and any WebGPU error.  So the GPU starts each step without a wait for the worker.  Before it reads a stem's mask back, it awaits each step in flight, so the read waits for no step of the next stem.  Calibration times the time axis with the same steps in flight (`bench::STEP_WAITS`).  `Job::masks` does the same without the pacing, for tests and native runs.
+The worker (`worker/src/web.rs`) paces the steps, with at most 2 in flight (`roformer_gpu::STEPS_IN_FLIGHT`, M6 of `plans/active/gpu-speed.md`).  It submits a step and takes its signal at once (`Gpu::done_signal`).  Then it awaits the end of the step before it, and checks that step's time and any WebGPU error.  So the GPU starts each step without a wait for the worker.  Before it reads a stem's mask back, it awaits each step in flight, with its checks.  So a GPU error of the last mask step stops the run before the mask is accepted.  The read waits for no later step.  Calibration times the time axis with the same steps in flight (`bench::STEP_WAITS`).  `Job::masks` does the same without the pacing, for tests and native runs.
 
 What a change to the model would touch:
 

@@ -58,6 +58,7 @@ The state at the start, on 2026-11-15, at commit `2543abc` on branch `gpu-speed/
 * The base worktree of each comparison: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/base-wt`, detached at the base commit, built the same way with its own `target`.  Its page is `.../m6/base-wt/app/dist`.  Remove each worktree after its use with `git worktree remove`.
 * The head page: `/Users/lloyd/Documents/rustt/stemyla/app/dist`, from `(cd /Users/lloyd/Documents/rustt/stemyla/app && trunk build --release)`.
 * Weights: `STEMYLA_PERF_WEIGHTS=/Users/lloyd/Documents/rustt/stemyla/third_party/models/bs_roformer_sw.f16.safetensors`, also given as `--weights`.  Never commit it (ASSET-1).  `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.  Set both for each `check --tier push` and each `e2e` run.
+* `<scratch>` is the session's scratchpad folder, which the brief of each agent names.
 * `caffeinate -dimsu` runs; never stop it.  Before each browser run, check with `ps -A -o pid,etime,command` that no other `e2e`, `web-test` or `check --tier push` runs.  Read `docs/references/local-browser-testing.md` first.
 
 ## Plan of work
@@ -299,14 +300,21 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/parent-m6.diff` for the orchestrator; `git apply --check` passes on HEAD.  No change of `CLAUDE.md` or `.claude/` is needed.
 * [x] 2026-11-15: Step 10 skipped: P is built.
 * [x] 2026-11-15: the fixes of review round 1 (`<scratch>/m6/r1/fixes.txt`).  Each new or changed test failed first on an assert, against a mutant (`<scratch>/m6/r1/fail-*.log`):
-  * 1-1: `Pace` and `time_rec` run their steps through `Window::step` and `Window::drain` (a `Steps` trait).  `pace_order` drives them too.  `the_pace_keeps_2_steps_in_flight_and_drains_before_each_read` failed against a dropped older step (`fail-1-1-a-drop-older.log`), no await in the round (`fail-1-1-b-no-await-in-round.log`), an await of each step at once (`fail-1-1-c-await-at-once.log`) and a signal before the submission (`fail-1-1-d-signal-before-submit.log`).
+  * 1-1: `Pace` and `time_rec` run their steps through `Window::step` and `Window::drain` (a `Steps` trait).  `pace_order` drives them too.  `the_pace_keeps_2_steps_in_flight_and_drains_before_each_read` failed against four mutants.  Two are a dropped older step (`fail-1-1-a-drop-older.log`) and no await in the round (`fail-1-1-b-no-await-in-round.log`).  The others are an await of each step at once (`fail-1-1-c-await-at-once.log`) and a signal before the submission (`fail-1-1-d-signal-before-submit.log`).
   * 1-1: `StepClock` keeps the end of the last step.  `the_step_clock_charges_each_step_from_the_end_of_the_step_before` failed without its update (`fail-1-1-e-no-last-end.log`).
-  * 1-1: `the_worker_paces_as_calibration_times` pins that `Pace`, `OnGpu`, `Checks` and `time_rec` use the shared parts.  It failed against a `Pace::run` that drops the older step, a step time without `StepClock`, a signal in `OnGpu::submit`, and `time_rec` with a window of 1 or no `Window::step` (`fail-1-1-f-*.log` to `fail-1-1-j-*.log`).
-  * 1-9: the error text names the newer step in flight too.  `each_end_tells_whether_a_newer_step_is_in_flight` failed against an end that always tells true (`fail-1-9-newer-always-true.log`).
-  * `time_rec_counts_the_steps_of_a_round` failed against `-` to `+` in the round loop of `Covering` and of `InFlight`, `/` to `*`, and a count of 2 for each step (`fail-1-tr-*.log`).
+  * 1-1: `the_worker_paces_as_calibration_times` pins that `Pace`, `OnGpu`, `Checks` and `time_rec` use the shared parts.  It failed against a `Pace::run` that drops the older step, a step time without `StepClock` and a signal in `OnGpu::submit`.  It also failed against `time_rec` with a window of 1 or no `Window::step` (`fail-1-1-f-*.log` to `fail-1-1-j-*.log`).
+  * 1-9: the error text names the newer step in flight too.  `each_end_tells_whether_a_newer_step_is_in_flight` failed against an end that always tells true (`fail-1-9-newer-always-true.log`).  That test drives only `Window`, not the worker.  Since review round 2, `a_rejection_names_the_newer_step_only_when_one_is_in_flight` and `the_worker_paces_as_calibration_times` cover the worker side.
+  * `time_rec_counts_the_steps_of_a_round` failed against `-` to `+` in the round loop of `Covering` and of `InFlight`, and `/` to `*`.  It also failed against a count of 2 for each step (`fail-1-tr-*.log`).
   * The four signal tests failed against `Gpu::done` as `()`, `is_mapped` as `true`, `is_done` as `true` and `Signal::wait` as `()` (`fail-1-13-*.log`, `fail-1-16-*.log`, `fail-1-17-*.log`, `fail-1-24-*.log`).
   * 1-2 to 1-8 and 1-10: the docs and the test helpers.
   * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  `e2e selftest` passed in Chrome and Safari.  `e2e stored-stems --query attn=vfused` in Chrome gave the six hashes of M6's base (`<scratch>/m6/r1/stems-chrome-vfused.hashes`).  The worker and decoder tests passed in Safari, and the plant tests in Chrome (`<scratch>/m6/r1/web-test-*.log`).
+* [x] 2026-11-15: the fixes of review round 2 (`<scratch>/m6/r2/fixes.txt`).  Each new or changed test failed first on an assert, against a mutant (`<scratch>/m6/r2/fail-*.log`):
+  * 2-1: the text of a rejection is `roformer_gpu::rejected_text`.  `a_rejection_names_the_newer_step_only_when_one_is_in_flight` failed against `if !newer` in it (`fail-2-1-b-not-newer.log`).
+  * 2-1: `the_worker_paces_as_calibration_times` pins that `OnGpu::end` gives `newer` to `Checks::ended`, and `Checks::ended` to `rejected_text`.  It failed against `false` in each place (`fail-2-1-a-end-false.log`, `fail-2-1-c-ended-false.log`).
+  * 2-2: `time_rec_counts_the_steps_of_a_round` counts the calls of `record`.  It and the source test failed against an empty `Timed::submit` (`fail-2-2-a-submit-noop.log`).
+  * 2-3: the source test pins the whole bodies of `Pace::run`, `Pace::drain` and `time_rec`'s `InFlight` arm, and the drain of `GpuNetwork::mask`.  It failed against a drain after each step of `Pace::run` (`fail-2-3-a-run-drains.log`).  It also failed against one in `time_rec`'s round loop (`fail-2-3-b-time-rec-drains.log`), and in the step loop of `mask` (`fail-2-3-c-mask-drains-in-loop.log`).
+  * 2-4 to 2-7: the docs, TD-102 and the comment before the drain of the mask.
+  * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  `worker/src/web.rs` changes only the form of the error text and a comment, so no browser run.
 
 ## Surprises and discoveries
 

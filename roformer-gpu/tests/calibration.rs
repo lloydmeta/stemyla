@@ -6,8 +6,9 @@
 //! (`time_axis_per_chunk`): whole time-transformer steps at the default
 //! budget.  Since version 7, calibration keeps 2 steps in flight.
 //! Natively, `Signal::wait` polls until all submitted work is done, so a
-//! native run keeps no step in flight.  `attention_per_chunk` times the
-//! attention dispatches alone, as `?bench` does.
+//! native run keeps no step in flight after each wait.
+//! `attention_per_chunk` times the attention dispatches alone, as `?bench`
+//! does.
 
 use roformer_gpu::bench::{
     ATTENTION_ROUND, ATTENTION_ROUNDS, ATTENTION_WARM, TimeSecs, decide, time_axis_per_chunk,

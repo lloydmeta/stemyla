@@ -1299,6 +1299,26 @@ impl Default for StepClock {
     }
 }
 
+/// The error text when the GPU rejected `count` operations at the end of
+/// `step`, of which the first is `first`.  When `newer` is true, a newer
+/// step is still in flight, so the errors can come from it too.  The
+/// text then names that step.
+pub fn rejected_text(
+    step: &impl std::fmt::Display,
+    newer: bool,
+    count: usize,
+    first: &str,
+) -> String {
+    let during = if newer {
+        format!("{step} or the step in flight after it")
+    } else {
+        step.to_string()
+    };
+    format!(
+        "the GPU rejected {count} operation(s) during {during}, so the result would be wrong; first: {first}"
+    )
+}
+
 /// The device, its kernels and the buffers it makes.  The device is
 /// private, so no other crate can make a buffer on it that is not a
 /// [`GpuBuffer`] (MEM-3).
@@ -4705,6 +4725,23 @@ mod tests {
     fn each_end_tells_whether_a_newer_step_is_in_flight() {
         assert_eq!(ends(2), [(0, true), (1, true), (2, false)]);
         assert_eq!(ends(1), [(0, false), (1, false), (2, false)]);
+    }
+
+    /// The text of 2 rejected operations at the end of step `layer 3`,
+    /// the first `bad bind`:
+    /// * with no newer step in flight, it names `layer 3` alone;
+    /// * with a newer step in flight, it names `layer 3 or the step in
+    ///   flight after it`.
+    #[test]
+    fn a_rejection_names_the_newer_step_only_when_one_is_in_flight() {
+        assert_eq!(
+            rejected_text(&"layer 3", false, 2, "bad bind"),
+            "the GPU rejected 2 operation(s) during layer 3, so the result would be wrong; first: bad bind"
+        );
+        assert_eq!(
+            rejected_text(&"layer 3", true, 2, "bad bind"),
+            "the GPU rejected 2 operation(s) during layer 3 or the step in flight after it, so the result would be wrong; first: bad bind"
+        );
     }
 
     /// The step clock charges each step from the later of its submission
