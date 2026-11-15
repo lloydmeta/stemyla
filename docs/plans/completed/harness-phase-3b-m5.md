@@ -38,6 +38,8 @@ Terms:
 * Arm: a model and an effort for one role.  The control arm is `model: inherit` with no `effort` key, in a session that runs `--model claude-opus-5-5 --effort high`.  So the control is the configuration of PR #39's rounds.
 * Case: one logged round that the measurement replays, at the commit in the log's Commit column.
 * Run: one `claude -p` session of one arm on one case, in its own clone.
+* `<repo>`: the path of the main checkout of this repo.
+* `<scratch>`: the session scratchpad folder of the run, outside the repo.
 * Driver prompt: the prompt of a run.  It tells the main agent to start the agents under test, each with a prompt from the skill's templates.  The main agent does not run the `review-rounds` skill.
 * Item: one entry of a ground-truth list.
 * Found: a logged verdict of `confirmed` (with any text after it) or `pre-existing`.
@@ -335,7 +337,7 @@ The team leader gives these to the orchestrator as text:
   # Usage: m5-clone.sh <commit> <clone>
   set -euo pipefail
 
-  repo=/Users/lloyd/Documents/rustt/stemyla
+  repo='<repo>'
   harness=/private/tmp/stemyla-harness
   min_free_gib=30
 
@@ -407,7 +409,7 @@ The team leader gives these to the orchestrator as text:
   #   <reasons file>: for a d- case, the docs-reviewer's reasons of the route.
   set -euo pipefail
 
-  data=/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/2ff96c1a-0476-4e38-8735-a8e6ad4ae153/scratchpad/m5/data
+  data=<scratch>/m5/data
   harness=/private/tmp/stemyla-harness
   case_name=$1
   arm=$2
@@ -657,7 +659,7 @@ The team leader gives these to the orchestrator as text:
   # Usage: verdicts.sh <clone>
   set -euo pipefail
   H=/private/tmp/stemyla-harness
-  S=/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/2ff96c1a-0476-4e38-8735-a8e6ad4ae153/scratchpad/m5
+  S=<scratch>/m5
   clone=$1
   commit=${clone##*-}
   n=0
@@ -681,7 +683,7 @@ The team leader gives these to the orchestrator as text:
 
 * 2026-11-01, step 4: the data of the scripts.  The scripts of the entry above read data files that it does not record.  This entry records them.
 
-  The scripts name the folder `m5/` of the session scratchpad of the run, here called `S`: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/2ff96c1a-0476-4e38-8735-a8e6ad4ae153/scratchpad/m5`.  `m5-prompt.sh` reads `$S/data`, and `verdicts.sh` sets `S`.  A re-run sets `S` to its own folder.  The script text above stays as it is, because it is the record of what ran.  The three awk programs are in `S`, and the data files are in `$S/data`.
+  The scripts name the folder `m5/` of the session scratchpad of the run, here called `S`: `<scratch>/m5`.  `m5-prompt.sh` reads `$S/data`, and `verdicts.sh` sets `S`.  A re-run sets `S` to its own folder.  The script text above stays as it is, because it is the record of what ran.  Only `<repo>` and `<scratch>` replace the machine paths in it.  The three awk programs are in `S`, and the data files are in `$S/data`.
 
   `parse.awk`:
 

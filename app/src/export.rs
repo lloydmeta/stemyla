@@ -624,13 +624,12 @@ mod stored {
     use js_sys::Uint8Array;
     use std::cell::RefCell;
     use std::rc::Rc;
-    use wasm_bindgen::JsValue;
 
     /// What a [`StoredWav`] shares with its writes in flight.
     #[derive(Default)]
     struct Shared {
-        /// The stream, once open.
-        stream: Option<JsValue>,
+        /// The save, once open.
+        stream: Option<Rc<store::SaveStream>>,
         /// An open, a write or the close is in flight.
         busy: bool,
         failed: Option<String>,
@@ -640,6 +639,9 @@ mod stored {
         dropped: bool,
         /// The caller took the complete file ([`StoredWav::take`]).
         taken: bool,
+        /// The JS array of every full block, while no write holds it: the
+        /// write worker gets it by transfer, and gives it back.
+        array: Option<Uint8Array>,
     }
 
     /// Where the end stage of a [`StoredWav`] is.
@@ -655,7 +657,8 @@ mod stored {
 
     /// A 16-bit WAV save file in browser storage (D3 of M8).  Each full
     /// block of [`SAVE_WRITE_BYTES`] goes through one JS array, made once
-    /// for the save, and written whole (MEM-5).  At most one write is in
+    /// for the save, and written whole (MEM-5).  The write worker gets the
+    /// array by transfer, and gives it back after each write (M5.1).  At most one write is in
     /// flight.  While one is, the sink takes job blocks until the next full
     /// block waits ([`WavBlocks::takes_more`]); then it is not ready, so
     /// the job waits and takes no time.  The next job block after the
@@ -671,8 +674,9 @@ mod stored {
         path: String,
         shared: Rc<RefCell<Shared>>,
         blocks: WavBlocks,
-        /// The JS array of every full block, made at the first one.
-        array: Option<Uint8Array>,
+        /// The JS arrays of full blocks made, for the browser tests.
+        #[cfg(test)]
+        made: usize,
         wake: Rc<dyn Fn()>,
         /// The end stage has sent the last block.
         ended: bool,
@@ -702,7 +706,7 @@ mod stored {
                 let dropped = task_shared.borrow().dropped;
                 match opened {
                     Ok(stream) if dropped => store::save_abort(&stream, &task_path).await,
-                    Ok(stream) => task_shared.borrow_mut().stream = Some(stream),
+                    Ok(stream) => task_shared.borrow_mut().stream = Some(Rc::new(stream)),
                     Err(e) => task_shared.borrow_mut().failed = Some(e),
                 }
                 task_shared.borrow_mut().busy = false;
@@ -712,7 +716,8 @@ mod stored {
                 path,
                 shared,
                 blocks: WavBlocks::new(frames, sample_rate, SAVE_WRITE_BYTES),
-                array: None,
+                #[cfg(test)]
+                made: 0,
                 wake,
                 ended: false,
             }
@@ -724,6 +729,14 @@ mod stored {
         #[cfg_attr(mutants, mutants::skip)]
         pub fn in_flight(&self) -> bool {
             self.shared.borrow().busy
+        }
+
+        /// The JS arrays of full blocks that the save made, for the
+        /// browser tests (D3 of M8).
+        #[cfg(test)]
+        #[cfg_attr(mutants, mutants::skip)]
+        pub fn arrays_made(&self) -> usize {
+            self.made
         }
 
         /// The save file, from the root of browser storage.
@@ -782,11 +795,17 @@ mod stored {
             let Some(full) = self.blocks.full() else {
                 return;
             };
-            let array = self
-                .array
-                .get_or_insert_with(|| Uint8Array::new_with_length(SAVE_WRITE_BYTES as u32));
+            // The array that the last write gave back, else a new one: one
+            // for the save while each write gives it back (D3 of M8).
+            let kept = self.shared.borrow_mut().array.take();
+            let array = kept.unwrap_or_else(|| {
+                #[cfg(test)]
+                {
+                    self.made += 1;
+                }
+                Uint8Array::new_with_length(SAVE_WRITE_BYTES as u32)
+            });
             array.copy_from(full);
-            let array = array.clone();
             self.blocks.take_full();
             self.send(Op::Put(array));
         }
@@ -807,10 +826,14 @@ mod stored {
             wasm_bindgen_futures::spawn_local(async move {
                 // A failed close removed the file and ended the stream.
                 let (written, closing) = match op {
-                    Op::Put(bytes) => (store::save_put(&stream, &bytes).await, false),
+                    Op::Put(bytes) => {
+                        let (put, back) = store::save_put(&stream, &bytes).await;
+                        shared.borrow_mut().array = back;
+                        (put, false)
+                    }
                     Op::Last(bytes) => {
                         let put = match bytes {
-                            Some(bytes) => store::save_put(&stream, &bytes).await,
+                            Some(bytes) => store::save_put(&stream, &bytes).await.0,
                             None => Ok(()),
                         };
                         match put {

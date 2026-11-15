@@ -2,6 +2,8 @@
 
 Status: accepted (2026-10-31, by the maintainer, as D1 of `plans/completed/harness-phase-3b.md`; proposed by the agent on 2026-10-30; amends GIT-2)
 
+Amended by 0031 (accepted 2026-11-12).
+
 ## Context
 
 GIT-2 runs fmt, six clippy runs, the workspace tests and `docs-check` before each commit.  In the period from 2026-10-19 to 2026-10-30, every CI failure was in the browser job; no local check would have caught one.  A PR #39 commit of comments and paths ran the full set for 16 minutes, against 7.5 minutes in CI.

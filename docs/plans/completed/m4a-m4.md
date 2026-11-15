@@ -126,7 +126,7 @@ No step changes `CLAUDE.md` or `.claude/**`, by the team leader's reading on 202
 
 The browsers on this Mac:
 
-* Chrome: `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`, and `--browser chrome` for `web-test` and `e2e`.  `web-test` runs Safari by default on macOS, so pass `--browser` each time.
+* Chrome: `$CHROMEDRIVER`, the driver of Chrome for Testing 157 (mac-arm64), and `--browser chrome` for `web-test` and `e2e`.  `web-test` runs Safari by default on macOS, so pass `--browser` each time.
 * Safari: `--browser safari`, with `safaridriver`.  Never quit the maintainer's Safari.  If a Safari session times out, end stale WebDriver sessions and retry once.  If it still fails, stop and tell the team leader.
 * Read `docs/references/local-browser-testing.md`.
 

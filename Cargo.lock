@@ -9941,6 +9941,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "write-worker"
+version = "0.1.0"
+dependencies = [
+ "js-sys",
+ "stem-protocol",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "web-sys",
+]
+
+[[package]]
 name = "writeable"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"

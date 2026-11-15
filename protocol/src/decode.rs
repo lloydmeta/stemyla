@@ -495,10 +495,10 @@ impl DecodeReply {
 }
 
 /// The largest whole number that a JS number holds exactly: 2^53 - 1.
-const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
+pub(crate) const MAX_SAFE: f64 = 9_007_199_254_740_991.0;
 
 /// The text of field `k`, which must be a string.
-fn text_field(o: &JsValue, k: &str) -> Result<String, String> {
+pub(crate) fn text_field(o: &JsValue, k: &str) -> Result<String, String> {
     get(o, k)
         .as_string()
         .ok_or_else(|| format!("{k} must be text"))
@@ -512,7 +512,7 @@ fn flag_field(o: &JsValue, k: &str) -> Result<bool, String> {
 }
 
 /// The value of field `k`, which must be a whole number from 0 to `most`.
-fn whole(o: &JsValue, k: &str, most: f64) -> Result<f64, String> {
+pub(crate) fn whole(o: &JsValue, k: &str, most: f64) -> Result<f64, String> {
     get(o, k)
         .as_f64()
         .filter(|n| n.is_finite() && *n >= 0.0 && n.fract() == 0.0 && *n <= most)

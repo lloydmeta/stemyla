@@ -13,18 +13,19 @@
 //! step: a list of dispatches submitted together as one command buffer.
 //! Every buffer [`Gpu`] makes is a [`GpuBuffer`], destroyed when dropped.
 //! [`net::Net`] holds the weights on the GPU and [`net::Job`] runs one
-//! chunk as a list of [`net::Step`]s, so the caller can wait for the GPU
-//! after each step and keep every command buffer short.
+//! chunk as a list of [`net::Step`]s, so the caller can pace the steps and
+//! keep every command buffer short: at most [`STEPS_IN_FLIGHT`] steps are
+//! in flight ([`Window`]).
 
 pub mod bench;
 pub mod net;
 
 use std::borrow::Cow;
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::num::NonZeroU64;
 use std::ops::Deref;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use bytemuck::{Pod, Zeroable};
@@ -181,11 +182,21 @@ impl Tile {
             "{self:?}"
         );
         let (kv, sv) = (self.bk / 4, (self.bk + self.pad) / 4);
-        assert!(
-            (self.bm * kv).is_multiple_of(256) && (self.bn * kv).is_multiple_of(256),
-            "{self:?}"
-        );
-        let (la, lb) = (self.bm * kv / 256, self.bn * kv / 256);
+        let stage = if self.bm * kv == 128 && self.bn * kv == 128 {
+            // Each tile is 128 vec4s: threads 0 to 127 load A, and threads
+            // 128 to 255 load B, in one step.  A group of 32 threads is all
+            // on one side, so the branch does not diverge in it.
+            "    if (tid < 128u) { as_[slot(tid)] = a_get(tid, k0, row0, a_base); } else { bs_[slot(tid - 128u)] = b_get(tid - 128u, k0, col0, b_base); }".to_string()
+        } else {
+            assert!(
+                (self.bm * kv).is_multiple_of(256) && (self.bn * kv).is_multiple_of(256),
+                "{self:?}"
+            );
+            let (la, lb) = (self.bm * kv / 256, self.bn * kv / 256);
+            format!(
+                "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[slot(e)] = a_get(e, k0, row0, a_base); }}\n    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[slot(e)] = b_get(e, k0, col0, b_base); }}"
+            )
+        };
         let mut decls = String::new();
         let mut compute = String::new();
         let mut epilogue = String::new();
@@ -213,9 +224,6 @@ impl Tile {
                 }
             }
         }
-        let stage = format!(
-            "    for (var l = 0u; l < {la}u; l++) {{ let e = tid + l * 256u; as_[slot(e)] = a_get(e, k0, row0, a_base); }}\n    for (var l = 0u; l < {lb}u; l++) {{ let e = tid + l * 256u; bs_[slot(e)] = b_get(e, k0, col0, b_base); }}"
-        );
         include_str!("shaders/matmul_vec4.wgsl")
             .replace("{BM}", &self.bm.to_string())
             .replace("{BN}", &self.bn.to_string())
@@ -476,13 +484,24 @@ pub fn bit_differences(got: &[f32], want: &[f32]) -> BitDifferences {
 /// product (the p.v product: K = 62 or 1,151, B not K-contiguous), the
 /// fallback `i64` runs it instead.
 ///
+/// `v64k8` is `v64` with BK 8, from M4 of `plans/completed/gpu-speed.md`: 6
+/// KiB of workgroup memory, not 10 KiB, with `v64`'s grid, thread map and
+/// sum order.  Safari sets workgroup memory to zero with one thread, byte
+/// by byte (`references/browser-quirks.md`).  There it took 0.94 to 0.95
+/// times `v64`'s time on the large products; in Chrome 1.31 to 1.32
+/// times.  Calibration chooses it only on a GPU where it measures faster.
+///
 /// The first entry is the fallback: a GPU on which it fails is not used.
-/// Rows are padded by 32 / `bk` floats (`s64`: 1; `v64`: one vec4, so
-/// neighbouring threads' vec4 reads of the B tile fall in different
-/// banks): when K is the contiguous axis (every nn.Linear operand), 32
-/// consecutive threads store 32 / `bk` rows of `bk` values, and this
-/// padding spreads them over all 32 banks.
-pub const TILES: [Tile; 4] = [
+/// The pad of the rows of each tile, in floats, and why:
+/// * `i64` (BK 16): 2, and `i128x64` (BK 8): 4.  That is 32 / `bk`: when K
+///   is the contiguous axis (every nn.Linear operand), 32 consecutive
+///   threads store 32 / `bk` rows of `bk` values, and this pad spreads
+///   them over all 32 banks.
+/// * `s64`: 1, the hand-written kernel's pad; its stores conflict 2-way.
+/// * `v64` (BK 16) and `v64k8` (BK 8): 4, one vec4, so neighbouring
+///   threads' vec4 reads of the B tile fall in different banks
+///   (`bank_conflicts`).
+pub const TILES: [Tile; 5] = [
     Tile {
         name: "i64",
         bm: 64,
@@ -527,57 +546,102 @@ pub const TILES: [Tile; 4] = [
         hand_written: false,
         vec4: true,
     },
+    Tile {
+        name: "v64k8",
+        bm: 64,
+        bn: 64,
+        bk: 8,
+        tm: 4,
+        tn: 4,
+        pad: 4,
+        hand_written: false,
+        vec4: true,
+    },
 ];
 
-/// Where [`net::Job`] runs fused attention (`attention_tiled.wgsl`:
-/// scores, softmax, values and gate in one dispatch, the scores never in
-/// memory) instead of the scores matmul, softmax, p.v matmul and gate.
-/// The frequency axis (sequences of 62 bands) gains on every GPU measured,
-/// 2.2 to 3.6 times; the time axis (1,151 frames) gained 11 to 22% on
-/// Apple GPUs and lost 20% on an Intel UHD 630, so [`bench::calibrate`]
-/// decides it per GPU.
+/// A fused attention kernel: scores, softmax, values and gate in one
+/// dispatch, the scores never in memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct AttentionPolicy {
-    pub time: bool,
-    pub freq: bool,
+pub enum FusedKernel {
+    /// `attention_tiled.wgsl`, scalar reads of workgroup memory.
+    Tiled,
+    /// `vfused`, `attention_vec4.wgsl`: vec4 reads of workgroup memory,
+    /// for the time axis only (M5 of `plans/completed/gpu-speed.md`).
+    Vec4,
+}
+
+/// Where [`net::Job`] runs fused attention instead of the scores matmul,
+/// softmax, p.v matmul and gate, and with which kernel.  The frequency
+/// axis (sequences of 62 bands) gains on every GPU measured, 2.2 to 3.6
+/// times; the time axis (1,151 frames) gained 11 to 22% on Apple GPUs and
+/// lost 20% on an Intel UHD 630, so [`bench::calibrate`] decides it per
+/// GPU.  `vfused` runs only on the time axis, with the tiled kernel on the
+/// frequency axis; no policy pairs it with split attention there.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttentionPolicy {
+    /// Split attention on both axes.
+    Split,
+    /// The tiled fused kernel on both axes.
+    Fused,
+    /// The tiled fused kernel on the time axis only.
+    Time,
+    /// The tiled fused kernel on the frequency axis only.
+    Freq,
+    /// `vfused` on the time axis, the tiled fused kernel on the frequency
+    /// axis.
+    VFused,
 }
 
 impl AttentionPolicy {
-    pub const SPLIT: Self = Self {
-        time: false,
-        freq: false,
-    };
-    pub const FUSED: Self = Self {
-        time: true,
-        freq: true,
-    };
+    pub const ALL: [Self; 5] = [
+        Self::Split,
+        Self::Fused,
+        Self::Time,
+        Self::Freq,
+        Self::VFused,
+    ];
 
-    /// `split`, `fused`, or `time` / `freq` for fused on that axis only.
+    /// `split`, `fused`, `time` / `freq` for the tiled fused kernel on that
+    /// axis only, or `vfused`.
     pub fn name(self) -> &'static str {
-        match (self.time, self.freq) {
-            (false, false) => "split",
-            (true, true) => "fused",
-            (true, false) => "time",
-            (false, true) => "freq",
+        match self {
+            Self::Split => "split",
+            Self::Fused => "fused",
+            Self::Time => "time",
+            Self::Freq => "freq",
+            Self::VFused => "vfused",
         }
     }
 
     /// The inverse of [`AttentionPolicy::name`].
     pub fn parse(s: &str) -> Option<Self> {
-        [
-            Self::SPLIT,
-            Self::FUSED,
-            Self {
-                time: true,
-                freq: false,
-            },
-            Self {
-                time: false,
-                freq: true,
-            },
-        ]
-        .into_iter()
-        .find(|p| p.name() == s)
+        Self::ALL.into_iter().find(|p| p.name() == s)
+    }
+
+    /// The fused kernel on the time axis, or `None` for split attention.
+    pub fn time(self) -> Option<FusedKernel> {
+        match self {
+            Self::Split | Self::Freq => None,
+            Self::Fused | Self::Time => Some(FusedKernel::Tiled),
+            Self::VFused => Some(FusedKernel::Vec4),
+        }
+    }
+
+    /// Whether the frequency axis runs the tiled fused kernel.
+    pub fn freq(self) -> bool {
+        matches!(self, Self::Fused | Self::Freq | Self::VFused)
+    }
+
+    /// Whether this GPU can run the policy, by its start-up checks: split
+    /// always; `vfused` when both fused kernels passed ([`Gpu::fused_ok`],
+    /// [`Gpu::vfused_ok`]), since it keeps the tiled kernel on the
+    /// frequency axis; the others when the tiled kernel passed.
+    pub fn usable(self, fused_ok: bool, vfused_ok: bool) -> bool {
+        match self {
+            Self::Split => true,
+            Self::VFused => fused_ok && vfused_ok,
+            Self::Fused | Self::Time | Self::Freq => fused_ok,
+        }
     }
 }
 
@@ -673,6 +737,117 @@ fn attention_source() -> String {
         finish += "  }\n";
     }
     include_str!("shaders/attention_tiled.wgsl")
+        .replace("{DECLS}", decls.trim_end())
+        .replace("{S_ZERO}", s_zero.trim_end())
+        .replace("{S_STEP}", s_step.trim_end())
+        .replace("{SOFTMAX_1}", soft1.trim_end())
+        .replace("{SOFTMAX_2}", soft2.trim_end())
+        .replace("{VALUES}", values.trim_end())
+        .replace("{FINISH}", finish.trim_end())
+}
+
+/// The WGSL of the fused attention kernel `kernel`.
+pub fn fused_source(kernel: FusedKernel) -> String {
+    match kernel {
+        FusedKernel::Tiled => attention_source(),
+        FusedKernel::Vec4 => attention_vec4_source(),
+    }
+}
+
+/// The WGSL of `vfused`, fused attention with vec4 reads of workgroup
+/// memory: per-thread code with constant indices, generated into
+/// `attention_vec4.wgsl`.  Each score and each output keeps the sum order
+/// of [`attention_source`].  Each write to workgroup memory is a whole
+/// vec4 from one thread.
+fn attention_vec4_source() -> String {
+    let (r4, c4) = (0..4, 0..4);
+    let comps = ["x", "y", "z", "w"];
+    let mut decls = String::new();
+    let mut s_zero = String::new();
+    let mut s_step = String::new();
+    let mut soft1 = String::new();
+    let mut soft2 = String::new();
+    let mut values = String::new();
+    let mut finish = String::new();
+    for i in r4.clone() {
+        decls += &format!("  var m{i} = NEG;\n  var l{i} = 0.0;\n");
+        for j in c4.clone() {
+            decls += &format!("  var o{i}_{j} = 0.0;\n  var s{i}_{j} = 0.0;\n");
+            s_zero += &format!("    s{i}_{j} = 0.0;\n");
+        }
+    }
+    for i in r4.clone() {
+        s_step += &format!("        let a{i} = buf[(ty + {}u) * R + dd];\n", 16 * i);
+    }
+    for j in c4.clone() {
+        s_step += &format!(
+            "        let b{j} = buf[B2 + (tx + {}u) * R + dd];\n",
+            16 * j
+        );
+    }
+    for c in comps {
+        for i in r4.clone() {
+            for j in c4.clone() {
+                s_step += &format!("        s{i}_{j} = fma(a{i}.{c}, b{j}.{c}, s{i}_{j});\n");
+            }
+        }
+    }
+    let rows = |f: &dyn Fn(usize) -> String| (0..4).map(f).collect::<Vec<_>>().join(", ");
+    for i in r4.clone() {
+        for j in c4.clone() {
+            soft1 += &format!(
+                "    s{i}_{j} = select(NEG, s{i}_{j} * p.alpha, j0 + tx + {}u < p.seq);\n",
+                16 * j
+            );
+        }
+    }
+    soft1 += &format!(
+        "    buf[ty * 16u + tx] = vec4<f32>({});\n",
+        rows(&|i| format!("max(max(s{i}_0, s{i}_1), max(s{i}_2, s{i}_3))"))
+    );
+    soft2 += "    var tm = buf[ty * 16u];\n    for (var k = 1u; k < 16u; k++) { tm = max(tm, buf[ty * 16u + k]); }\n";
+    for (i, c) in r4.clone().zip(comps) {
+        soft2 += &format!(
+            "    let mn{i} = max(m{i}, tm.{c});\n    let sc{i} = exp(m{i} - mn{i});\n    m{i} = mn{i};\n"
+        );
+        for j in c4.clone() {
+            soft2 += &format!(
+                "    s{i}_{j} = exp(s{i}_{j} - mn{i});\n    o{i}_{j} = o{i}_{j} * sc{i};\n"
+            );
+        }
+        soft2 += &format!("    l{i} = l{i} * sc{i} + s{i}_0 + s{i}_1 + s{i}_2 + s{i}_3;\n");
+    }
+    for c in c4.clone() {
+        if c > 0 {
+            values += "    workgroupBarrier();\n";
+        }
+        values += &format!(
+            "    buf[tx * 16u + ty] = vec4<f32>({});\n    stage_v(t, tok0, j0 + {}u, vc);\n    workgroupBarrier();\n    for (var k = 0u; k < 16u; k++) {{\n      let pv = buf[k * 16u + ty];\n      let vv = buf[B2 + k * 16u + tx];\n",
+            rows(&|i| format!("s{i}_{c}")),
+            16 * c
+        );
+        for (i, ci) in r4.clone().zip(comps) {
+            for (j, cj) in c4.clone().zip(comps) {
+                values += &format!("      o{i}_{j} = fma(pv.{ci}, vv.{cj}, o{i}_{j});\n");
+            }
+        }
+        values += "    }\n";
+    }
+    finish += &format!(
+        "  buf[ty * 16u + tx] = vec4<f32>({});\n  workgroupBarrier();\n  var lt = vec4<f32>(0.0);\n  for (var k = 0u; k < 16u; k++) {{ lt += buf[ty * 16u + k]; }}\n",
+        rows(&|i| format!("l{i}"))
+    );
+    for (i, c) in r4.zip(comps) {
+        finish += &format!(
+            "  let qi{i} = q0 + ty + {r}u;\n  if (qi{i} < p.seq) {{\n    let tok = tok0 + qi{i};\n    var g = 1.0;\n    if ((p.flags & 1u) != 0u) {{ g = 1.0 / (1.0 + exp(-gates[tok * p.gate_row + h])); }}\n    let f = g / lt.{c};\n    let ob = tok * p.o_row + h * D + tx;\n",
+            r = 16 * i
+        );
+        for j in c4.clone() {
+            finish += &format!("    o[ob + {}u] = o{i}_{j} * f;\n", 16 * j);
+        }
+        finish += "  }\n";
+    }
+    include_str!("shaders/attention_vec4.wgsl")
         .replace("{DECLS}", decls.trim_end())
         .replace("{S_ZERO}", s_zero.trim_end())
         .replace("{S_STEP}", s_step.trim_end())
@@ -843,6 +1018,341 @@ impl Drop for GpuBuffer {
     }
 }
 
+/// Native: drive `device` until all callbacks have run.  On the web the
+/// browser does this and the call returns at once.
+fn poll_all(device: &wgpu::Device) {
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+}
+
+/// The end of the GPU work that was submitted before
+/// [`Gpu::done_signal`].
+pub struct Signal {
+    device: wgpu::Device,
+    done: Arc<AtomicBool>,
+    ended: futures_channel::oneshot::Receiver<()>,
+}
+
+impl Signal {
+    /// Whether that work is done, as the callbacks that ran tell.
+    pub fn is_done(&self) -> bool {
+        self.done.load(Ordering::Acquire)
+    }
+
+    /// Resolves when that work is done.  Natively, it polls the device
+    /// until all submitted work is done.  So a native run keeps no step
+    /// in flight after a wait.
+    pub async fn wait(self) {
+        poll_all(&self.device);
+        let _ = self.ended.await;
+    }
+}
+
+/// A read that [`Gpu::read_start`] started: its copy is submitted.
+pub struct PendingRead {
+    device: wgpu::Device,
+    staging: GpuBuffer,
+    len: usize,
+    mapped: Arc<AtomicBool>,
+    ended: futures_channel::oneshot::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    /// The submission of the copy, for the native tests.
+    #[cfg_attr(not(test), expect(dead_code, reason = "read by the native tests only"))]
+    submission: wgpu::SubmissionIndex,
+}
+
+impl PendingRead {
+    /// Whether the staging buffer is mapped, as the callbacks that ran
+    /// tell.
+    pub fn is_mapped(&self) -> bool {
+        self.mapped.load(Ordering::Acquire)
+    }
+
+    /// The floats, after the copy is done.  The staging buffer is then
+    /// unmapped, and destroyed as it drops (MEM-3).
+    pub async fn finish(self) -> Result<Vec<f32>, String> {
+        poll_all(&self.device);
+        self.ended
+            .await
+            .map_err(|_| "readback cancelled".to_string())?
+            .map_err(|e| format!("readback: {e}"))?;
+        let view = self
+            .staging
+            .get_mapped_range(..)
+            .map_err(|e| format!("readback: {e}"))?;
+        let out = mapped_floats(&view, self.len);
+        drop(view);
+        self.staging.unmap();
+        Ok(out)
+    }
+}
+
+/// The most GPU steps in flight: the separation's pacing (`Pace` in the
+/// worker) and calibration's timing of the time axis
+/// ([`bench::STEP_WAITS`]) both keep this many.  A step in flight is one
+/// that was submitted and whose end is not yet awaited.
+pub const STEPS_IN_FLIGHT: usize = 2;
+
+/// The work of a paced run of GPU steps, which [`Window::step`] and
+/// [`Window::drain`] drive in one order.  The worker's `Pace`,
+/// calibration's timing (`bench::time_rec`) and [`pace_order`] each give
+/// one.
+pub trait Steps {
+    /// What [`Steps::submit`] records.
+    type Step;
+    /// What [`Steps::submit`] gives for [`Steps::end`].
+    type Submitted;
+    /// What [`Steps::end`] awaits: for the GPU, a [`Signal`].
+    type Signal;
+    type Error;
+
+    /// Records `step` and submits it.
+    fn submit(&mut self, step: Self::Step) -> Self::Submitted;
+
+    /// Takes the signal of the work submitted until now
+    /// ([`Gpu::done_signal`]).
+    fn signal(&mut self) -> Self::Signal;
+
+    /// Awaits the end of a step, with its checks.  `newer` is true when a
+    /// newer step is still in flight.
+    fn end(
+        &mut self,
+        submitted: Self::Submitted,
+        signal: Self::Signal,
+        newer: bool,
+    ) -> impl Future<Output = Result<(), Self::Error>>;
+}
+
+/// The steps in flight, oldest first.  [`Window::step`] submits a step
+/// and takes its signal.  When `depth` steps are then in flight, it
+/// awaits the end of the oldest.  So at most `depth` steps are ever in
+/// flight.
+pub struct Window<T> {
+    depth: usize,
+    flight: VecDeque<T>,
+}
+
+impl<T> Window<T> {
+    pub fn new(depth: usize) -> Self {
+        assert!(depth >= 1, "a window of no steps");
+        Self {
+            depth,
+            flight: VecDeque::new(),
+        }
+    }
+
+    /// Takes the step just submitted.  Gives the step to await now, if
+    /// any.
+    fn submitted(&mut self, step: T) -> Option<T> {
+        self.flight.push_back(step);
+        if self.flight.len() >= self.depth {
+            self.flight.pop_front()
+        } else {
+            None
+        }
+    }
+}
+
+impl<A, B> Window<(A, B)> {
+    /// One step of a paced run: `steps` records and submits `step`, then
+    /// takes its signal.  When `depth` steps are then in flight, it awaits
+    /// the end of the oldest.
+    pub async fn step<S>(&mut self, steps: &mut S, step: S::Step) -> Result<(), S::Error>
+    where
+        S: Steps<Submitted = A, Signal = B>,
+    {
+        let submitted = steps.submit(step);
+        let signal = steps.signal();
+        match self.submitted((submitted, signal)) {
+            Some((older, signal)) => {
+                let newer = !self.flight.is_empty();
+                steps.end(older, signal, newer).await
+            }
+            None => Ok(()),
+        }
+    }
+
+    /// Awaits the end of each step in flight, oldest first.  A read of the
+    /// GPU after it waits for no later step.
+    pub async fn drain<S>(&mut self, steps: &mut S) -> Result<(), S::Error>
+    where
+        S: Steps<Submitted = A, Signal = B>,
+    {
+        while let Some((older, signal)) = self.flight.pop_front() {
+            let newer = !self.flight.is_empty();
+            steps.end(older, signal, newer).await?;
+        }
+        Ok(())
+    }
+}
+
+/// One event of [`pace_order`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Event {
+    /// Step `i` is recorded and submitted.
+    Submit(usize),
+    /// A signal is taken after step `i` was submitted
+    /// ([`Gpu::done_signal`]).
+    Signal(usize),
+    /// The end of step `i` is awaited, with its checks.
+    Await(usize),
+    /// Every step of group `g` ended.  The worker reads the mask of stem
+    /// `g`; calibration reads its clock.
+    Drained(usize),
+}
+
+/// The events of a paced run, for [`pace_order`].
+struct Recorded {
+    events: Vec<Event>,
+    submitted: usize,
+}
+
+impl Steps for Recorded {
+    type Step = ();
+    type Submitted = usize;
+    type Signal = ();
+    type Error = std::convert::Infallible;
+
+    fn submit(&mut self, (): ()) -> usize {
+        let i = self.submitted;
+        self.submitted += 1;
+        self.events.push(Event::Submit(i));
+        i
+    }
+
+    fn signal(&mut self) {
+        self.events
+            .push(Event::Signal(self.submitted.saturating_sub(1)));
+    }
+
+    async fn end(&mut self, i: usize, (): (), _newer: bool) -> Result<(), Self::Error> {
+        self.events.push(Event::Await(i));
+        Ok(())
+    }
+}
+
+/// The output of `future`, which must be ready at its first poll.
+fn now_or_never<F: Future>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    match future.as_mut().poll(&mut cx) {
+        std::task::Poll::Ready(out) => out,
+        std::task::Poll::Pending => panic!("a recorded run never waits"),
+    }
+}
+
+/// The order in which the worker's `Pace` and calibration's timing
+/// (`bench::time_rec`) run `groups[g]` steps for each group `g`, with up
+/// to `depth` steps in flight.  Steps are numbered from 0 across the
+/// groups.  After the last step of a group, each step in flight is
+/// awaited, then the group is drained.  It drives [`Window::step`] and
+/// [`Window::drain`], as they do.
+pub fn pace_order(groups: &[usize], depth: usize) -> Vec<Event> {
+    let mut window = Window::new(depth);
+    let mut run = Recorded {
+        events: Vec::new(),
+        submitted: 0,
+    };
+    for (g, &count) in groups.iter().enumerate() {
+        for _ in 0..count {
+            let Ok(()) = now_or_never(window.step(&mut run, ()));
+        }
+        let Ok(()) = now_or_never(window.drain(&mut run));
+        run.events.push(Event::Drained(g));
+    }
+    run.events
+}
+
+/// The time of a step, in seconds, from the clock's reads: when it was
+/// `submitted`, when the worker saw the end of the step `before` it, and
+/// when it saw its own end.  It runs from the later of the first two.  So
+/// a step that waited behind the step before is not charged for that
+/// wait, and the step limit checks the step's own time.
+pub fn step_secs(submitted: f64, before: f64, ended: f64) -> f64 {
+    ended - submitted.max(before)
+}
+
+/// The times of the steps of a paced run, in the order of their ends
+/// ([`step_secs`]).
+pub struct StepClock {
+    /// When the end of the last step was seen.
+    last_end: f64,
+}
+
+impl StepClock {
+    pub fn new() -> Self {
+        Self {
+            last_end: f64::NEG_INFINITY,
+        }
+    }
+
+    /// The time of the step that was `submitted` and whose end was seen
+    /// at `ended`.  That end is then the end of the step before the next.
+    pub fn ended(&mut self, submitted: f64, ended: f64) -> f64 {
+        let secs = step_secs(submitted, self.last_end, ended);
+        self.last_end = ended;
+        secs
+    }
+}
+
+impl Default for StepClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// The error text when the GPU rejected `count` operations at the end of
+/// `step`, of which the first is `first`.  When `newer` is true, a newer
+/// step is still in flight, so the errors can come from it too.  The
+/// text then names that step.
+pub fn rejected_text(
+    step: &impl std::fmt::Display,
+    newer: bool,
+    count: usize,
+    first: &str,
+) -> String {
+    let during = if newer {
+        format!("{step} or the step in flight after it")
+    } else {
+        step.to_string()
+    };
+    format!(
+        "the GPU rejected {count} operation(s) during {during}, so the result would be wrong; first: {first}"
+    )
+}
+
+/// The step limit of the first step of a kind, in seconds, when the
+/// given limit is lower.  The first step of a kind can compile its
+/// kernels.
+pub const FIRST_STEP_LIMIT: f64 = 60.0;
+
+/// The checks at the end of `step`, which took `dt` seconds.  `errors`
+/// are the WebGPU errors since the last check.  The errors come first:
+/// any error gives [`rejected_text`].  Then a step over `limit` gives
+/// the limit text.  The first step of a kind (`first_of_kind`) has a
+/// limit of at least [`FIRST_STEP_LIMIT`].
+pub fn step_check(
+    step: &impl std::fmt::Display,
+    newer: bool,
+    errors: &[String],
+    dt: f64,
+    limit: f64,
+    first_of_kind: bool,
+) -> Result<(), String> {
+    if let Some(first_error) = errors.first() {
+        return Err(rejected_text(step, newer, errors.len(), first_error));
+    }
+    let limit = if first_of_kind {
+        limit.max(FIRST_STEP_LIMIT)
+    } else {
+        limit
+    };
+    if dt > limit {
+        return Err(format!(
+            "one GPU step ({step}) took {dt:.1} s, over the {limit:.0} s limit; stopped so the computer stays responsive"
+        ));
+    }
+    Ok(())
+}
+
 /// The device, its kernels and the buffers it makes.  The device is
 /// private, so no other crate can make a buffer on it that is not a
 /// [`GpuBuffer`] (MEM-3).
@@ -879,11 +1389,14 @@ pub struct Gpu {
     /// (all, until it runs).  The policy never picks one that failed.
     pub usable: std::cell::Cell<[bool; TILES.len()]>,
     /// Where [`net::Job`] runs fused attention; split until set.  Set it
-    /// to anything but split only when [`Gpu::fused_ok`] is true.
+    /// only to a policy that is [`AttentionPolicy::usable`] here.
     pub attention: std::cell::Cell<AttentionPolicy>,
-    /// Whether the fused attention kernel passed [`Gpu::check_attention`]
-    /// (false until it runs).
+    /// Whether the tiled fused attention kernel passed
+    /// [`Gpu::check_attention`] (false until it runs).
     pub fused_ok: std::cell::Cell<bool>,
+    /// Whether `vfused` passed [`Gpu::check_attention`] (false until it
+    /// runs).
+    pub vfused_ok: std::cell::Cell<bool>,
     /// Whether the f16 variant of every kernel that passed
     /// [`Gpu::check_kernels`] gave its f32 kernel's output bit for bit
     /// there (false until it runs, and on a GPU without
@@ -943,9 +1456,13 @@ struct Kernels {
     transpose: wgpu::ComputePipeline,
     glu: wgpu::ComputePipeline,
     elementwise: wgpu::BindGroupLayout,
-    /// The fused attention kernel, compiled on first use; bound like the
-    /// element-wise kernels (read, read, read-write, uniform).
-    attention: std::cell::OnceCell<wgpu::ComputePipeline>,
+    /// The fused attention kernels, tiled and vec4, each compiled on first
+    /// use; bound like the element-wise kernels (read, read, read-write,
+    /// uniform).
+    attention: [std::cell::OnceCell<wgpu::ComputePipeline>; 2],
+    /// For tests: the WGSL to compile each fused kernel from, in place of
+    /// its own ([`Gpu::plant_attention_source`]).
+    planted: [std::cell::RefCell<Option<String>>; 2],
     /// For tests: compile the f16 variants from WGSL that does not parse
     /// ([`Gpu::break_f16_variants`]).
     broken_f16: std::cell::Cell<bool>,
@@ -1051,17 +1568,29 @@ impl Kernels {
             transpose: pipeline(device, &e, "transpose3", &ew),
             glu: pipeline(device, &e, "glu", &ew),
             elementwise: ew,
-            attention: std::cell::OnceCell::new(),
+            attention: [std::cell::OnceCell::new(), std::cell::OnceCell::new()],
+            planted: Default::default(),
             broken_f16: std::cell::Cell::new(false),
             defective_f16: std::cell::Cell::new(None),
         }
     }
 
-    fn attention_pipeline(&self, device: &wgpu::Device) -> &wgpu::ComputePipeline {
-        self.attention.get_or_init(|| {
+    fn attention_pipeline(
+        &self,
+        device: &wgpu::Device,
+        kernel: FusedKernel,
+    ) -> &wgpu::ComputePipeline {
+        let (i, label) = match kernel {
+            FusedKernel::Tiled => (0, "attention"),
+            FusedKernel::Vec4 => (1, "vfused"),
+        };
+        self.attention[i].get_or_init(|| {
+            let source = self.planted[i]
+                .take()
+                .unwrap_or_else(|| fused_source(kernel));
             pipeline(
                 device,
-                &shader(device, "attention", &attention_source()),
+                &shader(device, label, &source),
                 "main",
                 &self.elementwise,
             )
@@ -1131,6 +1660,18 @@ impl Gpu {
     #[doc(hidden)]
     pub async fn new_without_f16_unpack(power: wgpu::PowerPreference) -> Result<Self, String> {
         Self::open(power, false, true).await
+    }
+
+    /// For tests: compile `kernel` from `wgsl` when it is first used, so a
+    /// test can plant a fault for [`Gpu::check_attention`] to find.  Call
+    /// it before the kernel's first dispatch.
+    #[doc(hidden)]
+    pub fn plant_attention_source(&self, kernel: FusedKernel, wgsl: &str) {
+        let i = match kernel {
+            FusedKernel::Tiled => 0,
+            FusedKernel::Vec4 => 1,
+        };
+        self.kernels.planted[i].replace(Some(wgsl.to_string()));
     }
 
     /// For tests: the f16 variants compiled from now on get a planted WGSL
@@ -1256,8 +1797,9 @@ impl Gpu {
             info,
             policy: std::cell::Cell::new(MatMulPolicy::Fixed(0)),
             usable: std::cell::Cell::new([true; TILES.len()]),
-            attention: std::cell::Cell::new(AttentionPolicy::SPLIT),
+            attention: std::cell::Cell::new(AttentionPolicy::Split),
             fused_ok: std::cell::Cell::new(false),
+            vfused_ok: std::cell::Cell::new(false),
             f16_ok: std::cell::Cell::new(false),
             downlevel,
             kernels,
@@ -1491,18 +2033,32 @@ impl Gpu {
 
     /// Resolves once the GPU has finished all submitted work.
     pub async fn done(&self) {
-        let (tx, rx) = futures_channel::oneshot::channel();
+        self.done_signal().wait().await;
+    }
+
+    /// The end of the work submitted before this call.  The call asks
+    /// WebGPU at once (`onSubmittedWorkDone`), so work submitted after it
+    /// is not in the signal.  An `async fn` would ask only at its first
+    /// poll.
+    pub fn done_signal(&self) -> Signal {
+        let (tx, ended) = futures_channel::oneshot::channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let flag = done.clone();
         self.queue.on_submitted_work_done(move || {
+            flag.store(true, Ordering::Release);
             let _ = tx.send(());
         });
-        self.poll();
-        let _ = rx.await;
+        Signal {
+            device: self.device.clone(),
+            done,
+            ended,
+        }
     }
 
     /// Native: drive the device until all callbacks have run.  On the web
     /// the browser does this and the call returns at once.
     fn poll(&self) {
-        let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+        poll_all(&self.device);
     }
 
     /// Copies `len` f32s from `buf` (starting at element `offset`) back.
@@ -1512,9 +2068,17 @@ impl Gpu {
         offset: usize,
         len: usize,
     ) -> Result<Vec<f32>, String> {
+        self.read_start(buf, offset, len).finish().await
+    }
+
+    /// Starts the read of `len` f32s from `buf` (at element `offset`): it
+    /// submits the copy into a staging buffer and asks for its map now.
+    /// So the map waits for no work submitted after this call.
+    /// [`PendingRead::finish`] gives the floats.
+    pub fn read_start(&self, buf: &wgpu::Buffer, offset: usize, len: usize) -> PendingRead {
         let size = (len * 4) as u64;
-        // Destroyed on return, after `unmap` (or, on an error, with the
-        // mapping cancelled): the copy into it was submitted by then.
+        // Destroyed when the read drops, after `unmap` (or, on an error,
+        // with the mapping cancelled): the copy into it was submitted then.
         let staging = self.create(&wgpu::BufferDescriptor {
             label: Some("readback"),
             size,
@@ -1523,22 +2087,22 @@ impl Gpu {
         });
         let mut enc = self.device.create_command_encoder(&Default::default());
         enc.copy_buffer_to_buffer(buf, (offset * 4) as u64, &staging, 0, size);
-        self.queue.submit([enc.finish()]);
-        let (tx, rx) = futures_channel::oneshot::channel();
+        let submission = self.queue.submit([enc.finish()]);
+        let (tx, ended) = futures_channel::oneshot::channel();
+        let mapped = Arc::new(AtomicBool::new(false));
+        let flag = mapped.clone();
         staging.map_async(wgpu::MapMode::Read, .., move |r| {
+            flag.store(r.is_ok(), Ordering::Release);
             let _ = tx.send(r);
         });
-        self.poll();
-        rx.await
-            .map_err(|_| "readback cancelled".to_string())?
-            .map_err(|e| format!("readback: {e}"))?;
-        let view = staging
-            .get_mapped_range(..)
-            .map_err(|e| format!("readback: {e}"))?;
-        let out = mapped_floats(&view, len);
-        drop(view);
-        staging.unmap();
-        Ok(out)
+        PendingRead {
+            device: self.device.clone(),
+            staging,
+            len,
+            mapped,
+            ended,
+            submission,
+        }
     }
 
     /// Runs every matmul kernel on three small products (both operand
@@ -1810,12 +2374,40 @@ impl Gpu {
         })
     }
 
-    /// Runs the fused attention kernel on a small ragged case (two
-    /// sequences of 37 tokens, with gates) and compares it with
-    /// [`attention_cpu`].  Sets [`Gpu::fused_ok`]; returns why it failed,
-    /// if it did, and then the split path is the only one used.
+    /// Runs each fused attention kernel on a small ragged case (two
+    /// sequences of 133 tokens, with gates: three key tiles, the last one
+    /// short) and compares it with
+    /// [`attention_cpu`].  Sets [`Gpu::fused_ok`] for the tiled kernel and
+    /// [`Gpu::vfused_ok`] for `vfused`, and sets the attention policy to
+    /// split if it is no longer usable.  Returns why a kernel failed, if
+    /// one did: with the tiled kernel, only the split path is used, and
+    /// without `vfused`, calibration does not choose it.
     pub async fn check_attention(&self) -> Option<String> {
-        let (seq, nseq) = (37, 2);
+        let tiled = self.check_fused(FusedKernel::Tiled).await;
+        let vec4 = self.check_fused(FusedKernel::Vec4).await;
+        self.fused_ok.set(tiled.is_none());
+        self.vfused_ok.set(vec4.is_none());
+        if !self.attention.get().usable(tiled.is_none(), vec4.is_none()) {
+            self.attention.set(AttentionPolicy::Split);
+        }
+        let problems: Vec<String> = [
+            tiled.map(|why| {
+                format!(
+                    "fused attention gives wrong results on this GPU ({why}); using split attention"
+                )
+            }),
+            vec4.map(|why| format!("vfused gives wrong results on this GPU ({why}); not used")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        (!problems.is_empty()).then(|| problems.join("; "))
+    }
+
+    /// Why `kernel` fails the check of [`Gpu::check_attention`], or `None`
+    /// when it passes.
+    async fn check_fused(&self, kernel: FusedKernel) -> Option<String> {
+        let (seq, nseq) = (133, 2);
         let tokens = seq * nseq;
         let mut st = 0x9e37_79b9u32;
         let mut rand = |n: usize| -> Vec<f32> {
@@ -1837,10 +2429,10 @@ impl Gpu {
         );
         let ob = self.buffer("check o", tokens * 512);
         let mut r = self.rec();
-        r.attention(&qb, Some(&gb), &ob, seq, nseq, alpha);
+        r.attention(kernel, &qb, Some(&gb), &ob, seq, nseq, alpha);
         r.submit();
-        let problem = match self.read(&ob, 0, tokens * 512).await {
-            Err(e) => Some(format!("fused attention: {e}; using split attention")),
+        match self.read(&ob, 0, tokens * 512).await {
+            Err(e) => Some(e),
             Ok(got) => {
                 let worst = got
                     .iter()
@@ -1854,24 +2446,14 @@ impl Gpu {
                     })
                     .fold(0.0f32, f32::max);
                 let errors = self.take_errors();
-                if worst > 1e-4 || !errors.is_empty() {
-                    let why = errors
+                (worst > 1e-4 || !errors.is_empty()).then(|| {
+                    errors
                         .first()
                         .cloned()
-                        .unwrap_or_else(|| format!("relative error {worst:.1e}"));
-                    Some(format!(
-                        "fused attention gives wrong results on this GPU ({why}); using split attention"
-                    ))
-                } else {
-                    None
-                }
+                        .unwrap_or_else(|| format!("relative error {worst:.1e}"))
+                })
             }
-        };
-        self.fused_ok.set(problem.is_none());
-        if problem.is_some() {
-            self.attention.set(AttentionPolicy::SPLIT);
         }
-        problem
     }
 
     pub fn rec(&self) -> Rec<'_> {
@@ -2156,7 +2738,7 @@ fn grid(groups: usize) -> (u32, u32) {
 enum Kernel {
     /// An entry of [`TILES`], and the format of its B.
     MatMul(usize, WeightFormat),
-    Attention,
+    Attention(FusedKernel),
     Softmax,
     RmsNorm,
     Rope,
@@ -2166,13 +2748,32 @@ enum Kernel {
 }
 
 /// The profile label of a matmul: its shape, batch and kernel, and `f16`
-/// for an f16 variant (f32 labels stay as they were).
+/// for an f16 variant (f32 labels stay as they were).  `profile_groups`
+/// in `xtask/src/e2e/perf.rs` reads it.
 fn matmul_label([m, n, k]: [usize; 3], batch: usize, tile: Tile, format: WeightFormat) -> String {
     let variant = match format {
         WeightFormat::F32 => "",
         WeightFormat::F16 => " f16",
     };
     format!("matmul {m}x{n}x{k} x{batch} {}{variant}", tile.name)
+}
+
+/// The profile label of a softmax: its rows and their length.
+/// `profile_groups` in `xtask/src/e2e/perf.rs` reads it.
+fn softmax_label(rows: usize, len: usize) -> String {
+    format!("softmax {rows}x{len}")
+}
+
+/// The profile label of a fused attention: the tokens of each sequence
+/// and the number of sequences, and ` vfused` after them for the vec4
+/// kernel; the tiled kernel adds nothing.  `profile_groups` in
+/// `xtask/src/e2e/perf.rs` reads it.
+fn attention_label(seq: usize, nseq: usize, kernel: FusedKernel) -> String {
+    let variant = match kernel {
+        FusedKernel::Tiled => "",
+        FusedKernel::Vec4 => " vfused",
+    };
+    format!("attention seq {seq} x{nseq}{variant}")
 }
 
 /// Dispatches recorded for one submission.  Holds the borrows of the
@@ -2212,7 +2813,8 @@ impl<'g> Rec<'g> {
         if self.gpu.prof.is_some() {
             let label = match &kernel {
                 Kernel::MatMul(t, _) => format!("matmul {}", TILES[*t].name),
-                Kernel::Attention => "attention".into(),
+                Kernel::Attention(FusedKernel::Tiled) => "attention".into(),
+                Kernel::Attention(FusedKernel::Vec4) => "vfused".into(),
                 Kernel::Softmax => "softmax".into(),
                 Kernel::RmsNorm => "rmsnorm".into(),
                 Kernel::Rope => "rope".into(),
@@ -2282,7 +2884,7 @@ impl<'g> Rec<'g> {
         let k = &gpu.kernels;
         let pipeline = |kernel: &Kernel| match kernel {
             Kernel::MatMul(t, format) => k.matmul_pipeline(&gpu.device, *t, *format),
-            Kernel::Attention => k.attention_pipeline(&gpu.device),
+            Kernel::Attention(kernel) => k.attention_pipeline(&gpu.device, *kernel),
             Kernel::Softmax => &k.softmax.0,
             Kernel::RmsNorm => &k.rmsnorm.0,
             Kernel::Rope => &k.rope,
@@ -2391,6 +2993,9 @@ impl<'g> Rec<'g> {
         let (gx, gy) = grid(rows);
         let p = [u(rows), u(len), gx, 0];
         self.push(Kernel::Softmax, &[x], bytemuck::cast_slice(&p), [gx, gy, 1]);
+        if let Some(label) = self.labels.last_mut() {
+            *label = softmax_label(rows, len);
+        }
     }
 
     /// RMSNorm of `rows` rows of 256: `y[y_off..] = x[x_off..] / |x| * g`.
@@ -2445,9 +3050,12 @@ impl<'g> Rec<'g> {
     /// `[tokens, 1536]` qkv buffer at column offsets 0, 512 and 1024, `o`
     /// `[tokens, 512]` and `gates` `[tokens, 8]` (no gate when `None`).
     /// The same result as the scores matmul, softmax, p.v matmul and gate
-    /// in [`net::Job`], in one dispatch.
+    /// in [`net::Job`], in one dispatch of `kernel`.  Each kernel's dispatch
+    /// has the label of [`attention_label`].
+    #[allow(clippy::too_many_arguments)]
     pub fn attention(
         &mut self,
+        kernel: FusedKernel,
         qkv: &'g wgpu::Buffer,
         gates: Option<&'g wgpu::Buffer>,
         o: &'g wgpu::Buffer,
@@ -2468,11 +3076,14 @@ impl<'g> Rec<'g> {
         let groups = [u(seq.div_ceil(64)), 8, u(nseq)];
         let g = gates.unwrap_or(&self.gpu.dummy);
         self.push(
-            Kernel::Attention,
+            Kernel::Attention(kernel),
             &[qkv, g, o],
             bytemuck::bytes_of(&p),
             groups,
         );
+        if let Some(label) = self.labels.last_mut() {
+            *label = attention_label(seq, nseq, kernel);
+        }
     }
 
     /// `o[t, h*64 + d] *= sigmoid(gates[t, h])` for `tokens` rows.
@@ -2509,28 +3120,39 @@ impl<'g> Rec<'g> {
 }
 
 /// The WGSL of every kernel that calibration chooses between: each matmul
-/// kernel, its f16 variant, and fused attention.
+/// kernel, its f16 variant, and the two fused attention kernels.
 fn kernel_sources() -> Vec<String> {
     let f32_kernels = TILES.iter().map(Tile::source);
     let f16_variants = TILES.iter().map(Tile::f16_source);
     f32_kernels
         .chain(f16_variants)
-        .chain(std::iter::once(attention_source()))
+        .chain([attention_source(), attention_vec4_source()])
         .collect()
+}
+
+/// The FNV-1a hash (64 bits) of no bytes: its offset basis.
+const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+/// The FNV-1a hash (64 bits) `hash` continued over `bytes`.  From
+/// [`FNV_OFFSET`], it is the hash of `bytes`.
+fn fnv1a(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |h, &b| {
+        (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+    })
 }
 
 /// Identifies the compiled kernels that calibration chooses between
 /// (FNV-1a over [`kernel_sources`]), so a per-GPU choice is redone
 /// whenever they change.
 pub fn kernels_id() -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for src in kernel_sources() {
-        for b in src.bytes() {
-            h ^= u64::from(b);
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        }
-    }
-    h
+    id_of(&kernel_sources())
+}
+
+/// FNV-1a over `sources`, one after the other.
+fn id_of(sources: &[String]) -> u64 {
+    sources
+        .iter()
+        .fold(FNV_OFFSET, |h, src| fnv1a(h, src.as_bytes()))
 }
 
 #[cfg(test)]
@@ -2684,7 +3306,9 @@ mod tests {
     /// reads 2-way at a thread stride of 4, 4-way at 8).  `v64` reads
     /// conflict-free; its stores, once per K tile against 32 reads, conflict
     /// 2-way, the price of the padding that keeps the reads free (unpadded,
-    /// its B reads conflict 4-way).
+    /// its B reads conflict 4-way).  `v64k8` (BK 8) with the same pad of
+    /// one vec4 also gives 2-way stores and reads with no conflict;
+    /// unpadded, its B reads conflict 2-way, not 4-way.
     #[test]
     fn bank_conflicts() {
         for t in TILES.iter().filter(|t| !t.vec4) {
@@ -2695,10 +3319,18 @@ mod tests {
             };
             assert_eq!(conflicts(t), want, "{}", t.name);
         }
-        for t in TILES.iter().filter(|t| t.vec4) {
+        let staged: Vec<&Tile> = TILES.iter().filter(|t| t.vec4).collect();
+        let names: Vec<&str> = staged.iter().map(|t| t.name).collect();
+        assert_eq!(names, ["v64", "v64k8"]);
+        for t in staged {
             assert_eq!(conflicts_vec4(t), [2, 2, 1, 1], "{}", t.name);
             let unpadded = Tile { pad: 0, ..*t };
-            assert_eq!(conflicts_vec4(&unpadded), [1, 1, 1, 4], "{}", t.name);
+            let want = if t.bk == 8 {
+                [1, 1, 1, 2]
+            } else {
+                [1, 1, 1, 4]
+            };
+            assert_eq!(conflicts_vec4(&unpadded), want, "{}", t.name);
         }
     }
 
@@ -2720,10 +3352,21 @@ mod tests {
             .sum()
     }
 
-    /// Every generated kernel fits WebGPU's default 16 KiB of workgroup
-    /// memory.
+    /// Asserts:
+    /// * each entry of [`TILES`] declares the bytes of workgroup memory of
+    ///   its formula, in its f32 kernel and its f16 variant, and at most
+    ///   16 KiB;
+    /// * `v64k8` declares 6,144 bytes;
+    /// * fused attention declares 12 to 16 KiB;
+    /// * `vfused` declares 2 x 64 x (16 + 4) floats, 10,240 bytes, less
+    ///   than the tiled kernel, by its name in [`generated_sources`].
     #[test]
     fn workgroup_memory_within_defaults() {
+        let bytes_of = |name: &str| {
+            let t = TILES.iter().find(|t| t.name == name);
+            t.map(|t| workgroup_bytes(&t.source()))
+        };
+        assert_eq!(bytes_of("v64k8"), Some(6144));
         for t in &TILES {
             let bytes = workgroup_bytes(&t.source());
             assert_eq!(workgroup_bytes(&t.f16_source()), bytes, "{} f16", t.name);
@@ -2737,6 +3380,39 @@ mod tests {
         }
         let attention = workgroup_bytes(&attention_source());
         assert!((12 * 1024..=16 * 1024).contains(&attention), "{attention}");
+        let vfused = generated_sources()
+            .find(|(name, _)| name == "vfused")
+            .map(|(_, src)| workgroup_bytes(&src));
+        assert_eq!(vfused, Some(2 * 64 * (16 + 4) * 4));
+    }
+
+    /// Asserts, on the generated source of `vfused`, that a
+    /// `workgroupBarrier()` comes between each write of a thread's row
+    /// maxima or row sums (`buf[ty * 16u + tx] = `) and the next read of
+    /// that region (`buf[ty * 16u]` or `buf[ty * 16u + k]`).  The GPU tests
+    /// cannot see a missing barrier there: on Apple GPUs a row of 16
+    /// threads is half a SIMD group.  There are two such writes, the
+    /// maxima and the sums in `FINISH`.
+    #[test]
+    fn vfused_waits_between_its_row_writes_and_reads() {
+        let src = attention_vec4_source();
+        let write = "buf[ty * 16u + tx] = ";
+        let reads = ["buf[ty * 16u]", "buf[ty * 16u + k]"];
+        let mut writes = 0;
+        for (at, _) in src.match_indices(write) {
+            writes += 1;
+            let after = &src[at + write.len()..];
+            let next_read = reads
+                .iter()
+                .filter_map(|r| after.find(r))
+                .min()
+                .unwrap_or_else(|| panic!("no read after the write at {at}"));
+            assert!(
+                after[..next_read].contains("workgroupBarrier()"),
+                "no barrier between the write at {at} and its read"
+            );
+        }
+        assert_eq!(writes, 2);
     }
 
     /// Every template placeholder in `src`: an upper-case name in braces,
@@ -2766,16 +3442,16 @@ mod tests {
 
     /// Every generated source, by name: each entry of [`TILES`] (`s64` is
     /// `matmul.wgsl`), the f16 variant of each (`i64-f16` and so on), and
-    /// fused attention.
+    /// the two fused attention kernels (`attention`, `vfused`).
     fn generated_sources() -> impl Iterator<Item = (String, String)> {
         let f32_kernels = TILES.iter().map(|t| (t.name.to_string(), t.source()));
         let f16_variants = TILES
             .iter()
             .map(|t| (format!("{}-f16", t.name), t.f16_source()));
-        f32_kernels.chain(f16_variants).chain(std::iter::once((
-            "attention".to_string(),
-            attention_source(),
-        )))
+        f32_kernels.chain(f16_variants).chain([
+            ("attention".to_string(), attention_source()),
+            ("vfused".to_string(), attention_vec4_source()),
+        ])
     }
 
     /// The generated sources have every placeholder filled.
@@ -2970,12 +3646,13 @@ mod tests {
         ("elementwise.wgsl", include_str!("shaders/elementwise.wgsl")),
     ];
 
-    /// The shader files that [`generated_sources`] covers: three
+    /// The shader files that [`generated_sources`] covers: four
     /// templates, and `matmul.wgsl`, which is `s64`'s source.
-    const GENERATED_FROM: [&str; 4] = [
+    const GENERATED_FROM: [&str; 5] = [
         "matmul_interleaved.wgsl",
         "matmul_vec4.wgsl",
         "attention_tiled.wgsl",
+        "attention_vec4.wgsl",
         "matmul.wgsl",
     ];
 
@@ -3002,6 +3679,69 @@ mod tests {
         assert_eq!(s64.source(), include_str!("shaders/matmul.wgsl"));
     }
 
+    /// The FNV-1a hash ([`fnv1a`]) of the WGSL of each current kernel, by
+    /// the name of [`generated_sources`] or [`SHADER_FILES`].
+    const PINNED_WGSL: [(&str, u64); 15] = [
+        ("i64", 0x6735_eed0_8cca_09cc),
+        ("i128x64", 0xf9e3_a175_acf0_66cf),
+        ("s64", 0x1553_8389_9726_7e72),
+        ("v64", 0x2bf0_6de9_4804_2584),
+        ("v64k8", 0x4741_f1df_d45f_f6d1),
+        ("i64-f16", 0xf950_2bac_2fb3_4efe),
+        ("i128x64-f16", 0x71ad_576f_be76_36a5),
+        ("s64-f16", 0x524e_ac59_f5a3_b9d4),
+        ("v64-f16", 0xbb95_7752_6ab4_50c6),
+        ("v64k8-f16", 0xc324_6da6_933d_ea43),
+        ("attention", 0xa091_9877_a004_c08c),
+        ("vfused", 0x672c_1875_5e66_f53f),
+        ("softmax.wgsl", 0x88a8_02c9_98a6_ac21),
+        ("rmsnorm.wgsl", 0x051c_929e_5b3b_f568),
+        ("elementwise.wgsl", 0x2df7_4f02_9bc1_b129),
+    ];
+
+    /// The names of new kernels that have no pinned hash yet.  A kernel
+    /// that lands moves from here to [`PINNED_WGSL`].
+    const NEW_KERNELS: [&str; 0] = [];
+
+    /// Asserts:
+    /// * each source of [`generated_sources`] and [`SHADER_FILES`] whose
+    ///   name is in [`PINNED_WGSL`] has the FNV-1a hash pinned there;
+    /// * each source with no pinned hash has its name in [`NEW_KERNELS`];
+    /// * each name in [`PINNED_WGSL`] and in [`NEW_KERNELS`] is the name
+    ///   of a source.
+    ///
+    /// Why: calibration protects the GPUs that this Mac cannot measure
+    /// from a new candidate, which it times, but not from a changed
+    /// current kernel.  So the WGSL of each current kernel stays the same
+    /// byte for byte (M4 of `plans/completed/gpu-speed.md`).
+    #[test]
+    fn current_kernels_keep_their_wgsl() {
+        let all: Vec<(String, String)> = generated_sources()
+            .chain(SHADER_FILES.map(|(name, src)| (name.to_string(), src.to_string())))
+            .collect();
+        let mut problems = Vec::new();
+        for (name, src) in &all {
+            let hash = fnv1a(FNV_OFFSET, src.as_bytes());
+            match PINNED_WGSL.iter().find(|(pinned, _)| pinned == name) {
+                Some((_, want)) if *want != hash => {
+                    problems.push(format!("{name}: hash {hash:#018x}, pinned {want:#018x}"))
+                }
+                Some(_) => {}
+                None if !NEW_KERNELS.contains(&name.as_str()) => problems.push(format!(
+                    "{name}: hash {hash:#018x}, not pinned and not in NEW_KERNELS"
+                )),
+                None => {}
+            }
+        }
+        let names: Vec<&str> = all.iter().map(|(name, _)| name.as_str()).collect();
+        for name in PINNED_WGSL.map(|(name, _)| name).iter().chain(&NEW_KERNELS) {
+            if !names.contains(name) {
+                problems.push(format!("{name}: no such source"));
+            }
+        }
+        assert!(problems.is_empty(), "{}", problems.join("\n"));
+    }
+
     /// Every shader the GPU compiles fits WebGPU's default limits (GPU-1):
     /// the generated sources, and [`SHADER_FILES`].  The names are pinned,
     /// so a source cannot drop out of the check unseen.
@@ -3016,11 +3756,14 @@ mod tests {
             "i128x64",
             "s64",
             "v64",
+            "v64k8",
             "i64-f16",
             "i128x64-f16",
             "s64-f16",
             "v64-f16",
+            "v64k8-f16",
             "attention",
+            "vfused",
             "softmax.wgsl",
             "rmsnorm.wgsl",
             "elementwise.wgsl",
@@ -3482,6 +4225,24 @@ mod tests {
         replace_once("b b", "b", "c");
     }
 
+    /// Asserts:
+    /// * `kernels_id` is the FNV-1a hash (64 bits, offset basis
+    ///   0xcbf29ce484222325, prime 0x100000001b3) of the bytes of
+    ///   `kernel_sources`, one after the other, computed here again;
+    /// * one more byte in one source changes the identifier.
+    #[test]
+    fn kernels_id_is_the_fnv1a_of_the_kernel_sources() {
+        let sources = kernel_sources();
+        let mut want: u64 = 0xcbf2_9ce4_8422_2325;
+        for b in sources.iter().flat_map(|s| s.bytes()) {
+            want = (want ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+        }
+        assert_eq!(kernels_id(), want);
+        let mut changed = sources.clone();
+        changed[0].push(' ');
+        assert_ne!(id_of(&changed), kernels_id());
+    }
+
     /// Calibration's key covers every kernel it can choose, f16 variants
     /// included.
     #[test]
@@ -3682,6 +4443,19 @@ mod tests {
         assert_eq!(label(WeightFormat::F16), "matmul 1151x1536x256 x6 i64 f16");
     }
 
+    /// Asserts:
+    /// * a softmax of 9208 rows of 1151 has the label `softmax 9208x1151`;
+    /// * a fused attention of 4 sequences of 1151 tokens has the label
+    ///   `attention seq 1151 x4` with the tiled kernel, and
+    ///   `attention seq 1151 x4 vfused` with `vfused`.
+    #[test]
+    fn attention_labels_name_their_shapes() {
+        assert_eq!(softmax_label(9208, 1151), "softmax 9208x1151");
+        let label = |kernel| attention_label(1151, 4, kernel);
+        assert_eq!(label(FusedKernel::Tiled), "attention seq 1151 x4");
+        assert_eq!(label(FusedKernel::Vec4), "attention seq 1151 x4 vfused");
+    }
+
     /// Values compare by their bits, except that `+0` equals `-0`: WGSL
     /// lets a GPU ignore the sign of a zero.
     #[test]
@@ -3698,18 +4472,485 @@ mod tests {
         assert_eq!(bit_differences(&[f32::NAN], &[f32::NAN]).count, 0);
     }
 
+    /// Asserts that each policy's name parses back to it (`vfused` too),
+    /// that the names are `split`, `fused`, `time`, `freq` and `vfused`,
+    /// and that an unknown name gives `None`.  Asserts each policy's kernels
+    /// on the two axes: `vfused` runs `vfused` on the time axis and the
+    /// tiled kernel on the frequency axis.
     #[test]
     fn attention_policy_names() {
-        for p in [
-            AttentionPolicy::SPLIT,
-            AttentionPolicy::FUSED,
-            AttentionPolicy {
-                time: false,
-                freq: true,
-            },
-        ] {
+        for p in AttentionPolicy::ALL {
             assert_eq!(AttentionPolicy::parse(p.name()), Some(p));
         }
+        let names: Vec<&str> = AttentionPolicy::ALL.iter().map(|p| p.name()).collect();
+        assert_eq!(names, ["split", "fused", "time", "freq", "vfused"]);
         assert_eq!(AttentionPolicy::parse("a4"), None);
+        let axes: Vec<(Option<FusedKernel>, bool)> = AttentionPolicy::ALL
+            .iter()
+            .map(|p| (p.time(), p.freq()))
+            .collect();
+        let tiled = Some(FusedKernel::Tiled);
+        assert_eq!(
+            axes,
+            [
+                (None, false),
+                (tiled, true),
+                (tiled, false),
+                (None, true),
+                (Some(FusedKernel::Vec4), true),
+            ]
+        );
+    }
+
+    /// Asserts which policies a GPU can run, by its start-up checks: split
+    /// always; `vfused` only when both fused kernels passed; the others
+    /// when the tiled kernel passed, whatever `vfused` gave.
+    #[test]
+    fn a_policy_is_usable_only_with_its_kernels() {
+        let usable = |fused_ok, vfused_ok| -> Vec<&str> {
+            AttentionPolicy::ALL
+                .into_iter()
+                .filter(|p| p.usable(fused_ok, vfused_ok))
+                .map(AttentionPolicy::name)
+                .collect()
+        };
+        assert_eq!(
+            usable(true, true),
+            ["split", "fused", "time", "freq", "vfused"]
+        );
+        assert_eq!(usable(true, false), ["split", "fused", "time", "freq"]);
+        assert_eq!(usable(false, true), ["split"]);
+        assert_eq!(usable(false, false), ["split"]);
+    }
+
+    /// A GPU for the native tests of the queue, or `None` after a skip.
+    fn queue_gpu() -> Option<Gpu> {
+        match pollster::block_on(Gpu::new(wgpu::PowerPreference::HighPerformance)) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                test_support::skip(test_support::Need::Gpu, &e);
+                None
+            }
+        }
+    }
+
+    /// Submits a copy of `from` into `to` and gives its submission.
+    fn submit_copy(gpu: &Gpu, from: &wgpu::Buffer, to: &wgpu::Buffer) -> wgpu::SubmissionIndex {
+        let mut enc = gpu.device.create_command_encoder(&Default::default());
+        enc.copy_buffer_to_buffer(from, 0, to, 0, from.size());
+        gpu.queue.submit([enc.finish()])
+    }
+
+    /// Waits natively for `submission` only, and runs its callbacks.
+    fn wait_for(gpu: &Gpu, submission: wgpu::SubmissionIndex) {
+        gpu.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .expect("poll");
+    }
+
+    /// `done_signal` asks WebGPU at the call: after a wait for step A
+    /// alone, the signal taken between A and B is done.  A signal that
+    /// asks only when awaited has no callback, so it reads false.
+    #[test]
+    fn a_done_signal_covers_the_work_before_its_call() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = (gpu.buffer("a", 1 << 16), gpu.buffer("b", 1 << 16));
+        let step_a = submit_copy(&gpu, &a, &b);
+        let signal = gpu.done_signal();
+        let _step_b = submit_copy(&gpu, &b, &a);
+        wait_for(&gpu, step_a);
+        assert!(signal.is_done(), "the signal of step A is done after A");
+        pollster::block_on(signal.wait());
+    }
+
+    /// `read_start` submits its copy and maps at the call.  A copy
+    /// submitted after it overwrites the source.  After a wait for the
+    /// read's copy alone, the staging buffer is mapped, and the read gives
+    /// the old contents.  A deferred copy gives the new contents, and a
+    /// deferred map reads false.
+    #[test]
+    fn a_started_read_gives_the_contents_at_its_start() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (source, newer) = (gpu.buffer("source", 4), gpu.buffer("newer", 4));
+        gpu.write(&source, 0, &[1.0, 2.0, 3.0, 4.0]);
+        let read = gpu.read_start(&source, 0, 4);
+        gpu.write(&newer, 0, &[5.0, 6.0, 7.0, 8.0]);
+        let _overwrite = submit_copy(&gpu, &newer, &source);
+        wait_for(&gpu, read.submission.clone());
+        assert!(
+            read.is_mapped(),
+            "the staging buffer is mapped after the copy"
+        );
+        let got = pollster::block_on(read.finish()).expect("read");
+        assert_eq!(got, [1.0, 2.0, 3.0, 4.0], "the contents at the start");
+    }
+
+    /// Two buffers of 32 MiB, so that a copy between them is still in
+    /// flight right after its submission.
+    fn large_pair(gpu: &Gpu) -> (GpuBuffer, GpuBuffer) {
+        (gpu.buffer("a", 1 << 23), gpu.buffer("b", 1 << 23))
+    }
+
+    /// Right after `done_signal`, with a copy in flight and no poll, the
+    /// signal reads not done.
+    #[test]
+    fn a_done_signal_reads_not_done_before_a_poll() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = large_pair(&gpu);
+        let _copy = submit_copy(&gpu, &a, &b);
+        let signal = gpu.done_signal();
+        assert!(!signal.is_done(), "done before a poll");
+        pollster::block_on(signal.wait());
+    }
+
+    /// Right after `read_start`, with no poll, the staging buffer reads not
+    /// mapped.
+    #[test]
+    fn a_started_read_reads_not_mapped_before_a_poll() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = large_pair(&gpu);
+        let _copy = submit_copy(&gpu, &a, &b);
+        let read = gpu.read_start(&b, 0, 1 << 23);
+        assert!(!read.is_mapped(), "mapped before a poll");
+        pollster::block_on(read.finish()).expect("read");
+    }
+
+    /// After the wait of a later signal, an earlier signal reads done.
+    #[test]
+    fn the_wait_of_a_later_signal_ends_an_earlier_one() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = large_pair(&gpu);
+        let _first = submit_copy(&gpu, &a, &b);
+        let earlier = gpu.done_signal();
+        let _second = submit_copy(&gpu, &b, &a);
+        let later = gpu.done_signal();
+        pollster::block_on(later.wait());
+        assert!(earlier.is_done(), "the earlier signal after the wait");
+    }
+
+    /// After `Gpu::done`, a signal taken before it reads done.
+    #[test]
+    fn gpu_done_ends_each_signal_taken_before_it() {
+        let Some(gpu) = queue_gpu() else { return };
+        let (a, b) = large_pair(&gpu);
+        let _copy = submit_copy(&gpu, &a, &b);
+        let signal = gpu.done_signal();
+        pollster::block_on(gpu.done());
+        assert!(signal.is_done(), "the signal after `Gpu::done`");
+    }
+
+    /// The most steps in flight at any event of `order`.
+    fn most_in_flight(order: &[Event]) -> usize {
+        let (mut now, mut most) = (0usize, 0usize);
+        for e in order {
+            match e {
+                Event::Submit(_) => now += 1,
+                Event::Await(_) => now -= 1,
+                _ => {}
+            }
+            most = most.max(now);
+        }
+        most
+    }
+
+    /// The order of `Pace` with 2 steps in flight, for 3 stems of 3, 2 and
+    /// 2 steps:
+    /// * each step is awaited once;
+    /// * each `Signal(i)` comes right after `Submit(i)`;
+    /// * no `Submit(i + 2)` comes before `Await(i)`;
+    /// * 2 steps are in flight at the most, and that is reached;
+    /// * each `Drained(g)` comes after the `Await` of each step submitted
+    ///   before it, and before the first `Submit` of the next group.
+    #[test]
+    fn the_pace_keeps_2_steps_in_flight_and_drains_before_each_read() {
+        let order = pace_order(&[3, 2, 2], STEPS_IN_FLIGHT);
+        let at = |e: Event| order.iter().position(|x| *x == e).expect("an event");
+        for i in 0..7 {
+            let awaits = order.iter().filter(|e| **e == Event::Await(i)).count();
+            assert_eq!(awaits, 1, "step {i}: {order:?}");
+            assert_eq!(
+                order[at(Event::Submit(i)) + 1],
+                Event::Signal(i),
+                "step {i}: {order:?}"
+            );
+            if i + 2 < 7 {
+                assert!(
+                    at(Event::Await(i)) < at(Event::Submit(i + 2)),
+                    "step {i}: {order:?}"
+                );
+            }
+        }
+        assert_eq!(STEPS_IN_FLIGHT, 2);
+        assert_eq!(most_in_flight(&order), 2, "{order:?}");
+        for (g, (last, next)) in [(2, Some(3)), (4, Some(5)), (6, None)]
+            .into_iter()
+            .enumerate()
+        {
+            let drained = at(Event::Drained(g));
+            for i in 0..=last {
+                assert!(at(Event::Await(i)) < drained, "group {g}, step {i}");
+            }
+            if let Some(next) = next {
+                assert!(drained < at(Event::Submit(next)), "group {g}");
+            }
+        }
+    }
+
+    /// With 1 step in flight, the order is today's: each step awaited
+    /// right after its signal.
+    #[test]
+    fn a_window_of_1_awaits_each_step_at_once() {
+        use Event::*;
+        assert_eq!(
+            pace_order(&[2], 1),
+            [
+                Submit(0),
+                Signal(0),
+                Await(0),
+                Submit(1),
+                Signal(1),
+                Await(1),
+                Drained(0)
+            ]
+        );
+    }
+
+    /// The ends that [`Window`] awaits, with whether a newer step is in
+    /// flight at each.
+    struct Ends(Vec<(usize, bool)>);
+
+    impl Steps for Ends {
+        type Step = usize;
+        type Submitted = usize;
+        type Signal = ();
+        type Error = std::convert::Infallible;
+
+        fn submit(&mut self, step: usize) -> usize {
+            step
+        }
+
+        fn signal(&mut self) {}
+
+        async fn end(&mut self, i: usize, (): (), newer: bool) -> Result<(), Self::Error> {
+            self.0.push((i, newer));
+            Ok(())
+        }
+    }
+
+    /// The ends of 3 steps, then a drain, with `depth` in flight.
+    fn ends(depth: usize) -> Vec<(usize, bool)> {
+        let (mut window, mut ends) = (Window::new(depth), Ends(Vec::new()));
+        for i in 0..3 {
+            let Ok(()) = now_or_never(window.step(&mut ends, i));
+        }
+        let Ok(()) = now_or_never(window.drain(&mut ends));
+        ends.0
+    }
+
+    /// Each end that the window awaits tells whether a newer step is in
+    /// flight:
+    /// * with 2 in flight, steps 0 and 1 end with a newer step in flight,
+    ///   and step 2 with none;
+    /// * with 1 in flight, no step ends with a newer step in flight.
+    #[test]
+    fn each_end_tells_whether_a_newer_step_is_in_flight() {
+        assert_eq!(ends(2), [(0, true), (1, true), (2, false)]);
+        assert_eq!(ends(1), [(0, false), (1, false), (2, false)]);
+    }
+
+    /// Steps whose end fails at step `fails_at`, with the error
+    /// `fails_at`, as a GPU error or the step limit does.
+    struct Fails {
+        fails_at: usize,
+        events: Vec<Event>,
+    }
+
+    impl Steps for Fails {
+        type Step = usize;
+        type Submitted = usize;
+        type Signal = ();
+        type Error = usize;
+
+        fn submit(&mut self, step: usize) -> usize {
+            self.events.push(Event::Submit(step));
+            step
+        }
+
+        fn signal(&mut self) {}
+
+        async fn end(&mut self, i: usize, (): (), _newer: bool) -> Result<(), usize> {
+            self.events.push(Event::Await(i));
+            if i == self.fails_at { Err(i) } else { Ok(()) }
+        }
+    }
+
+    /// Runs `count` steps with `depth` in flight, then drains, as the
+    /// worker's `Pace::all` does.  It stops at the first error.  Gives
+    /// the result and the events.
+    fn run_until_error(
+        depth: usize,
+        count: usize,
+        fails_at: usize,
+    ) -> (Result<(), usize>, Vec<Event>) {
+        let mut window = Window::new(depth);
+        let mut steps = Fails {
+            fails_at,
+            events: Vec::new(),
+        };
+        for i in 0..count {
+            if let Err(e) = now_or_never(window.step(&mut steps, i)) {
+                return (Err(e), steps.events);
+            }
+        }
+        let drained = now_or_never(window.drain(&mut steps));
+        (drained, steps.events)
+    }
+
+    /// An error at the end of a step stops the run:
+    /// * with 2 in flight and 4 steps, the end of step 1 fails in
+    ///   `Window::step`, which gives that error; step 3 is not submitted;
+    /// * with 2 in flight and 3 steps, the end of step 2 fails in
+    ///   `Window::drain`, which gives that error;
+    /// * with 3 in flight and 3 steps, the end of step 1 fails in
+    ///   `Window::drain`, which gives that error; step 2 is not awaited.
+    #[test]
+    fn an_error_at_the_end_of_a_step_stops_the_run() {
+        use Event::*;
+        assert_eq!(
+            run_until_error(2, 4, 1),
+            (
+                Err(1),
+                vec![Submit(0), Submit(1), Await(0), Submit(2), Await(1)]
+            )
+        );
+        assert_eq!(
+            run_until_error(2, 3, 2),
+            (
+                Err(2),
+                vec![
+                    Submit(0),
+                    Submit(1),
+                    Await(0),
+                    Submit(2),
+                    Await(1),
+                    Await(2)
+                ]
+            )
+        );
+        assert_eq!(
+            run_until_error(3, 3, 1),
+            (
+                Err(1),
+                vec![Submit(0), Submit(1), Submit(2), Await(0), Await(1)]
+            )
+        );
+    }
+
+    /// The text of 2 rejected operations at the end of step `layer 3`,
+    /// the first `bad bind`:
+    /// * with no newer step in flight, it names `layer 3` alone;
+    /// * with a newer step in flight, it names `layer 3 or the step in
+    ///   flight after it`.
+    #[test]
+    fn a_rejection_names_the_newer_step_only_when_one_is_in_flight() {
+        assert_eq!(
+            rejected_text(&"layer 3", false, 2, "bad bind"),
+            "the GPU rejected 2 operation(s) during layer 3, so the result would be wrong; first: bad bind"
+        );
+        assert_eq!(
+            rejected_text(&"layer 3", true, 2, "bad bind"),
+            "the GPU rejected 2 operation(s) during layer 3 or the step in flight after it, so the result would be wrong; first: bad bind"
+        );
+    }
+
+    /// The checks at the end of step `layer 3`, with a limit of 5 s:
+    /// * no error, 4 s: Ok;
+    /// * one error `bad bind`, 4 s: the rejection of 1 operation, first
+    ///   `bad bind`;
+    /// * two errors, `bad bind` first, with a newer step in flight, 4 s:
+    ///   the rejection of 2 operations, first `bad bind`, that names the
+    ///   newer step;
+    /// * one error, 70 s: the rejection, not the limit text;
+    /// * no error, 5.5 s: the limit text of 5 s;
+    /// * no error, 5 s, on the limit: Ok;
+    /// * the first step of its kind, 59 s: Ok;
+    /// * the first step of its kind, 60 s, on its limit: Ok;
+    /// * the first step of its kind, 61 s: the limit text of 60 s;
+    /// * the first step of its kind, with a limit of 120 s: 90 s gives Ok,
+    ///   and 121 s gives the limit text of 120 s.
+    #[test]
+    fn a_step_check_gives_the_errors_first_then_the_limit() {
+        let one = ["bad bind".to_string()];
+        let two = ["bad bind".to_string(), "bad size".to_string()];
+        let check = |errors: &[String], newer, dt, first_of_kind| {
+            step_check(&"layer 3", newer, errors, dt, 5.0, first_of_kind)
+        };
+        assert_eq!(check(&[], false, 4.0, false), Ok(()));
+        assert_eq!(
+            check(&one, false, 4.0, false),
+            Err("the GPU rejected 1 operation(s) during layer 3, so the result would be wrong; first: bad bind".into())
+        );
+        assert_eq!(
+            check(&two, true, 4.0, false),
+            Err("the GPU rejected 2 operation(s) during layer 3 or the step in flight after it, so the result would be wrong; first: bad bind".into())
+        );
+        assert_eq!(
+            check(&one, false, 70.0, false),
+            Err("the GPU rejected 1 operation(s) during layer 3, so the result would be wrong; first: bad bind".into())
+        );
+        assert_eq!(
+            check(&[], false, 5.5, false),
+            Err("one GPU step (layer 3) took 5.5 s, over the 5 s limit; stopped so the computer stays responsive".into())
+        );
+        assert_eq!(check(&[], false, 5.0, false), Ok(()));
+        assert_eq!(check(&[], false, 59.0, true), Ok(()));
+        assert_eq!(check(&[], false, 60.0, true), Ok(()));
+        assert_eq!(
+            check(&[], false, 61.0, true),
+            Err("one GPU step (layer 3) took 61.0 s, over the 60 s limit; stopped so the computer stays responsive".into())
+        );
+        assert_eq!(
+            step_check(&"layer 3", false, &[], 90.0, 120.0, true),
+            Ok(())
+        );
+        assert_eq!(
+            step_check(&"layer 3", false, &[], 121.0, 120.0, true),
+            Err("one GPU step (layer 3) took 121.0 s, over the 120 s limit; stopped so the computer stays responsive".into())
+        );
+    }
+
+    /// The step clock charges each step from the later of its submission
+    /// and the end of the step before:
+    /// * the first step, submitted at 1.0 s and ended at 1.8 s, took
+    ///   0.8 s;
+    /// * the second, submitted at 1.0 s behind it and ended at 2.1 s, took
+    ///   0.3 s;
+    /// * the third, submitted at 2.5 s after the second ended and ended at
+    ///   2.7 s, took 0.2 s.
+    #[test]
+    fn the_step_clock_charges_each_step_from_the_end_of_the_step_before() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        let mut clock = StepClock::new();
+        let first = clock.ended(1.0, 1.8);
+        let second = clock.ended(1.0, 2.1);
+        let third = clock.ended(2.5, 2.7);
+        assert!(close(first, 0.8), "first: {first}");
+        assert!(close(second, 0.3), "second: {second}");
+        assert!(close(third, 0.2), "third: {third}");
+    }
+
+    /// A step's time runs from the later of its submission and the end of
+    /// the step before, to its end.  A step submitted at 1.0 s, behind a
+    /// step that ended at 1.5 s, that ended at 1.8 s took 0.3 s.  One
+    /// submitted at 1.0 s after the step before ended at 0.9 s, that ended
+    /// at 1.8 s, took 0.8 s.
+    #[test]
+    fn a_step_that_waited_behind_the_step_before_is_not_charged_for_it() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-12;
+        assert!(close(step_secs(1.0, 1.5, 1.8), 0.3));
+        assert!(close(step_secs(1.0, 0.9, 1.8), 0.8));
     }
 }

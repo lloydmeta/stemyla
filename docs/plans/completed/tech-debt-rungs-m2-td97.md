@@ -68,12 +68,12 @@ What each lead predicts:
 * End a hung run: its `xtask`, the runner and `safaridriver`.  Never quit Safari.
 * The maintainer does not use the Mac during Safari runs.  A hidden page can hang a run (TD-96).  After a hang, read `/usr/bin/log show --last 1h --predicate 'process == "Safari" AND eventMessage CONTAINS "view visibility state changed"'`.
 * Never search the file system from `/` or `~`.  Use the paths in this plan and in `docs/references/local-browser-testing.md`.
-* Chrome needs `CHROMEDRIVER` (`docs/references/local-browser-testing.md`).  On this Mac (arm64), it is `/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.
+* Chrome needs `CHROMEDRIVER` (`docs/references/local-browser-testing.md`).  On this Mac (arm64), it is `$CHROMEDRIVER`, the driver of Chrome for Testing 157.
 * Build the page first: `(cd app && trunk build --release)`.  The `e2e` commands are in the root `README.md` (browser tests).
 
 ### The paths of this step
 
-* The orchestrator's scratchpad: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/e7f95d63-1ad1-4b43-bc80-eeb341ac774e/scratchpad/m2/td97/`.  Put the logs of the measure runs there, as `measure/<browser>-<n>.log`, and the logs of the acceptance runs as `accept/<browser>-<n>.log`.
+* The orchestrator's scratchpad: `<scratch>/m2/td97/`.  Put the logs of the measure runs there, as `measure/<browser>-<n>.log`, and the logs of the acceptance runs as `accept/<browser>-<n>.log`.  `<scratch>` is the session scratchpad folder of the orchestrator, outside the repo.
 * Each change of `.claude/**`, `CLAUDE.md` or `plans/active/tech-debt-rungs.md` goes to the orchestrator as a unified diff in that folder.  No agent of this step edits those paths.
 
 ### Terms

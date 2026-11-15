@@ -95,6 +95,12 @@ pub fn band_groups() -> Vec<BandGroup> {
     groups
 }
 
+/// The features of the widest band, in floats for each frame: the size
+/// of the buffer that the band-split RMSNorm fills one band at a time.
+pub fn widest_band() -> usize {
+    band_groups().iter().map(|g| g.width).max().unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -107,5 +113,6 @@ mod tests {
         let last = g.last().unwrap();
         assert_eq!(last.offset + last.count * last.width, FEATURES);
         assert_eq!(g.iter().map(|g| g.count).sum::<usize>(), 62);
+        assert_eq!(widest_band(), 4 * 129);
     }
 }

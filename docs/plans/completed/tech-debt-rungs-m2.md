@@ -23,10 +23,10 @@ All are in the parent's "Decisions for the maintainer" (questions 5 to 8) and it
 
 ### The paths of this run
 
-* The orchestrator's scratchpad folder: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/e7f95d63-1ad1-4b43-bc80-eeb341ac774e/scratchpad/m2/`.  This plan calls it `m2/`.
+* The orchestrator's scratchpad folder: `<scratch>/m2/`.  This plan calls it `m2/`.  `<scratch>` is the session scratchpad folder of the orchestrator, outside the repo.
 * The step 2 patch: `m2/step2-wasm-bindgen-0.2.130.patch`.  `git apply --check` passes at `808aa66` and at `739833f`.
-* Chrome for Testing driver: `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`.
-* The weights for `e2e selftest`: `/Users/lloyd/Downloads/bs_roformer_sw.f16.safetensors`.  Never copy them into the repo (ASSET-1).
+* Chrome for Testing driver: `$CHROMEDRIVER`, the driver of Chrome for Testing 157 (mac-arm64).
+* The weights for `e2e selftest`: `$STEMYLA_PERF_WEIGHTS` (`bs_roformer_sw.f16.safetensors`).  Never copy them into the repo (ASSET-1).
 
 ### The rules of the Mac
 
@@ -108,7 +108,7 @@ The orchestrator committed it in `808aa66`.  No work.
 
 * Add a pure function in `xtask/src/web_test.rs` that gives the extra variables of a crate run, from the browser and the package.  It gives `WASM_BINDGEN_NO_DEBUG=1` only for `stem-worker` in Safari.  `web-test` prints why: Safari 27.2 gives no `GPUAdapterInfo.subgroupMinSize`, and the debug glue asserts a number (TD-93).
 * The tests: Chrome with `stem-worker`, and Safari with each other crate, get no such variable.  Safari with `stem-worker` gets it.  Each test fails first.
-* Run `cargo run -p xtask -- e2e selftest --browser safari --weights /Users/lloyd/Downloads/bs_roformer_sw.f16.safetensors` on the release build, after `trunk build --release` in `app`.  Record its result in Surprises and in TD-93.
+* Run `cargo run -p xtask -- e2e selftest --browser safari --weights "$STEMYLA_PERF_WEIGHTS"` on the release build, after `trunk build --release` in `app`.  Record its result in Surprises and in TD-93.
 * Write the draft wgpu issue in `m2/wgpu-issue-subgroup-min-size.md`.  It names wgpu 30.0.1, `wgpu/src/backend/webgpu.rs` of the `trunk` branch (about line 884), Safari 27.2 on macOS, the value `undefined`, and the nearest issue [gfx-rs/wgpu#10882](https://github.com/gfx-rs/wgpu/issues/10882).  Do not post it.
 * Acceptance: the two GPU tests pass in a Safari `web-test`.  The new test fails for Chrome or another crate when the function gives the variable there.  Narrow TD-93 to the upstream fix.
 

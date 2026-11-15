@@ -69,6 +69,30 @@ fn old_session_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("old-session", "old-session", false);
 }
 
+/// Asserts that `e2e perf --base-dist <a folder with no index.html> --runs
+/// 4` fails, with "has no index.html", before a browser starts.
+#[test]
+fn a_comparison_with_no_base_page_fails() {
+    let dir = test_dir("perf-base-dist");
+    let empty = dir.join("no-base-page");
+    std::fs::create_dir_all(&empty).unwrap();
+    let empty = empty.to_str().unwrap().to_string();
+    let out = run_without_a_driver(&dir, "perf", &["--base-dist", &empty, "--runs", "4"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "perf --base-dist fails: {stderr}");
+    assert!(
+        stderr.contains("no-base-page has no index.html"),
+        "{stderr}"
+    );
+}
+
+/// Asserts that `e2e perf`, given a model file and no driver, reads the
+/// committed baselines and fails on the driver, not before it.
+#[test]
+fn perf_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("perf", "perf", true);
+}
+
 /// Finding 2-14 of review round 2 of M6: a `smoke` that does nothing
 /// fails this test.
 #[test]
@@ -161,9 +185,25 @@ fn flac_with_no_driver_fails_before_a_browser_starts() {
     fails_before_a_browser_starts("flac", "flac", false);
 }
 
+/// Finding 4-21 of review round 4 of M3: a `storage` that does nothing
+/// fails this test.
+#[test]
+fn storage_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("storage", "storage", false);
+}
+
+/// Finding 4-22 of review round 4 of M3: a `run` of `e2e decode` that does
+/// nothing fails this test.
+#[test]
+fn decode_with_no_driver_fails_before_a_browser_starts() {
+    fails_before_a_browser_starts("decode", "decode", false);
+}
+
 /// `xtask web-test` with an option it does not know fails before it builds
 /// or runs anything (the mutants of review round speed 2 of M8: a `run`
-/// that returns `Ok(())` would pass).
+/// that returns `Ok(())` would pass).  Asserts:
+/// * the process exits with code 1, the code of `web_test::main`;
+/// * stderr names the option.
 #[test]
 fn web_test_refuses_an_unknown_option() {
     let out = Command::new(env!("CARGO_BIN_EXE_xtask"))
@@ -171,7 +211,7 @@ fn web_test_refuses_an_unknown_option() {
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(!out.status.success(), "web-test fails: {stderr}");
+    assert_eq!(out.status.code(), Some(1), "web-test fails: {stderr}");
     assert!(
         stderr.contains("unknown option --bogus"),
         "web-test names the option: {stderr}"

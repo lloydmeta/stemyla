@@ -124,6 +124,9 @@ fn write_build(build: &Path, public_url: &str, id: &str, version: &str) {
         "decode-worker.js",
         "decode-worker_bg.wasm",
         "decode-worker_loader.js",
+        "write-worker.js",
+        "write-worker_bg.wasm",
+        "write-worker_loader.js",
     ] {
         std::fs::write(build.join(f), format!("{id} {version}")).unwrap();
     }
@@ -321,7 +324,7 @@ fn keeps_the_newest_three_builds() {
         assert_eq!(ls(&r, "gh-pages", "v/"), folders);
         assert_eq!(
             ls(&r, "gh-pages", "v/0123456789ab/").len(),
-            if n < KEPT_BUILDS { 10 } else { 0 },
+            if n < KEPT_BUILDS { 13 } else { 0 },
             "the oldest build is dropped only once three newer ones exist"
         );
         assert_eq!(ls(&r, "gh-pages", "."), [".nojekyll", "index.html", "v"]);
@@ -826,6 +829,15 @@ fn checks_the_build() {
             .unwrap_err()
             .to_string()
             .contains("decode-worker_bg.wasm")
+    );
+    std::fs::write(build.join("decode-worker_bg.wasm"), "x").unwrap();
+    std::fs::remove_file(build.join("write-worker_loader.js")).unwrap();
+    let missing = check_build(&build, &url).err().map(|e| e.to_string());
+    assert!(
+        missing
+            .as_deref()
+            .is_some_and(|e| e.contains("write-worker_loader.js")),
+        "the write worker's loader is needed: {missing:?}"
     );
     let _ = std::fs::remove_dir_all(&root);
 

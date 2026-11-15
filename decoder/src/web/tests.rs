@@ -84,13 +84,13 @@ export async function plant_folder(path) { await folder_at(path, true); }
 // Safari 27 writes a typed array view's whole buffer, not just the view
 // (MEM-5), and `bytes` is a view into the wasm memory.  So write a copy.
 // Copy before the first await: a growth of the wasm memory during an
-// await detaches the view.
+// await detaches the view.  A sync access handle writes in place, which
+// leaves no swap file in Safari (TD-103).
 export async function plant_at(path, bytes) {
   const copy = bytes.slice();
   const [d, n] = split_at(path);
-  const w = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createWritable();
-  await w.write(copy);
-  await w.close();
+  const h = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createSyncAccessHandle();
+  try { h.truncate(0); h.write(copy, { at: 0 }); h.flush(); } finally { h.close(); }
 }
 // The bytes of the file at `path`, or null if there is none.
 export async function read_back(path) {
@@ -174,6 +174,26 @@ export function stop_short_reads() {
   real_read = null;
 }
 export function decoder_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+// Counts the calls of `createWritable` (TD-103: Safari keeps the swap file
+// of each write stream that closes).
+let writables = null;
+let writable_real = null;
+export function start_writable_spy() {
+  if (writable_real) throw new Error("a spy is already on createWritable");
+  const proto = FileSystemFileHandle.prototype;
+  writable_real = proto.createWritable;
+  writables = 0;
+  proto.createWritable = function (...args) {
+    writables++;
+    return writable_real.apply(this, args);
+  };
+}
+// Restores `createWritable` and returns the count of its calls.
+export function stop_writable_spy() {
+  FileSystemFileHandle.prototype.createWritable = writable_real;
+  writable_real = null;
+  return writables;
+}
 export function stop_read_spies() {
   FileReaderSync.prototype.readAsArrayBuffer = real_reads[0];
   FileSystemSyncAccessHandle.prototype.read = real_reads[1];
@@ -195,6 +215,8 @@ extern "C" {
     fn start_short_reads();
     fn stop_short_reads();
     async fn decoder_sleep(ms: u32);
+    fn start_writable_spy();
+    fn stop_writable_spy() -> u32;
 }
 
 const SESSION: &str = "sessions/1792640000000";
@@ -242,6 +264,27 @@ fn logs() -> Vec<String> {
 async fn file(path: &str) -> Option<Vec<u8>> {
     let bytes = read_back(&format!("{SESSION}/{path}")).await;
     bytes.dyn_into::<Uint8Array>().ok().map(|b| b.to_vec())
+}
+
+/// TD-103: Safari keeps the swap file of each write stream that closes.
+/// So `plant_at` opens no write stream: a sync access handle writes each
+/// file in place.
+#[wasm_bindgen_test]
+async fn plant_helpers_open_no_write_stream() {
+    wipe().await;
+    start_writable_spy();
+    plant_at(&format!("{SESSION}/lloyd"), &[1, 2, 3]).await;
+    assert_eq!(stop_writable_spy(), 0, "write streams opened");
+}
+
+/// A shorter file that `plant_at` writes over a longer one keeps only
+/// its own bytes: the helper truncates the file first.
+#[wasm_bindgen_test]
+async fn plant_helpers_truncate_a_longer_file() {
+    wipe().await;
+    plant_at(&format!("{SESSION}/lloyd"), &[1; 8]).await;
+    plant_at(&format!("{SESSION}/lloyd"), &[2; 3]).await;
+    assert_eq!(file("lloyd").await, Some(vec![2; 3]));
 }
 
 /// A tone of `frames` frames, different for each `seed`.

@@ -41,7 +41,7 @@ fn main() -> Result<()> {
         "roformer-selftest" => roformer_cli::selftest_fixtures(&args[1..])?,
         "setup" => setup::run(&args[1..])?,
         "serve" => serve::run(&args[1..])?,
-        "web-test" => web_test::run(&args[1..])?,
+        "web-test" => std::process::exit(web_test::main(&args[1..])),
         "e2e" => e2e::run(&args[1..])?,
         "docs-check" => docs_check()?,
         "review" => std::process::exit(review::main(&args[1..])),

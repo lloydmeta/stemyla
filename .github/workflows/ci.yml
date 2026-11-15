@@ -67,7 +67,7 @@ jobs:
       # for wasm32.  roformer-gpu's wasm32-only code (mapped_floats) is
       # linted through stem-worker, which depends on it.  Its tests run
       # natively.
-      - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p stem-protocol -p engine --all-targets -- -D warnings
+      - run: cargo clippy --locked --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p write-worker -p stem-protocol -p engine --all-targets -- -D warnings
       # --workspace merges features across crates: xtask turns on synth's
       # files feature for every crate in the build.  These steps check each
       # crate without that merge (LAYER-1, decision 0004).
@@ -160,8 +160,8 @@ jobs:
           version: ${{ env.TRUNK_VERSION }}
           sha256: ${{ env.TRUNK_SHA256 }}
       # Builds the app, the stem-worker (which compiles roformer-gpu
-      # for wasm32) and the decode-worker, the same build xtask publish
-      # performs.
+      # for wasm32), the decode-worker and the write-worker, the same build
+      # xtask publish performs.
       - run: trunk build --release
         working-directory: app
 
@@ -186,8 +186,8 @@ jobs:
     # docs/plans/active/tech-debt-rungs.md) took 19.7 minutes for the steps
     # other than `e2e save`, with `web-test` 12.0, and 3.6 for `e2e save`.
     # The limit is the limit of `e2e save` of 60, 20 for the other steps,
-    # and 5 to spare.  So a run of `e2e save` that waits in vain ends on its
-    # own check.  Each test binary of `web-test`
+    # and 5 to spare.  The step limit ends `e2e save` before its own limit
+    # (TD-100).  Each wait has its own end.  Each test binary of `web-test`
     # may take 10 minutes (xtask/src/web_test.rs), so a slow `web-test` uses
     # the spare minutes first.  A hung browser must not hold the runner for
     # GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`
@@ -255,19 +255,22 @@ jobs:
   macos:
     name: browser tests (macOS)
     runs-on: macos-latest
-    # On the maintainer's Mac (2026-11-11), the Safari `web-test` took
-    # 5 minutes, and the Safari scenarios 8.  The setup builds Trunk and
-    # wasm-bindgen-cli with `cargo install`, and the crates for wasm32,
-    # which took about 15 minutes on the Linux jobs with no cache.  In run
-    # 42952206488 (2026-11-11), with no cache, the job took 46 minutes.  The
-    # setup took 13.8, the Safari `web-test` 14.2, and the two `e2e save`
-    # steps 4.3 and 4.8.  So the steps other than `e2e save` took 37.0.
-    # Each of the two `e2e save` steps, in Safari and in Chrome, may take
-    # its limit of 60 minutes.  So the limit is 40 for the setup and the
-    # other steps, 60 for each save, and 20 to spare.  A hung browser must not hold the
-    # runner for GitHub's 6 h default.  `the_ci_job_limit_holds_its_save_steps`
-    # (xtask/src/e2e/save.rs) checks that the limit holds the save steps.
-    timeout-minutes: 180
+    # The setup builds Trunk and wasm-bindgen-cli with `cargo install`,
+    # and the crates for wasm32.  In run 43108510738 (2026-11-11), with no
+    # cache, the job took 50.9 minutes.  The setup took 17.0, the Safari
+    # `web-test` 15.6, the AAC step 0.5, and the two `e2e save` steps 4.7
+    # and 5.2.  So the other steps took 24.9 minutes.  That is the longest
+    # of the macOS jobs from 2026-11-11 to 2026-11-12.  The limit holds:
+    # * the two `e2e save` steps at their limits: 120 minutes;
+    # * the two retry steps (TD-98): 3 attempts of 30 and of 15 minutes,
+    #   and a wait of 10 s after each failed attempt: 136 minutes;
+    # * 25 minutes for the other steps: the measured 24.9, rounded up.
+    # That is 281 minutes.  The 4 spare minutes cover the rounding of each
+    # measured time and the action's own overhead.  A hung browser must not hold
+    # the runner for GitHub's 6 h default.
+    # `the_ci_job_limit_holds_its_save_steps` (xtask/src/e2e/save.rs)
+    # checks that the limit holds the save and retry steps.
+    timeout-minutes: 285
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
@@ -283,7 +286,25 @@ jobs:
         run: cargo run --locked -p xtask -- setup wasm32 trunk wasm-bindgen-cli
       - name: Turn on Safari's WebDriver
         run: sudo safaridriver --enable
-      - run: cargo run --locked -p xtask -- web-test --browser safari
+      # TD-98: on the macOS runner, `wasm-bindgen-test-runner` sometimes
+      # waits its 600 s limit for a test page that never reports, in Safari
+      # and in Chrome.  `web-test` then exits with 75 when each failed crate
+      # failed only by that hang (`exit_code` in xtask/src/web_test.rs).
+      # Each other failure exits with 1, and the step fails at once.  So
+      # the action runs each `web-test` step again only on exit code 75, up
+      # to 3 attempts.  Each time it runs a step again, it shows a warning.
+      # An attempt that reaches `timeout_minutes` is not run again.  With
+      # no hang, an attempt took 15.6 minutes at most (run 43108510738,
+      # with no cache).  A hang adds the runner's limit of 10 minutes.  So
+      # 30 minutes hold an attempt with one hang (25.6), and 4.4 to spare.
+      - name: The Safari web-test, run again only after the runner's hang (TD-98)
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          command: cargo run --locked -p xtask -- web-test --browser safari
+          max_attempts: 3
+          timeout_minutes: 30
+          retry_on_exit_code: 75
+          warning_on_retry: true
       - run: trunk build --release
         working-directory: app
       - run: cargo run --locked -p xtask -- e2e smoke --browser safari
@@ -299,8 +320,19 @@ jobs:
       # Chrome on macOS has an AAC encoder, and Chrome on Linux has none
       # (TD-92).  STEMYLA_REQUIRE=aac makes the test fail, not skip, with
       # no encoder.  Only this step sets it.
-      - name: The real AAC encode, in Chrome
-        run: cargo run --locked -p xtask -- web-test --browser chrome a_real_aac_decodes_to_the_source
+      # Run again only after the runner's hang, as the Safari web-test is
+      # (TD-98).  With no hang, an attempt took 1.7 minutes at most (run
+      # 42991255256).  A hang adds the runner's limit of 10 minutes.  So 15
+      # minutes hold an attempt with one hang (11.7), and 3.3 to spare.  An
+      # attempt with a hang took 10.5 (run 43229036261, run attempt 2).
+      - name: The real AAC encode, in Chrome, run again only after the runner's hang (TD-98)
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          command: cargo run --locked -p xtask -- web-test --browser chrome a_real_aac_decodes_to_the_source
+          max_attempts: 3
+          timeout_minutes: 15
+          retry_on_exit_code: 75
+          warning_on_retry: true
         env:
           STEMYLA_REQUIRE: aac
       - run: cargo run --locked -p xtask -- e2e save --browser chrome

@@ -1,6 +1,6 @@
 # Third-party software
 
-The web app (the `app`, `stem-worker` and `decode-worker` WebAssembly modules) is built from the Rust crates below.  Every one is under a permissive licence or, for some, a choice of licences including a permissive one.  The workspace crate `m4a`, which `stem-worker` takes, is Apache-2.0 only (decision 0029).  Notes on the ones that need attention:
+The web app (the `app`, `stem-worker`, `decode-worker` and `write-worker` WebAssembly modules) is built from the Rust crates below.  Every one is under a permissive licence or, for some, a choice of licences including a permissive one.  The workspace crate `m4a`, which `stem-worker` takes, is Apache-2.0 only (decision 0029).  Notes on the ones that need attention:
 
 * Symphonia (`symphonia*`, MPL-2.0) decodes WAV, MP3, FLAC, M4A (AAC-LC and ALAC), raw AAC (ADTS) and AIFF.  Its ADPCM decoder decodes the IMA ADPCM of AIFC (`ima4`), and the IMA and Microsoft ADPCM of WAV.  MPL-2.0 is file-level copyleft; it is used unmodified, and its source is at https://github.com/pdeljanov/Symphonia.
 * `epaint_default_fonts` carries egui's bundled fonts: Ubuntu-Light (Ubuntu Font Licence 1.0), Hack and the emoji icon font (MIT), Noto Emoji (OFL-1.1).  Their licence texts are in that crate's `fonts` folder.
@@ -15,7 +15,7 @@ The separation model's weights are not part of this repository or of the publish
 Regenerate the table with:
 
 ```bash
-cargo tree -p app -p stem-worker -p decode-worker --target wasm32-unknown-unknown -e normal --prefix none -f "{p}|{l}|{r}"
+cargo tree -p app -p stem-worker -p decode-worker -p write-worker --target wasm32-unknown-unknown -e normal --prefix none -f "{p}|{l}|{r}"
 ```
 
 The test `third_party_lists_what_ships` compares the table with this command's output.
@@ -179,7 +179,7 @@ These build only the browser tests (`cargo run -p xtask -- web-test`) and are no
 Regenerate the table with (the rows not in the table above):
 
 ```bash
-cargo tree -p app -p stem-worker -p decode-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f "{p}|{l}|{r}"
+cargo tree -p app -p stem-worker -p decode-worker -p write-worker --target wasm32-unknown-unknown -e normal,dev --prefix none -f "{p}|{l}|{r}"
 ```
 
 The test `third_party_lists_what_ships` compares the table with this command's output.

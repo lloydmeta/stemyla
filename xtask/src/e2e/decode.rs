@@ -361,7 +361,7 @@ fn drop_and_open(p: &mut Page, files: &[(&str, &str)], what: &str) -> Result<()>
         .collect();
     let from = p.mark();
     p.drop_files(&drop)?;
-    let kept = p.wait_for(from, 120, |l| {
+    let kept = p.wait_for(from, 120, "the song to be kept in browser storage", |l| {
         holds_or_error(l, "song kept in browser storage as session")
     })?;
     p.check(
@@ -397,7 +397,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         &["console.js"],
     )?;
     let mut p = Page::open(o, base, &[], "index.html")?;
-    let ready = p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    let ready = p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     p.check(ready.is_some(), "the app started");
 
     // A 44.1 kHz WAV of one source: its samples in mix.f32, bit for bit.
@@ -480,7 +480,9 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     // A reload restores the last song with no decode.
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, 120, |l| holds_or_error(l, "Restored \""))?;
+    let restored = p.wait_for(from, 120, "the reload to restore the last song", |l| {
+        holds_or_error(l, "Restored \"")
+    })?;
     p.check(restored.is_some(), "the reload restores the last song");
     p.idle(1.0)?;
     let checks = stored_open_checks(&p.log[from..]);
@@ -491,7 +493,12 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     in_page(&mut p, PLANT_M4, json!(["1792640009999"]), 60)?;
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, 120, |l| holds_or_error(l, "Restored \"m4\""))?;
+    let restored = p.wait_for(
+        from,
+        120,
+        "the reload to restore the session of the M4 layout",
+        |l| holds_or_error(l, "Restored \"m4\""),
+    )?;
     p.check(
         restored.is_some(),
         "the reload restores the session of the M4 layout",

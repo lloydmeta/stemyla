@@ -2,7 +2,8 @@
 //! for both sides.  On the wire each is a plain JS object whose `type`
 //! names it; the e2e scenarios in `xtask/src/e2e.rs` also post requests by
 //! hand, so the format stays as it is.  The messages between the page and
-//! its decode worker are in [`decode`].
+//! its decode worker are in [`decode`], and those between the page and its
+//! write worker in [`write`].
 //!
 //! Requests ([`Request`], page to worker), each with the page's
 //! [`Settings`]:
@@ -97,6 +98,7 @@ use wasm_bindgen::{JsCast, JsValue};
 use web_sys::Blob;
 
 pub mod decode;
+pub mod write;
 
 /// The config of the WebCodecs `AudioEncoder` of an AAC save, without its
 /// rate: the codec, the channels, the bit rate and the bit rate mode.  The

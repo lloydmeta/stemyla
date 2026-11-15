@@ -126,7 +126,7 @@ How a new test fails first on an assert:
 
 No step changes `CLAUDE.md` or `.claude/**`, by the team leader's reading on 2026-11-10.  The `m4a` line of the Layout still holds, and the crate lists of `.claude/rules/` already have `m4a`.  If a step needs such a change, the implementer stops and tells the team leader, who gives the orchestrator a step checkpoint.
 
-The browser runs on this Mac: `CHROMEDRIVER=/Users/lloyd/.local/chromedriver-157/chromedriver-mac-arm64/chromedriver`, and `--browser chrome` for `web-test` and `e2e`.  `web-test` runs Safari by default on macOS, so always pass `--browser chrome`.  End each stale WebDriver session before a retry.  Never quit the maintainer's Safari.
+The browser runs on this Mac: `$CHROMEDRIVER`, the driver of Chrome for Testing 157 (mac-arm64), and `--browser chrome` for `web-test` and `e2e`.  `web-test` runs Safari by default on macOS, so always pass `--browser chrome`.  End each stale WebDriver session before a retry.  Never quit the maintainer's Safari.
 
 Before Step 1, measure the wasm bundle at `2193806` with `(cd app && trunk build --release)`.  Record the three sizes of `app/dist/*_bg.wasm` in Surprises.
 

@@ -10,7 +10,9 @@ use roformer::separate::{analyse, apply_masks};
 use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::net::{Job, Net, Step};
-use roformer_gpu::{Gpu, WeightFormat};
+use roformer_gpu::{
+    Gpu, STEPS_IN_FLIGHT, Signal, StepClock, Steps, WeightFormat, Window, step_check,
+};
 use stem_protocol::{
     self as protocol, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
 };
@@ -38,11 +40,6 @@ const MODEL_URL: &str =
 /// SHA-256 of that file as Hugging Face lists it.
 const MODEL_SHA256: &str = "6c8303a829575d03f21562ea185be7b6b23e922052883dec1b9518ca00a920fc";
 const DOWNLOAD_NAME: &str = "download.part";
-
-/// Default upper bound on any per-step intermediate, in f32 elements
-/// (32 MiB): one band per time-attention step at full chunk length (about
-/// 4 GFLOP), so each GPU step stays short.  `?max_elems=` overrides it.
-const BUDGET: usize = 8 << 20;
 
 #[wasm_bindgen(inline_js = r#"
 export async function cache_get(name) {
@@ -92,14 +89,26 @@ export async function opfs_has(name) {
 function whole(bytes) {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
 }
+// Writes the file of `fh` from its start, through a sync access handle,
+// with no write stream: Safari keeps the swap file of each write stream
+// that closes (TD-103).  `body` gets `put`, which appends whole arrays
+// only (MEM-5).  The handle closes on each path.  A failure can leave a
+// partial file; each caller removes it.
 async function write_file(fh, body) {
-  const w = await fh.createWritable();
+  const h = await fh.createSyncAccessHandle();
   try {
-    await body(w);
-    await w.close();
-  } catch (e) {
-    try { await w.abort(); } catch (_) {}
-    throw e;
+    await h.truncate(0);
+    let at = 0;
+    await body(async (bytes) => {
+      // `write` returns the bytes written.  Old browsers return a
+      // promise, so it is awaited, as `truncate`, `flush` and `close` are.
+      const n = await h.write(bytes, { at });
+      if (n !== bytes.byteLength) throw new Error(`wrote ${n} of ${bytes.byteLength} bytes`);
+      at += n;
+    });
+    await h.flush();
+  } finally {
+    await h.close();
   }
 }
 export async function opfs_write(name, src) {
@@ -108,10 +117,14 @@ export async function opfs_write(name, src) {
     const fh = await root.getFileHandle(name, { create: true });
     const slice = 8 << 20;
     const size = src instanceof Blob ? src.size : src.length;
-    await write_file(fh, async (w) => {
+    // Each slice of a `Blob` is read into its own buffer, so no copy of
+    // the whole model is made (MEM-1).
+    await write_file(fh, async (put) => {
       for (let at = 0; at < size; at += slice) {
         const end = Math.min(at + slice, size);
-        await w.write(src instanceof Blob ? src.slice(at, end) : whole(src.subarray(at, end)));
+        await put(src instanceof Blob
+          ? new Uint8Array(new FileReaderSync().readAsArrayBuffer(src.slice(at, end)))
+          : whole(src.subarray(at, end)));
       }
     });
     return true;
@@ -141,6 +154,12 @@ export async function gpu_info(pref) {
   const i = a.info || {};
   return [i.vendor, i.architecture, i.description].filter((s) => s).join(" ") || "unknown adapter";
 }
+export async function gpu_fallback(pref) {
+  if (!navigator.gpu) return "unknown";
+  const a = await navigator.gpu.requestAdapter({ powerPreference: pref });
+  const f = a && a.info ? a.info.isFallbackAdapter : undefined;
+  return f === true ? "yes" : f === false ? "no" : "unknown";
+}
 export async function blob_bytes(blob) {
   return new Uint8Array(await blob.arrayBuffer());
 }
@@ -168,12 +187,12 @@ async function download_with(url, name, progress, signal, arm, follow) {
   const reader = r.body.getReader();
   let done = 0, last = 0;
   try {
-    await write_file(fh, async (w) => {
+    await write_file(fh, async (put) => {
       for (;;) {
         const { value, done: end } = await reader.read();
         if (end) break;
         arm();
-        await w.write(whole(value));
+        await put(whole(value));
         done += value.length;
         if (done - last >= 4e6) { progress(done, total); last = done; }
       }
@@ -234,6 +253,10 @@ extern "C" {
     /// it is fully written.
     async fn cache_put(name: &str, bytes: &JsValue) -> JsValue;
     async fn gpu_info(pref: &str) -> JsValue;
+    /// `"yes"`, `"no"` or `"unknown"`: the adapter's
+    /// `GPUAdapterInfo.isFallbackAdapter`, or `"unknown"` where the browser
+    /// does not give it (GPU-3).
+    async fn gpu_fallback(pref: &str) -> JsValue;
     #[wasm_bindgen(catch)]
     async fn blob_bytes(blob: &JsValue) -> Result<JsValue, JsValue>;
     async fn fetch_bytes(url: &str) -> JsValue;
@@ -344,10 +367,15 @@ pub fn start() {
     send(Reply::Alive);
 }
 
-/// Adapter description and the limits the kernels are written to.
+/// Adapter description, whether it is a fallback adapter (GPU-3), and the
+/// limits the kernels are written to.
 async fn gpu_text(gpu: &Gpu) -> String {
     let pref = STATE.with_borrow(|s| s.power);
     let name = gpu_info(pref).await.as_string().unwrap_or_default();
+    let fallback = gpu_fallback(pref)
+        .await
+        .as_string()
+        .unwrap_or_else(|| "unknown".into());
     let l = gpu.limits();
     let usable: Vec<&str> = roformer_gpu::TILES
         .iter()
@@ -357,13 +385,11 @@ async fn gpu_text(gpu: &Gpu) -> String {
         .collect();
     let policy = gpu.policy.get().name();
     let attn = gpu.attention.get().name();
-    let fused = if gpu.fused_ok.get() {
-        "checked OK"
-    } else {
-        "not used"
-    };
+    let checked = |ok: bool| if ok { "checked OK" } else { "not used" };
+    let fused = checked(gpu.fused_ok.get());
+    let vfused = checked(gpu.fused_ok.get() && gpu.vfused_ok.get());
     format!(
-        "{name}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused attention {fused}",
+        "{name}, fallback adapter {fallback}; own WGSL kernels at WebGPU default limits: invocations/workgroup {}, workgroup memory {} KiB, storage binding {} MiB; matmul {policy}, checked OK: {}; attention {attn}, fused attention {fused}, vfused {vfused}",
         l.max_compute_invocations_per_workgroup,
         l.max_compute_workgroup_storage_size / 1024,
         l.max_storage_buffer_binding_size >> 20,
@@ -473,7 +499,7 @@ async fn ensure_kernels(g: &Gpu, s: &Settings, format: WeightFormat) {
     let source = if set(&s.mm) && set(&s.attn) {
         "from the URL"
     } else {
-        let chosen = choose_kernels(g, format).await;
+        let chosen = choose_kernels(g, format, budget(s)).await;
         match (chosen, set(&s.mm) || set(&s.attn)) {
             (Chosen::Stored, false) => "stored",
             (Chosen::Calibrated, false) => "calibrated",
@@ -494,7 +520,7 @@ async fn ensure_kernels(g: &Gpu, s: &Settings, format: WeightFormat) {
 }
 
 fn budget(s: &Settings) -> usize {
-    s.max_elems.unwrap_or(BUDGET)
+    s.max_elems.unwrap_or(roformer_gpu::net::BUDGET)
 }
 
 async fn handle(msg: JsValue) {
@@ -996,15 +1022,31 @@ fn loaded() -> Result<(Rc<Gpu>, Rc<Net>), String> {
 }
 
 /// Keeps the GPU from being monopolised.  Every step is one short command
-/// buffer (one sub-batch of one transformer, a few GFLOP), and the worker
-/// waits for the GPU to finish it before submitting the next, so other
-/// work, the screen included, gets the GPU in between.  If one step takes
-/// longer than the limit (default 5 s, `?step_limit=` in the page URL), the
-/// run stops instead of risking the operating system's GPU watchdog.  The
-/// first step of each kind may take up to 60 s, since it also waits for
-/// the browser to compile that step's kernels.  Any WebGPU error also
-/// stops the run.
+/// buffer (one sub-batch of one transformer, a few GFLOP).  At most
+/// [`STEPS_IN_FLIGHT`] (2) steps are in flight: the worker submits a step,
+/// takes its signal at once, and awaits the end of the step before it.  So
+/// the GPU starts the next step without a wait for the worker, and other
+/// work, the screen included, waits behind at most 2 steps.  Before a mask
+/// is read, each step in flight is awaited ([`Pace::drain`]), so the read
+/// waits for no later step.
+///
+/// A step's time runs from the later of its submission and the end of the
+/// step before, to its end, as the worker sees them ([`StepClock`]).  If
+/// one step takes longer than the limit (default 5 s, `?step_limit=` in
+/// the page URL), the run stops instead of risking the operating system's
+/// GPU watchdog.  The first step of each kind may take up to 60 s, since
+/// it also waits for the browser to compile that step's kernels.  Any
+/// WebGPU error also stops the run.  The errors and the profile are taken
+/// after each awaited end.  With `?profile=1`, the profile's read of the
+/// newer step waits for that step too, so a profile run has less overlap.
 struct Pace {
+    /// The steps in flight, oldest first.
+    flight: Window<(Submitted, Signal)>,
+    checks: Checks,
+}
+
+/// What `Pace` checks and adds up at the end of each step.
+struct Checks {
     limit: f64,
     seen: HashSet<&'static str>,
     worst: f64,
@@ -1016,29 +1058,60 @@ struct Pace {
     secs: f64,
     /// Wall time of every step, the first of each kind included.
     wall: f64,
+    clock: StepClock,
 }
 
-impl Pace {
-    fn new(s: &Settings) -> Self {
-        let limit = s.step_limit.unwrap_or(5.0);
-        Self {
-            limit,
-            seen: HashSet::new(),
-            worst: 0.0,
-            worst_what: String::new(),
-            steps: 0,
-            flops: 0.0,
-            secs: 0.0,
-            wall: 0.0,
-        }
+/// A step that the worker submitted, and when.
+struct Submitted {
+    step: Step,
+    at: f64,
+}
+
+/// The steps of `job` on `gpu`, for [`Window::step`], with the checks of
+/// `checks` at each end.
+struct OnGpu<'p, 'j> {
+    gpu: &'p Gpu,
+    job: &'p Job<'j>,
+    checks: &'p mut Checks,
+}
+
+impl Steps for OnGpu<'_, '_> {
+    type Step = Step;
+    type Submitted = Submitted;
+    type Signal = Signal;
+    type Error = String;
+
+    fn submit(&mut self, step: Step) -> Submitted {
+        let at = now_s();
+        self.job.run(&step);
+        Submitted { step, at }
     }
 
-    /// Submits `step`, waits for the GPU, and checks time and errors.
-    async fn run(&mut self, gpu: &Gpu, job: &Job<'_>, step: &Step) -> Result<(), String> {
-        let t0 = now_s();
-        job.run(step);
-        gpu.done().await;
-        let dt = now_s() - t0;
+    fn signal(&mut self) -> Signal {
+        self.gpu.done_signal()
+    }
+
+    async fn end(&mut self, s: Submitted, signal: Signal, newer: bool) -> Result<(), String> {
+        signal.wait().await;
+        let ended = now_s();
+        self.checks.ended(self.gpu, self.job, s, ended, newer).await
+    }
+}
+
+impl Checks {
+    /// Checks the time of the step `s`, whose end the worker saw at
+    /// `ended`, and the errors, with `step_check`.  `newer` is true when a
+    /// newer step is still in flight, so the errors can come from it too.
+    async fn ended(
+        &mut self,
+        gpu: &Gpu,
+        job: &Job<'_>,
+        s: Submitted,
+        ended: f64,
+        newer: bool,
+    ) -> Result<(), String> {
+        let dt = self.clock.ended(s.at, ended);
+        let step = &s.step;
         gpu.collect_profile().await?;
         let first = self.seen.insert(step.kind());
         self.steps += 1;
@@ -1051,32 +1124,52 @@ impl Pace {
             self.worst = dt;
             self.worst_what = step.to_string();
         }
-        let errors = gpu.take_errors();
-        if !errors.is_empty() {
-            return Err(format!(
-                "the GPU rejected {} operation(s) during {step}, so the result would be wrong; first: {}",
-                errors.len(),
-                errors[0]
-            ));
+        step_check(step, newer, &gpu.take_errors(), dt, self.limit, first)
+    }
+}
+
+impl Pace {
+    fn new(s: &Settings) -> Self {
+        let limit = s.step_limit.unwrap_or(5.0);
+        Self {
+            flight: Window::new(STEPS_IN_FLIGHT),
+            checks: Checks {
+                limit,
+                seen: HashSet::new(),
+                worst: 0.0,
+                worst_what: String::new(),
+                steps: 0,
+                flops: 0.0,
+                secs: 0.0,
+                wall: 0.0,
+                clock: StepClock::new(),
+            },
         }
-        let limit = if first {
-            self.limit.max(60.0)
-        } else {
-            self.limit
-        };
-        if dt > limit {
-            return Err(format!(
-                "one GPU step ({step}) took {dt:.1} s, over the {limit:.0} s limit; stopped so the computer stays responsive"
-            ));
-        }
-        Ok(())
     }
 
+    /// Submits `step` and takes its signal.  When [`STEPS_IN_FLIGHT`]
+    /// steps are in flight, it awaits the oldest, and checks its time and
+    /// the errors (`Window::step`, the order of `roformer_gpu::pace_order`).
+    async fn run(&mut self, gpu: &Gpu, job: &Job<'_>, step: &Step) -> Result<(), String> {
+        let checks = &mut self.checks;
+        self.flight
+            .step(&mut OnGpu { gpu, job, checks }, *step)
+            .await
+    }
+
+    /// Awaits each step in flight, with its checks.  A read of the GPU
+    /// after it waits for no later step.
+    async fn drain(&mut self, gpu: &Gpu, job: &Job<'_>) -> Result<(), String> {
+        let checks = &mut self.checks;
+        self.flight.drain(&mut OnGpu { gpu, job, checks }).await
+    }
+
+    /// Runs `steps`, then awaits each step in flight.
     async fn all(&mut self, gpu: &Gpu, job: &Job<'_>, steps: &[Step]) -> Result<(), String> {
         for s in steps {
             self.run(gpu, job, s).await?;
         }
-        Ok(())
+        self.drain(gpu, job).await
     }
 }
 
@@ -1147,6 +1240,8 @@ async fn run(
         job: None,
         total,
         debug: s.debug,
+        index: 0,
+        started: t0,
     };
     separate_mix(mix, session, chunk, overlap, network, t0).await
 }
@@ -1199,12 +1294,55 @@ async fn separate_mix<N: Network>(
 /// The network that separates one chunk at a time: the GPU's in a real
 /// separation, a fake one in the tests.
 trait Network {
-    /// The stems of chunk `index`: one stereo pair for each of `STEMS`.
-    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String>;
+    /// Separates chunk `index`, whose input `x` it takes, and gives each
+    /// stem to `each` as it is made: its index in `STEMS` and its stereo
+    /// pair.  Each stem comes once.
+    async fn stems(
+        &mut self,
+        index: usize,
+        x: Stereo,
+        each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String>;
     /// "so far ..." for the log line after each chunk.
     fn so_far(&self) -> String;
     /// Logs a summary after the song.
     fn finish(&self);
+}
+
+/// The GPU half of a chunk's separation: the network, from a chunk's
+/// features to each stem's mask.  [`GpuNetwork`] runs it on the GPU.  A
+/// test runs a fake, so it measures the CPU half's memory with no GPU.
+trait GpuHalf {
+    /// Uploads the features `[T, FEATURES]` of a chunk.
+    fn upload(&mut self, features: &[f32]);
+    /// Runs the network to the mask of `stem`, and gives that mask
+    /// `[T, FEATURES]`.  The stems come in order, from 0.
+    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String>;
+}
+
+/// The CPU half of one chunk: the STFT, the upload through `gpu`, then
+/// each stem's mask applied to the spectra and inverted.  The chunk's
+/// input drops after the STFT.  Each stem goes to `each` as it is made,
+/// so the worker holds one stem at a time.
+async fn chunk_stems(
+    gpu: &mut impl GpuHalf,
+    x: Stereo,
+    mut each: impl FnMut(usize, Stereo),
+) -> Result<(), String> {
+    let (spec, features) = analyse(&x);
+    // The spectra hold the chunk now.
+    drop(x);
+    gpu.upload(&features);
+    // The GPU holds the input now; the spectra alone make the stems.
+    drop(features);
+    for stem in 0..STEMS.len() {
+        let mask = gpu.mask(stem).await?;
+        let stereo = apply_masks(&spec, &mask);
+        // The mask drops before the stem goes on.
+        drop(mask);
+        each(stem, stereo);
+    }
+    Ok(())
 }
 
 /// BS-RoFormer SW on the GPU, one paced step at a time.
@@ -1217,16 +1355,18 @@ struct GpuNetwork<'a> {
     /// Chunks in the song.
     total: usize,
     debug: bool,
+    /// The index and the start time of the chunk in progress, for the
+    /// debug notes.
+    index: usize,
+    started: f64,
 }
 
-impl Network for GpuNetwork<'_> {
-    async fn stems(&mut self, index: usize, x: &Stereo) -> Result<Vec<Stereo>, String> {
-        let tc = now_s();
-        let (spec, feats) = analyse(x);
-        let frames = feats.len() / FEATURES;
+impl GpuHalf for GpuNetwork<'_> {
+    fn upload(&mut self, features: &[f32]) {
+        let frames = features.len() / FEATURES;
         trace(
             self.debug,
-            &format!("chunk {index}: stft {:.2} s", now_s() - tc),
+            &format!("chunk {}: stft {:.2} s", self.index, now_s() - self.started),
         );
         if self.job.as_ref().is_none_or(|j| j.frames != frames) {
             // Freed before the next is made: two chunks' buffers (about
@@ -1239,22 +1379,49 @@ impl Network for GpuNetwork<'_> {
                 memory_text(self.net, self.job.as_ref())
             ));
         }
-        let j = self.job.as_ref().expect("job");
-        j.set_input(&feats);
-        // The GPU holds the input now; the spectra alone make the stems.
-        drop(feats);
-        let mut out = Vec::with_capacity(STEMS.len());
-        for step in j.steps() {
+        self.job.as_ref().expect("job").set_input(features);
+    }
+
+    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String> {
+        let j = self.job.as_ref().expect("a chunk was uploaded");
+        // The first stem also runs the steps that every stem shares.  So the
+        // stems in order run `Job::steps` in order.
+        let shared = if stem == 0 {
+            j.shared_steps()
+        } else {
+            Vec::new()
+        };
+        for step in shared.into_iter().chain(j.mask_steps(stem)) {
             self.pace.run(self.gpu, j, &step).await?;
-            if let Step::Mask { last: true, .. } = step {
-                out.push(apply_masks(&spec, &j.mask().await?));
-                trace(
-                    self.debug,
-                    &format!("chunk {index}: mask {} at {:.2} s", out.len(), now_s() - tc),
-                );
-            }
         }
-        Ok(out)
+        // Each step in flight ends, with its checks, before the mask is
+        // read.  So a GPU error of the last mask step stops the run before
+        // the mask is read.  The read waits for no later step.
+        self.pace.drain(self.gpu, j).await?;
+        let mask = j.mask().await?;
+        trace(
+            self.debug,
+            &format!(
+                "chunk {}: mask {} at {:.2} s",
+                self.index,
+                stem + 1,
+                now_s() - self.started
+            ),
+        );
+        Ok(mask)
+    }
+}
+
+impl Network for GpuNetwork<'_> {
+    async fn stems(
+        &mut self,
+        index: usize,
+        x: Stereo,
+        each: impl FnMut(usize, Stereo),
+    ) -> Result<(), String> {
+        self.index = index;
+        self.started = now_s();
+        chunk_stems(self, x, each).await
     }
 
     fn so_far(&self) -> String {
@@ -1384,15 +1551,17 @@ async fn separate_chunks<S: MixSource<Error: Display>>(
     });
     while let Some(x) = d.next_input().map_err(|e| Stop::Storage(e.to_string()))? {
         let tc = now_s();
-        let out = net.stems(d.chunk_index(), &x).await.map_err(Stop::Failed)?;
-        d.accept(&out);
-        drop(out);
+        let index = d.chunk_index();
+        net.stems(index, x, |stem, stereo| d.accept_stem(stem, &stereo))
+            .await
+            .map_err(Stop::Failed)?;
+        d.end_chunk();
         if let Some(seg) = d.take_ready() {
             emit(seg, song_len, writer.as_deref_mut()).await?;
         }
         let done = d.chunk_index().min(total) as u32;
         log(&format!(
-            "chunk {done}/{total}: {:.1} s; {}",
+            "chunk {done}/{total}: {:.2} s; {}",
             now_s() - tc,
             net.so_far()
         ));
@@ -1534,6 +1703,7 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
     let mut pace = Pace::new(s);
     job.set_input(&feats);
     pace.run(&gpu, &job, &Step::Split).await?;
+    pace.drain(&gpu, &job).await?;
     let (_, want) = tensor_f32(&st, "band_split")?;
     report(&mut worst, "band split", snr(&job.hidden().await?, &want));
     for (i, input) in [
@@ -1556,6 +1726,7 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
     let (_, want) = tensor_f32(&st, "final_norm")?;
     job.set_hidden(&x);
     pace.run(&gpu, &job, &Step::FinalNorm).await?;
+    pace.drain(&gpu, &job).await?;
     report(&mut worst, "final norm", snr(&job.normed().await?, &want));
     let (_, x) = tensor_f32(&st, "final_norm")?;
     for (s, name) in STEMS.iter().enumerate() {
@@ -1575,6 +1746,7 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
         pace.all(&gpu, &job, &job.layer_steps(i)).await?;
     }
     pace.run(&gpu, &job, &Step::FinalNorm).await?;
+    pace.drain(&gpu, &job).await?;
     report(
         &mut worst,
         "all 12 layers chained",
@@ -1583,8 +1755,8 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
     log(&format!(
         "selftest: stages took {:.1} s; longest GPU step {:.2} s ({})",
         now_s() - t0,
-        pace.worst,
-        pace.worst_what
+        pace.checks.worst,
+        pace.checks.worst_what
     ));
     drop(job);
 
@@ -1622,6 +1794,7 @@ async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {
             for step in job.steps() {
                 pace.run(&gpu, &job, &step).await?;
                 if let Step::Mask { last: true, .. } = step {
+                    pace.drain(&gpu, &job).await?;
                     let out = apply_masks(&spec, &job.mask().await?);
                     let w = &want[s * 2 * n..(s + 1) * 2 * n];
                     let got: Vec<f32> = out[0].iter().chain(out[1].iter()).copied().collect();
@@ -1677,8 +1850,8 @@ fn log_profile(gpu: &Gpu, pace: &Pace) {
     }
     log(&format!(
         "profile: GPU busy {busy:.2} s of {:.2} s of step wall time ({:.0}% waiting, submitting or between dispatches); one pass per dispatch while profiling",
-        pace.wall,
-        100.0 * (1.0 - busy / pace.wall.max(1e-9))
+        pace.checks.wall,
+        100.0 * (1.0 - busy / pace.checks.wall.max(1e-9))
     ));
 }
 
@@ -1690,14 +1863,15 @@ fn report(worst: &mut f64, name: &str, db: f64) {
 impl Pace {
     /// "N GPU steps, longest ..., about X TFLOP/s" for log lines.
     fn summary(&self) -> String {
-        let rate = if self.secs > 0.0 {
-            self.flops / self.secs / 1e12
+        let c = &self.checks;
+        let rate = if c.secs > 0.0 {
+            c.flops / c.secs / 1e12
         } else {
             0.0
         };
         format!(
             "{} GPU steps, longest {:.2} s ({}), {rate:.2} TFLOP/s on average (steps after the first of each kind)",
-            self.steps, self.worst, self.worst_what
+            c.steps, c.worst, c.worst_what
         )
     }
 }
@@ -1711,8 +1885,9 @@ fn apply_policy(gpu: &Gpu, s: &Settings) {
 }
 
 /// `?attn=` in the page URL: `auto` (this GPU's choice), `split`,
-/// `fused`, or `time` / `freq` for fused attention on that axis only.
-/// Fused attention is used only if it passed the start-up check.
+/// `fused`, `time` / `freq` for fused attention on that axis only, or
+/// `vfused`.  A policy is used only if its kernels passed the start-up
+/// check (`AttentionPolicy::usable`).
 fn apply_attention(gpu: &Gpu, s: &Settings) {
     let Some(name) = s.attn.as_deref() else {
         return;
@@ -1721,14 +1896,13 @@ fn apply_attention(gpu: &Gpu, s: &Settings) {
         return;
     }
     match roformer_gpu::AttentionPolicy::parse(name) {
-        Some(p) if p == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get() => {
-            gpu.attention.set(p)
-        }
-        Some(_) => {
-            log("fused attention failed the start-up check on this GPU; using split attention")
-        }
+        Some(p) if p.usable(gpu.fused_ok.get(), gpu.vfused_ok.get()) => gpu.attention.set(p),
+        Some(_) => log(&format!(
+            "attention {name}: its fused kernel failed the start-up check on this GPU; using {}",
+            gpu.attention.get().name()
+        )),
         None => log(&format!(
-            "unknown attention setting {name} (auto, split, fused, time or freq)"
+            "unknown attention setting {name} (auto, split, fused, time, freq or vfused)"
         )),
     }
 }
@@ -1766,7 +1940,17 @@ async fn bench(s: &Settings) -> Result<(), String> {
     if loaded.is_none() {
         ensure_kernels(&g, s, format).await;
     }
-    roformer_gpu::bench::measure_attention(&g, warm, round, rounds, now_s, |l| log(&l)).await;
+    roformer_gpu::bench::measure_attention(
+        &g,
+        format,
+        budget(s),
+        warm,
+        round,
+        rounds,
+        now_s,
+        |l| log(&l),
+    )
+    .await;
     let text = format!(
         "bench finished in {:.0} s; results in the browser console",
         now_s() - t0
@@ -1932,10 +2116,13 @@ enum Chosen {
 
 /// Sets this GPU's matmul kernels and attention path for weights in
 /// `format`: the choice kept in browser storage for this adapter, these
-/// kernels and this format, or else several seconds of
-/// `roformer_gpu::bench::calibrate`, whose result is then kept (see
-/// `roformer_gpu::bench::store_choice` for which lines stay).
-async fn choose_kernels(gpu: &Gpu, format: WeightFormat) -> Chosen {
+/// kernels and this format, or else about half a minute of
+/// `roformer_gpu::bench::calibrate` at the run's `budget` (about 33 s on
+/// the M2 Pro).  The result is kept only at the default budget
+/// (`roformer_gpu::bench::choices_to_store`), since the stored key names
+/// no budget; see `roformer_gpu::bench::store_choice` for which lines
+/// stay.
+async fn choose_kernels(gpu: &Gpu, format: WeightFormat, budget: usize) -> Chosen {
     let pref = STATE.with_borrow(|s| s.power);
     // The key's separators (tab, newline, `|`) must not occur in the name,
     // or its stored line would never match and would pile up.
@@ -1963,7 +2150,7 @@ async fn choose_kernels(gpu: &Gpu, format: WeightFormat) -> Chosen {
         if let Some(c) = roformer_gpu::bench::Choice::parse(v)
             && gpu.usable.get()[c.matmul.pick(1000, 1000)]
             && gpu.usable.get()[c.matmul.pick(10, 10)]
-            && (c.attention == roformer_gpu::AttentionPolicy::SPLIT || gpu.fused_ok.get())
+            && c.attention.usable(gpu.fused_ok.get(), gpu.vfused_ok.get())
         {
             gpu.policy.set(c.matmul);
             gpu.attention.set(c.attention);
@@ -1971,10 +2158,10 @@ async fn choose_kernels(gpu: &Gpu, format: WeightFormat) -> Chosen {
         }
     }
     log(&format!(
-        "choosing kernels for this GPU and {} weights (several seconds, once)…",
+        "choosing kernels for this GPU and {} weights (about half a minute, once)…",
         format.name()
     ));
-    let c = roformer_gpu::bench::calibrate(gpu, format, now_s, |l| log(&l)).await;
+    let c = roformer_gpu::bench::calibrate(gpu, format, budget, now_s, |l| log(&l)).await;
     gpu.policy.set(c.matmul);
     gpu.attention.set(c.attention);
     // A WebGPU error while timing (out of memory with the weights
@@ -1986,7 +2173,17 @@ async fn choose_kernels(gpu: &Gpu, format: WeightFormat) -> Chosen {
         ));
         return Chosen::Calibrated;
     }
-    let text = roformer_gpu::bench::store_choice(&text, &adapter, &key, &c.name(), KEEP_PER_GPU);
+    let Some(text) = roformer_gpu::bench::choices_to_store(
+        &text,
+        &adapter,
+        &key,
+        &c.name(),
+        KEEP_PER_GPU,
+        budget,
+    ) else {
+        log("this choice is not kept: it was timed at the budget of ?max_elems=, not the default");
+        return Chosen::Calibrated;
+    };
     cache_put(KERNEL_CHOICE, &Uint8Array::from(text.as_bytes())).await;
     Chosen::Calibrated
 }

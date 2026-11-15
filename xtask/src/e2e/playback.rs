@@ -93,7 +93,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         &["--autoplay-policy=no-user-gesture-required"],
         "index.html",
     )?;
-    let ready = p.wait_for(0, 60, |l| l.contains("separator: "))?;
+    let ready = p.wait_for(0, 60, "the app to start", |l| l.contains("separator: "))?;
     p.check(ready.is_some(), "the app started");
     let names = ["drums", "bass", "guitar", "keys", "lead"];
     let urls: Vec<String> = names.iter().map(|n| format!("/stems/{n}.wav")).collect();
@@ -105,7 +105,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
         .collect();
     let from = p.mark();
     p.drop_files(&drop)?;
-    let kept = p.wait_for(from, 120, |l| {
+    let kept = p.wait_for(from, 120, "the stems to be kept", |l| {
         l.contains("song kept in browser storage as session")
     })?;
     p.check(kept.is_some(), "the synthetic stems open and are kept");
@@ -113,7 +113,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
     p.note(&format!("planted six stems of {frames} frames"));
     p.reload()?;
     let from = p.mark();
-    let restored = p.wait_for(from, 120, |l| {
+    let restored = p.wait_for(from, 120, "the song to restore with its stems", |l| {
         l.contains("and its separated stems from this browser")
     })?;
     p.check(restored.is_some(), "the song restores with its stems");
@@ -122,7 +122,7 @@ pub(super) fn run(o: &Opts) -> Result<()> {
 
     let played_from = p.mark();
     p.click(o.play_x, "Play")?;
-    let eight = p.wait_for(played_from, 60, |l| played_for(l, 8.0))?;
+    let eight = p.wait_for(played_from, 60, "8 s of playback", |l| played_for(l, 8.0))?;
     p.check(eight.is_some(), "it plays 8 s");
     // A click on the bass lane seeks to about 3 s.
     let x = lane_x(SEEK_S);

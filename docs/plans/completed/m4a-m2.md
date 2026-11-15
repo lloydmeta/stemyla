@@ -298,7 +298,7 @@ Each step is one signed commit, after `cargo run -p xtask -- check --tier commit
 * `README.md`: the formats that the app opens (the lines that name WAV, MP3 and FLAC).
 * `xtask/src/serve.rs`: `m4a` and `mp4` give `audio/mp4`, `aac` gives `audio/aac`, `aif`, `aiff` and `aifc` give `audio/aiff`, with cases in its test.
 * `xtask/src/e2e/decode.rs` (`m4a` as a dependency of `xtask`, with its layers row and `fixture()` edge): `run` drops `song.m4a` with the type `audio/mp4`.  It is an ALAC M4A of the same 2 s of the mix at 44.1 kHz, FastStart, with an `elst` delay of 2112 frames.  Its session files match the native decode (`expected`, `session_checks`), as `song.wav` does.  A unit test of `xtask` checks that the file decodes natively to the samples of `song.wav`.
-* Acceptance: `cargo test -p app` and `cargo test -p xtask` pass.  `cargo run -p xtask -- e2e decode --browser chrome` passes on this Mac, with `CHROMEDRIVER=~/.local/chromedriver-155/chromedriver-mac-x64/chromedriver` (`docs/references/local-browser-testing.md`).  Its M4A case fails first with the engine features of `ba4b231` (for example with `isomp4` off in a scratch change that is not committed).  Record the failure.
+* Acceptance: `cargo test -p app` and `cargo test -p xtask` pass.  `cargo run -p xtask -- e2e decode --browser chrome` passes on this Mac, with `$CHROMEDRIVER`, the driver of Chrome for Testing 155 (mac-x64) (`docs/references/local-browser-testing.md`).  Its M4A case fails first with the engine features of `ba4b231` (for example with `isomp4` off in a scratch change that is not committed).  Record the failure.
 
 ### Step 8: debt, sizes and the local check
 

@@ -16,15 +16,19 @@ use eframe::egui;
 
 /// Trunk's names for each worker's files: the loader shim the app starts,
 /// the wasm-bindgen glue it imports and the wasm the glue fetches.  First
-/// the stem worker's, then the decode worker's (`decoder::FILES`).
+/// the stem worker's, then the decode worker's (`decoder::FILES`), then
+/// the write worker's (`writer::FILES`).
 pub const WORKER_LOADER: &str = "./stem-worker_loader.js";
-pub const WORKER_FILES: [&str; 6] = [
+pub const WORKER_FILES: [&str; 9] = [
     WORKER_LOADER,
     "./stem-worker.js",
     "./stem-worker_bg.wasm",
     crate::decoder::FILES[0],
     crate::decoder::FILES[1],
     crate::decoder::FILES[2],
+    crate::writer::FILES[0],
+    crate::writer::FILES[1],
+    crate::writer::FILES[2],
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -333,7 +337,7 @@ mod tests {
         let trunk = include_str!("../Trunk.toml");
         assert!(trunk.lines().any(|l| l.trim() == "filehash = false"));
         let index = include_str!("../index.html");
-        for bin in ["stem-worker", "decode-worker"] {
+        for bin in ["stem-worker", "decode-worker", "write-worker"] {
             let worker_link = index
                 .lines()
                 .find(|l| l.contains(&format!("data-bin=\"{bin}\"")))
@@ -342,7 +346,7 @@ mod tests {
             assert!(worker_link.contains("data-loader-shim"), "{bin}");
         }
         assert_eq!(
-            WORKER_FILES,
+            WORKER_FILES[..],
             [
                 "./stem-worker_loader.js",
                 "./stem-worker.js",
@@ -350,7 +354,10 @@ mod tests {
                 "./decode-worker_loader.js",
                 "./decode-worker.js",
                 "./decode-worker_bg.wasm",
-            ]
+                "./write-worker_loader.js",
+                "./write-worker.js",
+                "./write-worker_bg.wasm",
+            ][..]
         );
     }
 

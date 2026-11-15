@@ -26,8 +26,9 @@
 //! `profile=1` (GPU time per kernel from timestamp queries, logged after
 //! the self-test's full chunk and after a separation) and `mm` (`auto` or
 //! a kernel name from `roformer_gpu::TILES`, to compare kernels end to end)
-//! and `attn` (`auto`, `split`, `fused`, or `time` / `freq` for fused
-//! attention on that axis only; by default each GPU's measured choice).
+//! and `attn` (`auto`, `split`, `fused`, `time` / `freq` for fused
+//! attention on that axis only, or `vfused` for the vec4 fused kernel on
+//! the time axis; by default each GPU's measured choice).
 
 use std::cell::RefCell;
 use std::collections::VecDeque;

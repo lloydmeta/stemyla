@@ -6,7 +6,9 @@
 //! instead under `STEMYLA_REQUIRE=gpu` (or `timestamps`, for the profile
 //! tests, or `f16`, for the f16 weight tests).
 
-use roformer_gpu::{Act, Gpu, MatMul, TILES, View, WeightFormat, bit_differences};
+use roformer_gpu::{
+    Act, AttentionPolicy, FusedKernel, Gpu, MatMul, TILES, View, WeightFormat, bit_differences,
+};
 use test_support::{Need, skip};
 
 #[track_caller]
@@ -289,6 +291,204 @@ fn matmul_vec4_variants() {
         [nb * seq * row, nb * seq * row, nb * heads * seq * seq, 1],
         "vec4: attention scores",
     ));
+}
+
+/// The kernels of M4 (`plans/completed/gpu-speed-m4.md`) that must give
+/// `v64`'s output bit for bit.
+const CANDIDATES: [&str; 1] = ["v64k8"];
+
+/// The output of `spec` with kernel `t`, B held in `weight`.
+fn output_of(
+    g: &Gpu,
+    t: usize,
+    spec: &Spec,
+    (a, weight, c0, bias): (&wgpu::Buffer, &roformer_gpu::Weight, &[f32], &wgpu::Buffer),
+    len: usize,
+) -> Vec<f32> {
+    let cb = g.upload("c", c0);
+    let mut mm = MatMul::new(
+        (a, spec.a),
+        (weight, spec.b),
+        (&cb, spec.c),
+        spec.m,
+        spec.n,
+        spec.k,
+    );
+    mm.outer = spec.outer;
+    mm.inner = spec.inner;
+    mm.alpha = spec.alpha;
+    mm.act = spec.act;
+    mm.accumulate = spec.accumulate;
+    mm.bias = spec.bias.map(|(off, bo)| (bias, off, bo));
+    mm.tile = Some(t);
+    let mut r = g.rec();
+    r.matmul(&mm);
+    r.submit();
+    let out = read(g, &cb, len);
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    out
+}
+
+/// Asserts, for each kernel of [`CANDIDATES`]:
+/// * it is in `TILES`;
+/// * it runs each product itself, not the fallback;
+/// * it gives `v64`'s output bit for bit, with f32 weights, and with f16
+///   weights on an adapter that unpacks f16 (else the f16 half skips).
+///
+/// The products: the large and small linear products of calibration
+/// (`time qkv`, `time ff down`, `freq ff up`, `time gates`) at their full
+/// sizes, and the vec4 products of `matmul_vec4_variants`.  These are K 300
+/// (a ragged K tile of 12 for `v64`) with offsets, bias and GELU; K 4 with
+/// alpha, tanh and accumulate; and a batch with a bias for each batch.
+///
+/// Why bit for bit: in both kernels each output adds an explicit `fma`
+/// chain in K order, x, y, z, w of each vec4, and no form changes that
+/// order.  Where K is a multiple of 4 but not of the tile's K, a kernel
+/// adds terms of zero, and `fma(0, 0, acc)` is `acc`, or `+0` for an `acc`
+/// of `-0`, which `bit_differences` counts as equal.  This holds for this
+/// native test only: Safari compiles with `MTLMathModeRelaxed`.
+#[test]
+fn candidates_match_v64_bit_for_bit() {
+    let Some(g) = gpu() else { return };
+    let f16 = g.has_f16_unpack();
+    let index = |name: &str| TILES.iter().position(|t| t.name == name);
+    let v64 = index("v64").expect("v64 in TILES");
+    let candidates: Vec<usize> = CANDIDATES.iter().filter_map(|name| index(name)).collect();
+    assert_eq!(
+        candidates.len(),
+        CANDIDATES.len(),
+        "the candidates {CANDIDATES:?} in TILES"
+    );
+    let linear = |m, n, k, act| Spec {
+        m,
+        n,
+        k,
+        outer: 1,
+        inner: 1,
+        a: View::rows(0, k),
+        b: View::t(0, k),
+        c: View::rows(0, n),
+        bias: Some((0, 0)),
+        alpha: 1.0,
+        act,
+        accumulate: false,
+    };
+    let (t, f) = (1151, 88 * 62);
+    let mut specs = vec![
+        ("time qkv", linear(t, 1536, 256, Act::None)),
+        ("time ff down", linear(t, 256, 1024, Act::None)),
+        ("freq ff up", linear(f, 1024, 256, Act::Gelu)),
+        ("time gates", linear(t, 8, 256, Act::None)),
+    ];
+    specs.push((
+        "K 300, offsets, bias, gelu",
+        Spec {
+            m: 129,
+            n: 65,
+            k: 300,
+            outer: 1,
+            inner: 1,
+            a: View::rows(8, 300),
+            b: View::t(4, 300),
+            c: View::rows(3, 65),
+            bias: Some((5, 0)),
+            alpha: 1.0,
+            act: Act::Gelu,
+            accumulate: false,
+        },
+    ));
+    specs.push((
+        "K 4, alpha, tanh, accumulate",
+        Spec {
+            m: 70,
+            n: 130,
+            k: 4,
+            outer: 1,
+            inner: 1,
+            a: View::rows(0, 4),
+            b: View::t(0, 4),
+            c: View::rows(0, 130),
+            bias: None,
+            alpha: 0.3,
+            act: Act::Tanh,
+            accumulate: true,
+        },
+    ));
+    specs.push((
+        "batched, per-outer bias",
+        Spec {
+            m: 33,
+            n: 24,
+            k: 256,
+            outer: 3,
+            inner: 1,
+            a: View::rows(4, 256).batch(33 * 256, 0),
+            b: View::t(0, 256).batch(24 * 256, 0),
+            c: View::rows(0, 24).batch(33 * 24, 0),
+            bias: Some((0, 24)),
+            alpha: 1.0,
+            act: Act::Tanh,
+            accumulate: false,
+        },
+    ));
+    for (what, spec) in &specs {
+        let last = |v: View, rows: usize, cols: usize| {
+            v.off + (spec.outer - 1) * v.bo + (rows - 1) * v.rs + (cols - 1) * v.cs + 1
+        };
+        let a_len = last(spec.a, spec.m, spec.k);
+        let b_len = last(spec.b, spec.k, spec.n);
+        let c_len = last(spec.c, spec.m, spec.n);
+        let bias_len = spec
+            .bias
+            .map_or(1, |(off, bo)| off + (spec.outer - 1) * bo + spec.n);
+        let (a, c0, bias) = (rand(a_len, 1), rand(c_len, 3), rand(bias_len, 4));
+        let bits = f16_weights(b_len, 2);
+        let b: Vec<f32> = bits
+            .iter()
+            .map(|&h| half::f16::from_bits(h).to_f32())
+            .collect();
+        let (ab, biasb) = (g.upload("a", &a), g.upload("bias", &bias));
+        let b32 = g.upload_weight("b f32", &b);
+        let b16 = f16.then(|| g.upload_f16("b f16", &bits));
+        for weight in std::iter::once(&b32).chain(b16.as_ref()) {
+            let bufs = (&*ab, weight, c0.as_slice(), &*biasb);
+            let want = output_of(&g, v64, spec, bufs, c_len);
+            for &t in &candidates {
+                let probe = MatMul::new(
+                    (&ab, spec.a),
+                    (weight, spec.b),
+                    (&ab, spec.c),
+                    spec.m,
+                    spec.n,
+                    spec.k,
+                );
+                assert_eq!(
+                    TILES[probe.kernel(t)].name,
+                    TILES[t].name,
+                    "{what}: {} hands it to the fallback",
+                    TILES[t].name
+                );
+                let got = output_of(&g, t, spec, bufs, c_len);
+                let d = bit_differences(&got, &want);
+                assert_eq!(
+                    d.count,
+                    0,
+                    "{what}, {} weights: {} differs from v64 in {} values, the largest by {:e}",
+                    weight.format().name(),
+                    TILES[t].name,
+                    d.count,
+                    d.largest
+                );
+            }
+        }
+    }
+    if !f16 {
+        skip(
+            Need::F16,
+            "adapter without SHADER_F16_IN_F32: the f16 half of candidates_match_v64_bit_for_bit",
+        );
+    }
 }
 
 /// Products the vec4 kernel cannot read as vec4s go to the fallback and
@@ -987,7 +1187,8 @@ fn matmul_f16_weights_match_f32() {
 }
 
 /// A device opened for profiling records GPU time per dispatch under
-/// labels naming the kernel (and, for matmuls, the shape and tile).  Skips
+/// labels naming the kernel (and, for matmuls, the shape and tile; for a
+/// softmax, the rows and their length).  Skips
 /// when the adapter has no `timestamp-query`.
 #[test]
 fn profile_labels_dispatches() {
@@ -1024,7 +1225,8 @@ fn profile_labels_dispatches() {
         TILES[g.policy.get().pick(m, n)].name
     );
     assert_eq!(totals.get(&mm).map(|v| v.0), Some(2), "{totals:?}");
-    assert_eq!(totals.get("softmax").map(|v| v.0), Some(2), "{totals:?}");
+    let softmax = format!("softmax {m}x{n}");
+    assert_eq!(totals.get(&softmax).map(|v| v.0), Some(2), "{totals:?}");
     assert!(
         totals.values().all(|v| v.1 >= 0.0 && v.1 < 10.0),
         "{totals:?}"
@@ -1032,6 +1234,41 @@ fn profile_labels_dispatches() {
     assert!(g.take_profile().is_empty(), "totals are cleared");
     let lines = roformer_gpu::profile_report(&totals);
     assert!(lines.last().unwrap().starts_with("profile: total GPU time"));
+}
+
+/// Asserts, on a profiling device, for one fused attention of 3
+/// sequences of 62 tokens with each fused kernel:
+/// * the tiled kernel's label is `attention seq 62 x3`, and `vfused`'s
+///   `attention seq 62 x3 vfused`, each with 1 dispatch, so the profile
+///   names the kernel, and `profile_groups` counts both as attention;
+/// * no WebGPU error.
+///
+/// Skips when the adapter has no `timestamp-query`.
+#[test]
+fn profile_labels_attention_by_its_shape() {
+    let g = match pollster::block_on(Gpu::new_profiling(wgpu::PowerPreference::HighPerformance)) {
+        Ok(g) => g,
+        Err(e) => return skip(Need::Gpu, &e),
+    };
+    if !g.profiling() {
+        return skip(Need::Timestamps, "adapter without timestamp-query");
+    }
+    let (seq, nseq) = (62, 3);
+    let tokens = seq * nseq;
+    let qkv = g.upload("qkv", &rand(tokens * 1536, 7));
+    let o = g.buffer("o", tokens * 512);
+    let mut r = g.rec();
+    r.attention(FusedKernel::Tiled, &qkv, None, &o, seq, nseq, 0.125);
+    r.attention(FusedKernel::Vec4, &qkv, None, &o, seq, nseq, 0.125);
+    r.submit();
+    pollster::block_on(g.done());
+    pollster::block_on(g.collect_profile()).unwrap();
+    let errors = g.take_errors();
+    assert!(errors.is_empty(), "{errors:?}");
+    let totals = g.take_profile();
+    for label in ["attention seq 62 x3", "attention seq 62 x3 vfused"] {
+        assert_eq!(totals.get(label).map(|v| v.0), Some(1), "{totals:?}");
+    }
 }
 
 /// The usual device never asks for optional features.
@@ -1094,18 +1331,11 @@ fn compile_each() {
     assert!(errors.is_empty(), "{errors:?}");
 }
 
-/// The fused attention kernel against `attention_cpu` on the network's
-/// sequence lengths (1,151 frames on the time axis, 62 bands on the
-/// frequency axis) and a ragged one, with and without the gate.
-#[test]
-fn attention_matches_cpu() {
+/// Each fused attention kernel (tiled and `vfused`) against
+/// `attention_cpu` on `cases`: (tokens, sequences, gated).
+fn fused_matches_cpu(kernel: FusedKernel, cases: &[(usize, usize, bool)]) {
     let Some(g) = gpu() else { return };
-    for (seq, nseq, gated) in [
-        (133, 2, true),
-        (62, 3, true),
-        (62, 1, false),
-        (1151, 1, true),
-    ] {
+    for &(seq, nseq, gated) in cases {
         let tokens = seq * nseq;
         let qkv = rand(tokens * 1536, 7);
         let gates = rand(tokens * 8, 8);
@@ -1114,12 +1344,81 @@ fn attention_matches_cpu() {
         let (qb, gb) = (g.upload("qkv", &qkv), g.upload("gates", &gates));
         let ob = g.buffer("o", tokens * 512);
         let mut r = g.rec();
-        r.attention(&qb, gated.then_some(&gb), &ob, seq, nseq, alpha);
+        r.attention(kernel, &qb, gated.then_some(&gb), &ob, seq, nseq, alpha);
         r.submit();
         let got = read(&g, &ob, tokens * 512);
         let errors = g.take_errors();
         assert!(errors.is_empty(), "{errors:?}");
-        assert_close(&got, &want, 2e-5, &format!("attention seq {seq} x{nseq}"));
+        assert_close(
+            &got,
+            &want,
+            2e-5,
+            &format!("{kernel:?} attention seq {seq} x{nseq}"),
+        );
+    }
+}
+
+/// The tiled fused attention kernel against `attention_cpu` on the
+/// network's sequence lengths (1,151 frames on the time axis, 62 bands on
+/// the frequency axis) and a ragged one, with and without the gate.
+#[test]
+fn attention_matches_cpu() {
+    fused_matches_cpu(
+        FusedKernel::Tiled,
+        &[
+            (133, 2, true),
+            (62, 3, true),
+            (62, 1, false),
+            (1151, 1, true),
+        ],
+    );
+}
+
+/// Asserts that `vfused` matches `attention_cpu` on the time axis's shape
+/// (4 bands of 1,151 frames), and on ragged sequences: lengths that are
+/// not a multiple of 64 or of 4 (133, 37, 1), with and without the gate.
+#[test]
+fn vfused_matches_cpu() {
+    fused_matches_cpu(
+        FusedKernel::Vec4,
+        &[
+            (1151, 4, true),
+            (133, 2, true),
+            (62, 3, true),
+            (37, 2, false),
+            (1, 3, true),
+        ],
+    );
+}
+
+/// Asserts that `vfused` gives the tiled kernel's output bit for bit on
+/// the same inputs: the time axis's shape and ragged sequences.  Both sum
+/// each score and each output in one order, one fma at a time.  The claim
+/// holds for this native test: Safari compiles with
+/// `MTLMathModeRelaxed`, which lets Metal reorder the sums.
+#[test]
+fn vfused_equals_the_tiled_kernel_bit_for_bit() {
+    let Some(g) = gpu() else { return };
+    for (seq, nseq) in [(1151, 4), (133, 2), (37, 2)] {
+        let tokens = seq * nseq;
+        let qkv = g.upload("qkv", &rand(tokens * 1536, 11));
+        let gates = g.upload("gates", &rand(tokens * 8, 12));
+        let out = |kernel| {
+            let o = g.buffer("o", tokens * 512);
+            let mut r = g.rec();
+            r.attention(kernel, &qkv, Some(&gates), &o, seq, nseq, 0.125);
+            r.submit();
+            read(&g, &o, tokens * 512)
+        };
+        let (tiled, vec4) = (out(FusedKernel::Tiled), out(FusedKernel::Vec4));
+        let errors = g.take_errors();
+        assert!(errors.is_empty(), "{errors:?}");
+        let differ = tiled
+            .iter()
+            .zip(&vec4)
+            .filter(|(a, b)| a.to_bits() != b.to_bits())
+            .count();
+        assert_eq!(differ, 0, "seq {seq} x{nseq}: {differ} outputs differ");
     }
 }
 
@@ -1220,11 +1519,76 @@ fn attention_matches_split_path() {
     let want = read(&g, &split, tokens * 512);
     let fused = g.buffer("o fused", tokens * 512);
     let mut r = g.rec();
-    r.attention(&qkv, Some(&gates), &fused, seq, nseq, alpha);
+    r.attention(
+        FusedKernel::Tiled,
+        &qkv,
+        Some(&gates),
+        &fused,
+        seq,
+        nseq,
+        alpha,
+    );
     r.submit();
     let got = read(&g, &fused, tokens * 512);
     assert!(g.take_errors().is_empty());
     assert_close(&got, &want, 2e-5, "fused attention against the split path");
+}
+
+/// `vfused`'s WGSL with `from` replaced by `to`, which must be in it.
+fn planted_vfused(from: &str, to: &str) -> String {
+    let src = roformer_gpu::fused_source(FusedKernel::Vec4);
+    assert!(src.contains(from), "{from:?} not in vfused");
+    src.replace(from, to)
+}
+
+/// Asserts that the start-up check rejects a `vfused` with a planted
+/// fault, and keeps the tiled kernel:
+/// * no rescale of the output at a new row maximum: wrong only from the
+///   second key tile on, so the check's case must be longer than 64;
+/// * a wrong gate in the second sequence only (`wg.z` 1): the check must
+///   compare the outputs of each sequence.
+///
+/// Each time, `vfused_ok` is false, `fused_ok` true, and the reason names
+/// `vfused`.
+#[test]
+fn the_start_up_check_rejects_a_broken_vfused() {
+    for (what, from, to) in [
+        ("no rescale", "o0_0 = o0_0 * sc0;", ""),
+        (
+            "the second sequence",
+            "let f = g / lt.x;",
+            "let f = select(g, 2.0 * g, wg.z == 1u) / lt.x;",
+        ),
+    ] {
+        let Some(g) = gpu() else { return };
+        g.plant_attention_source(FusedKernel::Vec4, &planted_vfused(from, to));
+        let problem = pollster::block_on(g.check_attention()).unwrap_or_default();
+        assert!(problem.contains("vfused"), "{what}: {problem:?}");
+        assert!(!g.vfused_ok.get(), "{what}");
+        assert!(g.fused_ok.get(), "{what}");
+    }
+}
+
+/// Asserts that a policy whose kernels pass the start-up check stays
+/// after it: `fused`, `freq` and `vfused`.  A policy that a failed
+/// kernel cannot run goes back to split.
+#[test]
+fn the_start_up_check_keeps_a_usable_policy() {
+    for policy in [
+        AttentionPolicy::Fused,
+        AttentionPolicy::Freq,
+        AttentionPolicy::VFused,
+    ] {
+        let Some(g) = gpu() else { return };
+        g.attention.set(policy);
+        assert_eq!(pollster::block_on(g.check_attention()), None);
+        assert_eq!(g.attention.get(), policy);
+    }
+    let Some(g) = gpu() else { return };
+    g.plant_attention_source(FusedKernel::Vec4, &planted_vfused("o0_0 = o0_0 * sc0;", ""));
+    g.attention.set(AttentionPolicy::VFused);
+    pollster::block_on(g.check_attention());
+    assert_eq!(g.attention.get(), AttentionPolicy::Split);
 }
 
 #[test]
@@ -1233,6 +1597,7 @@ fn check_attention_accepts_all() {
     let problem = pollster::block_on(g.check_attention());
     assert_eq!(problem, None);
     assert!(g.fused_ok.get());
+    assert!(g.vfused_ok.get());
 }
 
 /// With recording off (benchmarks, calibration) a profiling device keeps
@@ -1267,7 +1632,7 @@ fn profile_recording_and_reset() {
     softmax(&g);
     pollster::block_on(g.done());
     pollster::block_on(g.collect_profile()).unwrap();
-    assert_eq!(g.take_profile().get("softmax").map(|v| v.0), Some(1));
+    assert_eq!(g.take_profile().get("softmax 64x64").map(|v| v.0), Some(1));
     assert!(g.take_errors().is_empty());
 }
 
