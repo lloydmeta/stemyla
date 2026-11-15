@@ -323,6 +323,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * 3-2: `step_check` removes the shadow of `first`.  3-3, 3-4 and 3-6: the docs, the comment before the drain of the mask, and this plan.
   * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  `e2e selftest` passed in Chrome and Safari (`<scratch>/m6/r3/selftest-*.log`).
 * [x] 2026-11-15: the fixes of review round 4.  `a_step_check_gives_the_errors_first_then_the_limit` gained a step on the limit and a limit of 120 s.  It failed against `dt >= limit` (4-2) and against a fixed 60 s for a first step (4-1) (`<scratch>/m6/r4/fail-4-*.log`).
+* [x] 2026-11-15: review round 5 found 1 nit and no should-fix, so it is the last round (decision 0024).  Five rounds: 34 agents, 2,166,247 tokens, 52.6 wall minutes, 0 interventions.  Rounds 4 and 5 fixed 2 findings, both cases of the test of `step_check`.  The log is `docs/reviews/gpu-speed-2026-11-12-m6.md`.
 
 ## Surprises and discoveries
 
@@ -440,4 +441,21 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 ## Outcomes and retrospective
 
-Not yet.
+What M6 achieved, on the M2 Pro with Chrome 157 and Safari 27.2:
+
+* P lands: the worker keeps 2 GPU steps in flight.  The same-session comparison against M6's base gives a gain of 4.32 % in Chrome and 3.63 % to 3.70 % in Safari, with no loss.  The baselines went from 3.59 s to 3.43 s (Chrome) and from 5.57 s to 5.37 s (Safari).
+* Calibration times the time axis with the same 2 steps in flight (`CALIBRATION` 7).  The choice check passes in both browsers.  The bias of `freq` against `fused` holds, in Safari on the 8 forced runs (Decision log).
+* The stems are the same as at M6's base (`e2e stored-stems`), and `memory-budget` passes 9 runs with no change of the headroom.
+* The test helpers `plant` and `plant_at` write in place: a whole Safari `web-test` leaves 171 fewer swap files (147.7 MB less).
+
+What M6 did not do:
+
+* O1 and O2, the CPU work under the GPU, are not built.  The CPU work of a chunk is about 0.17 s, not the 0.25 to 0.3 s that the parent assumed.  At 2 steps in flight, each piece hides at most 2 steps, under 1 % of a chunk.  The maintainer kept the limit of 2 steps in flight.
+* Case 10 (the chunk time over the input read) does not apply, since O2 is not built.
+
+What to do differently:
+
+* Measure the CPU pieces before an estimate goes into a plan.  The parent's 0.25 to 0.3 s came from before M1's cuts and M5's kernels; a measuring patch of one hour gave the real figure.
+* A prototype under a query key, compared on one page, is a cheap and exact predictor for a pacing change.  The profile's estimate of the waits was 0.7 % in Safari; the prototype gave 3.2 %.
+* Put the loops that tests must reach in the native crate from the start.  Rounds 1 to 4 each found a part of `Pace` that only a source test could see.  One shared `Window` and pure checks (`step_check`, `rejected_text`) closed it.
+
