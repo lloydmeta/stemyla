@@ -763,7 +763,8 @@ What still leaks after M5.1 Step 5c, in a user's Safari:
 
 What leaks in test runs only:
 
-* The test helpers that plant files through `createWritable`.  These are `plant` and `plant_at` in `worker/src/web/tests.rs` and `decoder/src/web/tests.rs`, `store_plant_tone` and `store_plant_wav` in `app/src/store.rs`, and the scripts of `xtask/src/e2e.rs`, `xtask/src/e2e/` and `xtask/e2e/worker.js`.  `e2e save` plants a session of 1 minute and one of 10 minutes (`old_session`'s plant): 349.3 MB.
+* The test helpers that plant files through `createWritable`.  These are `store_plant_tone` and `store_plant_wav` in `app/src/store.rs`, and the scripts of `xtask/src/e2e.rs`, `xtask/src/e2e/` and `xtask/e2e/worker.js`.  `e2e save` plants a session of 1 minute and one of 10 minutes (`old_session`'s plant): 349.3 MB.
+* Not `plant` and `plant_at` in `worker/src/web/tests.rs` and `decoder/src/web/tests.rs`.  Since M6 Step 1, they write through sync access handles.  A whole Safari `web-test` then left 1,149 swap files, 1,549.5 MB, against 1,320 files, 1,697.2 MB before (2026-11-15).
 * The page-side fake of the write worker (`fake-writer`), which the app's browser tests use.  It writes each block-written file through one write stream, from its block at 0 to its `write-end`.  So each such file leaves one swap file of its size.  Each whole file that it writes through `st_write` leaves one too.  After Step 5c and before `write-end`, it opened a stream for each block.  A whole Safari `web-test` then left 1,556 swap files, 8,898.9 MB, against 1,316 files, 1,697.2 MB before Step 5c.
 * One empty `BlobRegistryFiles-*` folder for each WebDriver session.  It holds no bytes.
 

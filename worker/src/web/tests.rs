@@ -67,11 +67,14 @@ export async function wipe() {
   const root = await navigator.storage.getDirectory();
   for await (const name of root.keys()) await root.removeEntry(name, { recursive: true });
 }
+// Writes in place with a sync access handle, which leaves no swap file in
+// Safari (TD-103).  A copy of `bytes` is written: a whole array (MEM-5),
+// made before the first await.
 export async function plant(name, bytes) {
+  const copy = bytes.slice();
   const root = await navigator.storage.getDirectory();
-  const w = await (await root.getFileHandle(name, { create: true })).createWritable();
-  await w.write(bytes);
-  await w.close();
+  const h = await (await root.getFileHandle(name, { create: true })).createSyncAccessHandle();
+  try { h.truncate(0); h.write(copy, { at: 0 }); h.flush(); } finally { h.close(); }
 }
 export async function files() {
   const root = await navigator.storage.getDirectory();
@@ -134,11 +137,12 @@ export async function remove_at(path) {
     return true;
   } catch (e) { return e.name === "NotFoundError"; }
 }
+// As `plant`, at `path`, with its folders.
 export async function plant_at(path, bytes) {
+  const copy = bytes.slice();
   const [d, n] = split_at(path);
-  const w = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createWritable();
-  await w.write(bytes);
-  await w.close();
+  const h = await (await (await folder_at(d, true)).getFileHandle(n, { create: true })).createSyncAccessHandle();
+  try { h.truncate(0); h.write(copy, { at: 0 }); h.flush(); } finally { h.close(); }
 }
 // The bytes of the file at `path`, or null if there is none.
 export async function read_at(path) {
@@ -648,6 +652,31 @@ async fn a_picked_file_the_gpu_failed_to_load_is_not_stored() {
     assert!(text.starts_with("the model could not be loaded"), "{text}");
     assert_eq!(listing().await, CACHE_NAME, "no partial file left");
     assert_eq!(stored_bytes().await, [7]);
+}
+
+/// TD-103: Safari keeps the swap file of each write stream that closes.
+/// So `plant` and `plant_at` open no write stream: a sync access handle
+/// writes each file in place.
+#[wasm_bindgen_test]
+async fn plant_helpers_open_no_write_stream() {
+    fresh().await;
+    start_writable_spy();
+    plant("lloyd", &[1, 2, 3]).await;
+    plant_at("acme/beachape", &[4, 5]).await;
+    assert_eq!(stop_writable_spy(), 0, "write streams opened");
+}
+
+/// A shorter file that `plant` or `plant_at` writes over a longer one
+/// keeps only its own bytes: the helpers truncate the file first.
+#[wasm_bindgen_test]
+async fn plant_helpers_truncate_a_longer_file() {
+    fresh().await;
+    plant("lloyd", &[1; 8]).await;
+    plant("lloyd", &[2; 3]).await;
+    plant_at("acme/beachape", &[1; 8]).await;
+    plant_at("acme/beachape", &[2; 3]).await;
+    assert_eq!(read_at("lloyd").await, Some(vec![2; 3]), "plant");
+    assert_eq!(read_at("acme/beachape").await, Some(vec![2; 3]), "plant_at");
 }
 
 /// TD-103: Safari keeps the swap file of each write stream that closes,

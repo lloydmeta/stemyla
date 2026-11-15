@@ -270,15 +270,15 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 ## Decisions for the maintainer
 
-1. If Step 2 builds neither change, does Step 1's commit get review rounds?  The parent says that M6 then has no review rounds, and also puts the change of the test helpers in M6's first commit.  Options: a) no review rounds, as the parent says; b) the review rounds on Step 1's commit alone.  Recommendation: b), since the commit is code and VERIFY-1 asks for a check of it; the rounds are small.  This is a conflict in the parent, so the orchestrator decides.  Answer: open.
-2. Open only if Step 2 finds O1 and O2 under 3 % at a depth of 2 in both browsers, and a bound of 3 % or more at an unlimited depth in one.  May O queue more than 2 steps while a CPU piece runs?  Options: a) no, and O is not built; b) up to the steps that cover the piece (for example the 14 mask steps of a stem), with the step limit as Step 5 says.  Recommendation: from Step 2's figures.  The cost of b): the GPU holds up to about 0.1 to 0.2 s of queued work, so other work, the screen included, waits longer for the GPU (the doc of `Pace`).  The maintainer's answer of 2026-11-12 allows 2 in flight.  Answer: open.
+1. If Step 2 builds neither change, does Step 1's commit get review rounds?  The parent says that M6 then has no review rounds, and also puts the change of the test helpers in M6's first commit.  Options: a) no review rounds, as the parent says; b) the review rounds on Step 1's commit alone.  Recommendation: b), since the commit is code and VERIFY-1 asks for a check of it; the rounds are small.  This is a conflict in the parent, so the orchestrator decides.  Answer (2026-11-15, the orchestrator, parent `ced888f`): b).  The parent's "no review rounds" meant a milestone that lands no code.
+2. Open only if Step 2 finds O1 and O2 under 3 % at a depth of 2 in both browsers, and a bound of 3 % or more at an unlimited depth in one.  May O queue more than 2 steps while a CPU piece runs?  Options: a) no, and O is not built; b) up to the steps that cover the piece (for example the 14 mask steps of a stem), with the step limit as Step 5 says.  Recommendation: from Step 2's figures.  The cost of b): the GPU holds up to about 0.1 to 0.2 s of queued work, so other work, the screen included, waits longer for the GPU (the doc of `Pace`).  The maintainer's answer of 2026-11-12 allows 2 in flight.  Answer: open; the orchestrator asks the maintainer only if Step 2 hits the condition.  Until then, at most 2 steps are in flight.
 
 ## Progress
 
 * [x] 2026-11-15: the plan written, at `2543abc`.
 * [x] 2026-11-15: plan review round 1: 1 blocker, 7 should-fix and 2 nits, each applied.
 * [x] 2026-11-15: plan review round 2: 1 blocker, 4 should-fix and 2 nits, each applied.
-* [ ] Step 1: the test helpers use sync access handles.
+* [x] 2026-11-15: Step 1: the test helpers use sync access handles.  The spy tests `plant_helpers_open_no_write_stream` failed first in Chrome, with 2 calls (worker) and 1 call (decoder) of `createWritable` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-fail-spy.log`).  The guard `plant_helpers_truncate_a_longer_file` failed with helpers that had no `truncate(0)`: it read `[2, 2, 2, 1, 1, 1, 1, 1]`, not `[2, 2, 2]`, in both crates (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-fail-truncate.log`).  Then all four tests passed (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-pass.log`).  The whole Safari and Chrome `web-test` runs after the change passed (Surprises).
 * [ ] Step 2: the measurement at M6's base.
 * [ ] Step 3: the chunk time covers the input read (if O2 is built).
 * [ ] Step 4: P (if built).
@@ -292,7 +292,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 ## Surprises and discoveries
 
-None yet.
+* Step 1, 2026-11-15, Safari 27.2 and Chrome 157 on the M2 Pro.  A whole Safari `web-test` at M6's base left 1,320 swap files, 1,697.2 MB, and 9 blob folders (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-safari-before.log`).  After the change, it left 1,149 swap files, 1,549.5 MB, and 9 blob folders (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-safari-after.log`).  So the change saves 171 swap files, 147.7 MB, for each whole Safari run.  Each crate passed in both runs: the stem worker 111 tests before and 113 after, the decode worker 13 before and 15 after.  The whole Chrome `web-test` after the change passed in each crate (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-chrome-after.log`).  The tests that read Safari's `lastModified` after a write in place (`a_mix_file_written_again_after_the_last_read_ends_with_unstored`, `the_end_check_sees_a_mix_file_written_again_at_its_size`) passed in Safari.
 
 ## Decision log
 
@@ -300,6 +300,8 @@ None yet.
 * 2026-11-15, agent (team leader): O's predicted gain is the sum over its CPU pieces of `min(piece, the paced time of the 2 steps under it)`, from the measuring patch's fields, after a first bound of all the CPU work.  Why: O needs a new order of the chunk, too large for a prototype in a measuring patch.  The maintainer allows 2 steps in flight, so a piece hides at most 2 steps (plan review round 1, finding 1), and those steps' own times, not a mean, bound it (round 2, finding 3).  The comparison of Step 5 decides the landing.
 * 2026-11-15, agent (team leader): O is split into O1 (each mask applied under the next stem's first 2 steps) and O2 (the next chunk's input read and STFT under the last stem).  O1 is built first, and O2 only with its own predicted 3 %.  Why: O1 needs no read-ahead, no `Demixer` change, no chunk-time change and no working-set change (plan review round 2, finding 5; PLANS.md, "Proportionate").
 * 2026-11-15, agent (team leader): P and O use two new `Gpu` methods that make their WebGPU call at once (`done_signal`, `read_start`).  Why: `Gpu::done` and `Gpu::read` are `async fn`s, so a signal taken through them covers the later step too (plan review round 1, finding 2).
+
+* 2026-11-15, agent (implementer): Step 1's commit also changes `docs/references/local-browser-testing.md`, which gives the count of a whole Safari `web-test` (1,320 files).  Why: the new count makes that line wrong, and DOC-1 fixes a doc in the same commit.  Item 6 of Step 1 named only the two test files and `docs/tech-debt.md`.
 
 ## Outcomes and retrospective
 
