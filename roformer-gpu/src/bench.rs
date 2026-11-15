@@ -1728,16 +1728,22 @@ mod tests {
     /// * the whole bodies of `Pace::run`, `Pace::drain` and `time_rec`'s
     ///   `InFlight` arm, which call only `Window::new`, `Window::step` and
     ///   `Window::drain` (the order of `pace_order`);
+    /// * the whole body of `Pace::all`: the step loop, then
+    ///   `self.drain`;
     /// * `GpuNetwork::mask` has one `self.pace.drain`, just after its step
     ///   loop and just before its read of the mask;
+    /// * `selftest` has 6 reads of `job.hidden()`, `job.normed()` and
+    ///   `job.mask()`, and the last `pace` call before each is
+    ///   `pace.drain` or `pace.all`;
     /// * each `submit` records and submits, and takes no signal;
     ///   `Timed::submit` calls `record`, then submits;
     /// * each `signal` takes `Gpu::done_signal`;
     /// * the whole body of `OnGpu::end`: it awaits the signal, reads the
     ///   clock, then gives `newer` to `Checks::ended`;
     /// * `Timed::end` awaits the signal before it returns;
-    /// * `Checks::ended` takes each step's time from a `StepClock`, and
-    ///   gives `newer` to `rejected_text`.
+    /// * `Checks::ended` takes each step's time from a `StepClock`.  It
+    ///   gives `newer`, `gpu.take_errors()`, its limit and the first step
+    ///   of a kind to `step_check`, and returns its result.
     #[test]
     fn the_worker_paces_as_calibration_times() {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../worker/src/web.rs");
@@ -1768,6 +1774,35 @@ mod tests {
             "let checks = &mut self.checks; self.flight.drain(&mut OnGpu { gpu, job, checks }).await",
             "Pace::drain"
         );
+        let all = body_of(
+            &worker,
+            "    async fn all(&mut self, gpu: &Gpu, job: &Job<'_>, steps: &[Step]) -> Result<(), String> {",
+            "    ",
+        );
+        assert_eq!(
+            code(all),
+            "for s in steps { self.run(gpu, job, s).await?; } self.drain(gpu, job).await",
+            "Pace::all"
+        );
+        let selftest = body_of(
+            &worker,
+            "async fn selftest(base: Option<String>, s: &Settings) -> Result<(), String> {",
+            "",
+        );
+        let reads: Vec<usize> = ["job.hidden()", "job.normed()", "job.mask()"]
+            .into_iter()
+            .flat_map(|read| selftest.match_indices(read).map(|(at, _)| at))
+            .collect();
+        assert_eq!(reads.len(), 6, "the reads of selftest: {selftest}");
+        for at in reads {
+            let before = &selftest[..at];
+            let last_pace = &before[before.rfind("pace.").expect("a pace call before a read")..];
+            assert!(
+                last_pace.starts_with("pace.drain(&gpu, &job).await?;")
+                    || last_pace.starts_with("pace.all(&gpu, &job, "),
+                "a read of selftest after a pace call that is not a drain: {last_pace}"
+            );
+        }
         let submit = body_of(
             &worker,
             "    fn submit(&mut self, step: Step) -> Submitted {",
@@ -1790,12 +1825,15 @@ mod tests {
             "OnGpu::end"
         );
         let ended = body_of(&worker, "    async fn ended(", "    ");
-        for want in [
-            "let dt = self.clock.ended(s.at, ended);",
-            "return Err(rejected_text(step, newer, errors.len(), first));",
-        ] {
-            assert!(ended.contains(want), "{want} in Checks::ended: {ended}");
-        }
+        assert!(
+            ended.contains("let dt = self.clock.ended(s.at, ended);"),
+            "the step clock in Checks::ended: {ended}"
+        );
+        assert!(
+            code(ended)
+                .ends_with("step_check(step, newer, &gpu.take_errors(), dt, self.limit, first)"),
+            "Checks::ended returns the result of step_check: {ended}"
+        );
         let mask = body_of(
             &worker,
             "    async fn mask(&mut self, stem: usize) -> Result<Vec<f32>, String> {",

@@ -11,7 +11,7 @@ use roformer::weights::{Source, Store, WeightError};
 use roformer::{CHUNK, DEPTH, FEATURES, OVERLAP, STEMS};
 use roformer_gpu::net::{Job, Net, Step};
 use roformer_gpu::{
-    Gpu, STEPS_IN_FLIGHT, Signal, StepClock, Steps, WeightFormat, Window, rejected_text,
+    Gpu, STEPS_IN_FLIGHT, Signal, StepClock, Steps, WeightFormat, Window, step_check,
 };
 use stem_protocol::{
     self as protocol, Mix, ModelSource, Reply, Request, SegmentStem, Settings, ToWorker, kind,
@@ -1100,8 +1100,8 @@ impl Steps for OnGpu<'_, '_> {
 
 impl Checks {
     /// Checks the time of the step `s`, whose end the worker saw at
-    /// `ended`, and the errors.  `newer` is true when a newer step is
-    /// still in flight, so the errors can come from it too.
+    /// `ended`, and the errors, with `step_check`.  `newer` is true when a
+    /// newer step is still in flight, so the errors can come from it too.
     async fn ended(
         &mut self,
         gpu: &Gpu,
@@ -1124,21 +1124,7 @@ impl Checks {
             self.worst = dt;
             self.worst_what = step.to_string();
         }
-        let errors = gpu.take_errors();
-        if let Some(first) = errors.first() {
-            return Err(rejected_text(step, newer, errors.len(), first));
-        }
-        let limit = if first {
-            self.limit.max(60.0)
-        } else {
-            self.limit
-        };
-        if dt > limit {
-            return Err(format!(
-                "one GPU step ({step}) took {dt:.1} s, over the {limit:.0} s limit; stopped so the computer stays responsive"
-            ));
-        }
-        Ok(())
+        step_check(step, newer, &gpu.take_errors(), dt, self.limit, first)
     }
 }
 
@@ -1408,9 +1394,9 @@ impl GpuHalf for GpuNetwork<'_> {
         for step in shared.into_iter().chain(j.mask_steps(stem)) {
             self.pace.run(self.gpu, j, &step).await?;
         }
-        // Each step in flight ends, with its checks, before the mask is read
-        // and used.  So a GPU error of the last mask step stops the run
-        // before the mask is accepted.  The read waits for no later step.
+        // Each step in flight ends, with its checks, before the mask is
+        // read.  So a GPU error of the last mask step stops the run before
+        // the mask is read.  The read waits for no later step.
         self.pace.drain(self.gpu, j).await?;
         let mask = j.mask().await?;
         trace(

@@ -314,7 +314,14 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
   * 2-2: `time_rec_counts_the_steps_of_a_round` counts the calls of `record`.  It and the source test failed against an empty `Timed::submit` (`fail-2-2-a-submit-noop.log`).
   * 2-3: the source test pins the whole bodies of `Pace::run`, `Pace::drain` and `time_rec`'s `InFlight` arm, and the drain of `GpuNetwork::mask`.  It failed against a drain after each step of `Pace::run` (`fail-2-3-a-run-drains.log`).  It also failed against one in `time_rec`'s round loop (`fail-2-3-b-time-rec-drains.log`), and in the step loop of `mask` (`fail-2-3-c-mask-drains-in-loop.log`).
   * 2-4 to 2-7: the docs, TD-102 and the comment before the drain of the mask.
-  * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  `worker/src/web.rs` changes only the form of the error text and a comment, so no browser run.
+  * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  The worker makes the same error text through `rejected_text`, and changes a comment, so no browser run.
+* [x] 2026-11-15: the fixes of review round 3 (`<scratch>/m6/r3/fixes.txt`).  Each new or changed test failed first on an assert, against a mutant (`<scratch>/m6/r3/fail-*.log`):
+  * 3-1: `an_error_at_the_end_of_a_step_stops_the_run` drives `Window` with steps whose end fails.  It failed against a `Window::step` that drops the error (`fail-3-1-a-step-drops-err.log`), and the same in `Window::drain` (`fail-3-1-b-drain-drops-err.log`).
+  * 3-1: the checks at the end of a step are `roformer_gpu::step_check`, with the same texts.  `a_step_check_gives_the_errors_first_then_the_limit` failed against `errors.get(1)` (`fail-3-1-d-second-error.log`).  It also failed against `dt > limit * 1e9` (`fail-3-1-e-limit-times-1e9.log`), and against no limit of 60 s for the first step of a kind (`fail-3-1-f-no-first-step-limit.log`).
+  * 3-1: `the_worker_paces_as_calibration_times` pins that `Checks::ended` returns `step_check` with `gpu.take_errors()`.  It failed against no errors (`fail-3-1-c-no-take-errors.log`) and against a dropped result (`fail-3-1-g-ended-drops-result.log`).
+  * 3-5: the source test pins the whole body of `Pace::all`, and a drain before each read of `selftest`.  It failed against `Pace::all` with no drain (`fail-3-5-a-all-no-drain.log`), and against the removal of each of the 4 drains of `selftest` (`fail-3-5-b-selftest-no-drain-*.log`).
+  * 3-2: `step_check` removes the shadow of `first`.  3-3, 3-4 and 3-6: the docs, the comment before the drain of the mask, and this plan.
+  * `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed.  `e2e selftest` passed in Chrome and Safari (`<scratch>/m6/r3/selftest-*.log`).
 
 ## Surprises and discoveries
 

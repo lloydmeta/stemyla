@@ -1319,6 +1319,40 @@ pub fn rejected_text(
     )
 }
 
+/// The step limit of the first step of a kind, in seconds, when the
+/// given limit is lower.  The first step of a kind can compile its
+/// kernels.
+pub const FIRST_STEP_LIMIT: f64 = 60.0;
+
+/// The checks at the end of `step`, which took `dt` seconds.  `errors`
+/// are the WebGPU errors since the last check.  The errors come first:
+/// any error gives [`rejected_text`].  Then a step over `limit` gives
+/// the limit text.  The first step of a kind (`first_of_kind`) has a
+/// limit of at least [`FIRST_STEP_LIMIT`].
+pub fn step_check(
+    step: &impl std::fmt::Display,
+    newer: bool,
+    errors: &[String],
+    dt: f64,
+    limit: f64,
+    first_of_kind: bool,
+) -> Result<(), String> {
+    if let Some(first_error) = errors.first() {
+        return Err(rejected_text(step, newer, errors.len(), first_error));
+    }
+    let limit = if first_of_kind {
+        limit.max(FIRST_STEP_LIMIT)
+    } else {
+        limit
+    };
+    if dt > limit {
+        return Err(format!(
+            "one GPU step ({step}) took {dt:.1} s, over the {limit:.0} s limit; stopped so the computer stays responsive"
+        ));
+    }
+    Ok(())
+}
+
 /// The device, its kernels and the buffers it makes.  The device is
 /// private, so no other crate can make a buffer on it that is not a
 /// [`GpuBuffer`] (MEM-3).
@@ -4727,6 +4761,94 @@ mod tests {
         assert_eq!(ends(1), [(0, false), (1, false), (2, false)]);
     }
 
+    /// Steps whose end fails at step `fails_at`, with the error
+    /// `fails_at`, as a GPU error or the step limit does.
+    struct Fails {
+        fails_at: usize,
+        events: Vec<Event>,
+    }
+
+    impl Steps for Fails {
+        type Step = usize;
+        type Submitted = usize;
+        type Signal = ();
+        type Error = usize;
+
+        fn submit(&mut self, step: usize) -> usize {
+            self.events.push(Event::Submit(step));
+            step
+        }
+
+        fn signal(&mut self) {}
+
+        async fn end(&mut self, i: usize, (): (), _newer: bool) -> Result<(), usize> {
+            self.events.push(Event::Await(i));
+            if i == self.fails_at { Err(i) } else { Ok(()) }
+        }
+    }
+
+    /// Runs `count` steps with `depth` in flight, then drains, as the
+    /// worker's `Pace::all` does.  It stops at the first error.  Gives
+    /// the result and the events.
+    fn run_until_error(
+        depth: usize,
+        count: usize,
+        fails_at: usize,
+    ) -> (Result<(), usize>, Vec<Event>) {
+        let mut window = Window::new(depth);
+        let mut steps = Fails {
+            fails_at,
+            events: Vec::new(),
+        };
+        for i in 0..count {
+            if let Err(e) = now_or_never(window.step(&mut steps, i)) {
+                return (Err(e), steps.events);
+            }
+        }
+        let drained = now_or_never(window.drain(&mut steps));
+        (drained, steps.events)
+    }
+
+    /// An error at the end of a step stops the run:
+    /// * with 2 in flight and 4 steps, the end of step 1 fails in
+    ///   `Window::step`, which gives that error; step 3 is not submitted;
+    /// * with 2 in flight and 3 steps, the end of step 2 fails in
+    ///   `Window::drain`, which gives that error;
+    /// * with 3 in flight and 3 steps, the end of step 1 fails in
+    ///   `Window::drain`, which gives that error; step 2 is not awaited.
+    #[test]
+    fn an_error_at_the_end_of_a_step_stops_the_run() {
+        use Event::*;
+        assert_eq!(
+            run_until_error(2, 4, 1),
+            (
+                Err(1),
+                vec![Submit(0), Submit(1), Await(0), Submit(2), Await(1)]
+            )
+        );
+        assert_eq!(
+            run_until_error(2, 3, 2),
+            (
+                Err(2),
+                vec![
+                    Submit(0),
+                    Submit(1),
+                    Await(0),
+                    Submit(2),
+                    Await(1),
+                    Await(2)
+                ]
+            )
+        );
+        assert_eq!(
+            run_until_error(3, 3, 1),
+            (
+                Err(1),
+                vec![Submit(0), Submit(1), Submit(2), Await(0), Await(1)]
+            )
+        );
+    }
+
     /// The text of 2 rejected operations at the end of step `layer 3`,
     /// the first `bad bind`:
     /// * with no newer step in flight, it names `layer 3` alone;
@@ -4741,6 +4863,48 @@ mod tests {
         assert_eq!(
             rejected_text(&"layer 3", true, 2, "bad bind"),
             "the GPU rejected 2 operation(s) during layer 3 or the step in flight after it, so the result would be wrong; first: bad bind"
+        );
+    }
+
+    /// The checks at the end of step `layer 3`, with a limit of 5 s:
+    /// * no error, 4 s: Ok;
+    /// * one error `bad bind`, 4 s: the rejection of 1 operation, first
+    ///   `bad bind`;
+    /// * two errors, `bad bind` first, with a newer step in flight, 4 s:
+    ///   the rejection of 2 operations, first `bad bind`, that names the
+    ///   newer step;
+    /// * one error, 70 s: the rejection, not the limit text;
+    /// * no error, 5.5 s: the limit text of 5 s;
+    /// * the first step of its kind, 59 s: Ok;
+    /// * the first step of its kind, 61 s: the limit text of 60 s.
+    #[test]
+    fn a_step_check_gives_the_errors_first_then_the_limit() {
+        let one = ["bad bind".to_string()];
+        let two = ["bad bind".to_string(), "bad size".to_string()];
+        let check = |errors: &[String], newer, dt, first_of_kind| {
+            step_check(&"layer 3", newer, errors, dt, 5.0, first_of_kind)
+        };
+        assert_eq!(check(&[], false, 4.0, false), Ok(()));
+        assert_eq!(
+            check(&one, false, 4.0, false),
+            Err("the GPU rejected 1 operation(s) during layer 3, so the result would be wrong; first: bad bind".into())
+        );
+        assert_eq!(
+            check(&two, true, 4.0, false),
+            Err("the GPU rejected 2 operation(s) during layer 3 or the step in flight after it, so the result would be wrong; first: bad bind".into())
+        );
+        assert_eq!(
+            check(&one, false, 70.0, false),
+            Err("the GPU rejected 1 operation(s) during layer 3, so the result would be wrong; first: bad bind".into())
+        );
+        assert_eq!(
+            check(&[], false, 5.5, false),
+            Err("one GPU step (layer 3) took 5.5 s, over the 5 s limit; stopped so the computer stays responsive".into())
+        );
+        assert_eq!(check(&[], false, 59.0, true), Ok(()));
+        assert_eq!(
+            check(&[], false, 61.0, true),
+            Err("one GPU step (layer 3) took 61.0 s, over the 60 s limit; stopped so the computer stays responsive".into())
         );
     }
 
