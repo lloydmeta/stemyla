@@ -46,36 +46,36 @@
       "chip": "Apple M2 Pro"
     },
     "version": "27.2",
-    "date": "2026-11-14",
-    "commit": "9d6d447",
+    "date": "2026-11-15",
+    "commit": "d3408f5",
     "runs": [
       {
         "order": 1,
         "kernels": "matmul v64k8,v64k8, attention vfused",
-        "chunk_lower_quartile": 5.58
+        "chunk_lower_quartile": 5.38
       },
       {
         "order": 2,
-        "kernels": "matmul v64k8,v64, attention vfused",
-        "chunk_lower_quartile": 5.55
+        "kernels": "matmul v64k8,v64k8, attention vfused",
+        "chunk_lower_quartile": 5.37
       },
       {
         "order": 3,
-        "kernels": "matmul v64k8,v64k8, attention vfused",
-        "chunk_lower_quartile": 5.57
+        "kernels": "matmul v64k8,v64, attention vfused",
+        "chunk_lower_quartile": 5.37
       },
       {
         "order": 4,
         "kernels": "matmul v64k8,v64k8, attention vfused",
-        "chunk_lower_quartile": 5.57
+        "chunk_lower_quartile": 5.37
       },
       {
         "order": 5,
-        "kernels": "matmul v64k8,v64k8, attention vfused",
-        "chunk_lower_quartile": 5.58
+        "kernels": "matmul v64k8,v64, attention vfused",
+        "chunk_lower_quartile": 5.38
       }
     ],
-    "baseline": 5.57,
+    "baseline": 5.37,
     "tolerance_pct": 10.0,
     "raise": ""
   }
