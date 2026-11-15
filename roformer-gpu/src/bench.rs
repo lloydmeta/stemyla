@@ -1039,7 +1039,7 @@ impl Choice {
 /// Pro 5500M where a longer bench measured fused 2.5 times faster.
 /// Version 3 calibrates once for each weight format, with the f16
 /// variants for f16 weights (M9 of `plans/completed/stream-from-storage.md`).
-/// Version 4 adds `v64k8`, from M4 of `plans/active/gpu-speed.md`.
+/// Version 4 adds `v64k8`, from M4 of `plans/completed/gpu-speed.md`.
 /// Version 5 times whole time-transformer steps, with a wait after each,
 /// as the separation runs them ([`time_axis_per_chunk`]; M5, TD-101), for
 /// [`ATTENTION_ROUNDS`] rounds, with [`FUSED_MARGIN`] 1.0.  Version 6

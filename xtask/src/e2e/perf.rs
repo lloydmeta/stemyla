@@ -1,4 +1,4 @@
-//! The pure parts of `xtask e2e perf` (M2 of `plans/active/gpu-speed.md`):
+//! The pure parts of `xtask e2e perf` (M2 of `plans/completed/gpu-speed.md`):
 //! the result of a run, read from the page's log; the GPU time of a
 //! profile run in four groups; the reasons that a run is never a pass;
 //! the gate; and the baselines file, `xtask/perf-baselines.json`.

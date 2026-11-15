@@ -7,7 +7,7 @@ description = "Page-side Web Worker that writes the page's song-sized files to b
 
 # Only the browser glue is for wasm32; natively the crate is empty.  Its
 # messages are in `stem_protocol::write` (M5.1 of
-# `docs/plans/active/gpu-speed.md`).
+# `docs/plans/completed/gpu-speed.md`).
 [dependencies]
 stem-protocol = { path = "../protocol" }
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M4 of `plans/active/gpu-speed.md`.  The parent's M4 section and its "Validation and acceptance" stay the criteria.
+This is the milestone plan for M4 of `plans/completed/gpu-speed.md`.  The parent's M4 section and its "Validation and acceptance" stay the criteria.
 
 Safari sets workgroup memory to zero with one thread, byte by byte (`references/browser-quirks.md`).  So in Safari, a kernel with fewer bytes of workgroup memory for each workgroup can be faster on the same grid.  M4 adds such matmul kernels as calibration candidates.  Each GPU keeps a candidate only if it measures it faster, so the Radeon and the iPhone keep their kernels.
 
@@ -86,7 +86,7 @@ In `docs/references/browser-quirks.md`, entry "Safari sets workgroup memory to z
 
 * The cost grows with the bytes of workgroup memory and the number of workgroups, by WebKit's source.  M3 measured it only at 10 KiB and at 0 KiB.
 * More work for each byte did not help in Safari: `v64-g4` (1.014 to 1.033 times `v64` at K 256) and `v128` (1.30 to 1.59).
-* M4 of `plans/active/gpu-speed.md` tries fewer bytes for each workgroup on the same grid.
+* M4 of `plans/completed/gpu-speed.md` tries fewer bytes for each workgroup on the same grid.
 
 Acceptance: `cargo run -p xtask -- docs-check` passes.  The commit holds only this file.
 

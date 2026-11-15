@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M1 of `plans/active/gpu-speed.md`.  The parent's M1 section stays the criteria.
+This is the milestone plan for M1 of `plans/completed/gpu-speed.md`.  The parent's M1 section stays the criteria.
 
 `e2e memory-budget` fails its worker growth check of 4 MB at the default chunk, the chunk that users run.  The worker grows by one chunk's working set, about 95 MB, and then stays flat.  So the check tests the wrong thing.  M1 replaces it with four checks that MEM-4 needs.  M1 also finds where the 95 MB goes, buffer by buffer, and cuts the cheap parts.  The cuts give room to M6, which holds a second chunk's input while the GPU runs.  The stems stay the same byte for byte.
 
@@ -171,7 +171,7 @@ Each in the commit of the step that makes it true (DOC-1):
 * `docs/tech-debt.md` (Step 7 or 8):
   * TD-11: remove the bullet on the chunk.  Change its "Fix:" line: the tab total is done; the JS heap and the WebGL textures are left.  Change the bullet on the features that `GpuNetwork::stems` drops: the wasm test now sees the CPU half's working set, with a fake GPU half that calls the real normalisation.  Keep what still has no check: the real `Job` and `Gpu::read` in a run without a GPU, and the JS heap.
   * TD-54: change its "Fix:" line, since TD-11's assertion at the default chunk is done.
-* Parent plan (`docs/plans/active/gpu-speed.md`): only the orchestrator edits it.  The team leader gives a diff of its M6 section at the checkpoint before review round 1.  It says that M6 adds its second chunk's input as a named part of the working-set function, gets a read cursor apart from the accept cursor, and stays under `TAB_BUDGET_MB`.
+* Parent plan (`docs/plans/completed/gpu-speed.md`): only the orchestrator edits it.  The team leader gives a diff of its M6 section at the checkpoint before review round 1.  It says that M6 adds its second chunk's input as a named part of the working-set function, gets a read cursor apart from the accept cursor, and stays under `TAB_BUDGET_MB`.
 
 ### Before review round 1
 

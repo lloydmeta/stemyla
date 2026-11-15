@@ -1119,7 +1119,7 @@ mod tests {
         (h % 2001) as f32 / 1000.0 - 1.0
     }
 
-    /// Cut 3 of M1 of `plans/active/gpu-speed.md`.  The input has one
+    /// Cut 3 of M1 of `plans/completed/gpu-speed.md`.  The input has one
     /// frame of one band that is all zeros.  It asserts:
     /// * the bands that `normalise_bands` writes, put at the offsets that
     ///   it gives, equal the normalised input made whole, bit for bit;

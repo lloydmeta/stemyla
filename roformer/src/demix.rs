@@ -203,7 +203,7 @@ impl<S: MixSource> Demixer<S> {
     /// `span`, widened inside the song to a chunk of frames, or to the
     /// whole song if it is shorter.  So each read, the last chunks' too,
     /// takes buffers of the same size, and leaves no new holes in the
-    /// heap (M1 of `plans/active/gpu-speed.md`).
+    /// heap (M1 of `plans/completed/gpu-speed.md`).
     fn whole(&self, span: Range<usize>) -> Range<usize> {
         let want = self.chunk.min(self.frames);
         if span.end - span.start >= want {
@@ -712,7 +712,7 @@ mod tests {
         d.pos += d.step;
     }
 
-    /// Cut 1 of M1 of `plans/active/gpu-speed.md`: each stem goes to the
+    /// Cut 1 of M1 of `plans/completed/gpu-speed.md`: each stem goes to the
     /// demixer as it is made.  `accept_stem` for each stem, then
     /// `end_chunk`, give the sums and the segments of the old `accept`
     /// (`accept_with_a_window_clone`), bit for bit, also at the first and
@@ -1005,7 +1005,7 @@ mod tests {
         }
     }
 
-    /// M1 of `plans/active/gpu-speed.md`: each chunk's input has the
+    /// M1 of `plans/completed/gpu-speed.md`: each chunk's input has the
     /// chunk's size and capacity, the last chunks' too, so their buffers
     /// leave no new holes in the heap.
     #[test]

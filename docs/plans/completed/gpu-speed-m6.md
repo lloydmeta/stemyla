@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M6 of `plans/active/gpu-speed.md`.  The parent's M6 section, with its goal "M6 measures before it builds" and its cases 1 to 11, and its "Validation and acceptance" stay the criteria.
+This is the milestone plan for M6 of `plans/completed/gpu-speed.md`.  The parent's M6 section, with its goal "M6 measures before it builds" and its cases 1 to 11, and its "Validation and acceptance" stay the criteria.
 
 Goal (the parent): the GPU does not wait for the CPU, and the CPU does not wait for the GPU, where the work allows.  Two changes in `worker/src/web.rs` can do this, and each one is measured on its own:
 

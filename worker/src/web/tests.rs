@@ -3432,7 +3432,7 @@ async fn a_chunk_of_the_default_length_holds_its_working_set() {
     }
 }
 
-/// M1 of `plans/active/gpu-speed.md`.  The mix is in memory, so a read is
+/// M1 of `plans/completed/gpu-speed.md`.  The mix is in memory, so a read is
 /// two channels of `min(chunk, frames)` floats.  The cases put the last
 /// chunks on the reflection path and on the zero path.  It asserts:
 /// * the peak that each `Demixer::next_input` holds is the span that it

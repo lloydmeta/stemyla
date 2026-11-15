@@ -1,5 +1,5 @@
 //! A page-side fake of the write worker, for the browser tests (M5.1 of
-//! `docs/plans/active/gpu-speed.md`): the test runner serves no worker
+//! `docs/plans/completed/gpu-speed.md`): the test runner serves no worker
 //! build.  It sends `write-ready`, takes each request through a
 //! structured clone with its transfers, as `postMessage` does, and serves
 //! it with write streams, as the page wrote before the write worker: a

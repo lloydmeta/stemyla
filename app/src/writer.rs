@@ -1,5 +1,5 @@
 //! The page's side of the write worker (M5.1 of
-//! `docs/plans/active/gpu-speed.md`).  The page writes its song-sized
+//! `docs/plans/completed/gpu-speed.md`).  The page writes its song-sized
 //! files through the write worker, which writes them with sync access
 //! handles: Safari keeps a swap file of each write stream that closes
 //! (TD-103), and the main thread has no sync access handle.  The small

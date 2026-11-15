@@ -216,7 +216,7 @@ Decision 0024, through the `review-rounds` skill.  M3 has no review rounds if it
 #### Kick-off prompt
 
 ```text
-/orchestrate docs/plans/active/gpu-speed.md.  Weights: third_party/models/bs_roformer_sw.f16.safetensors.  CHROMEDRIVER: $CHROMEDRIVER, the driver of Chrome for Testing 157 (mac-arm64).
+/orchestrate docs/plans/completed/gpu-speed.md.  Weights: third_party/models/bs_roformer_sw.f16.safetensors.  CHROMEDRIVER: $CHROMEDRIVER, the driver of Chrome for Testing 157 (mac-arm64).
 ```
 
 #### Extra stop conditions

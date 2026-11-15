@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M3 of `plans/active/gpu-speed.md`.  The parent's M3 section stays the criteria.
+This is the milestone plan for M3 of `plans/completed/gpu-speed.md`.  The parent's M3 section stays the criteria.
 
 Safari 27.2 runs the same WGSL 1.4 to 1.7 times slower than Chrome 157 on the maintainer's M2 Pro.  M3 finds why, with measurements, and finds a kernel design that is fast in both browsers.  M4 (a matmul with less workgroup memory for each unit of work) and M5 (a flash-style time-axis attention) start from that design.
 

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M5.1 of `plans/active/gpu-speed.md`.  The parent's M5.1 section, with its goal and its 6 cases, stays the criteria.
+This is the milestone plan for M5.1 of `plans/completed/gpu-speed.md`.  The parent's M5.1 section, with its goal and its 6 cases, stays the criteria.
 
 Goal (the parent): no test run and no use of the app leaves browser data behind that grows with the number of runs.  On 2026-11-14, test runs had left about 352 GB in `$TMPDIR`: Chrome profiles, and Safari's write-stream swap files and blob folders.
 

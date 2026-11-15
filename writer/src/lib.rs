@@ -1,4 +1,4 @@
-//! The write worker (M5.1 of `docs/plans/active/gpu-speed.md`): a dedicated
+//! The write worker (M5.1 of `docs/plans/completed/gpu-speed.md`): a dedicated
 //! Web Worker on the page side.  It writes the page's song-sized files to
 //! browser storage (OPFS) through sync access handles: the source files of
 //! a song, its mix, the stems of the memory path and the save files.

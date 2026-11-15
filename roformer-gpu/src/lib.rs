@@ -484,7 +484,7 @@ pub fn bit_differences(got: &[f32], want: &[f32]) -> BitDifferences {
 /// product (the p.v product: K = 62 or 1,151, B not K-contiguous), the
 /// fallback `i64` runs it instead.
 ///
-/// `v64k8` is `v64` with BK 8, from M4 of `plans/active/gpu-speed.md`: 6
+/// `v64k8` is `v64` with BK 8, from M4 of `plans/completed/gpu-speed.md`: 6
 /// KiB of workgroup memory, not 10 KiB, with `v64`'s grid, thread map and
 /// sum order.  Safari sets workgroup memory to zero with one thread, byte
 /// by byte (`references/browser-quirks.md`).  There it took 0.94 to 0.95
@@ -566,7 +566,7 @@ pub enum FusedKernel {
     /// `attention_tiled.wgsl`, scalar reads of workgroup memory.
     Tiled,
     /// `vfused`, `attention_vec4.wgsl`: vec4 reads of workgroup memory,
-    /// for the time axis only (M5 of `plans/active/gpu-speed.md`).
+    /// for the time axis only (M5 of `plans/completed/gpu-speed.md`).
     Vec4,
 }
 
@@ -3713,7 +3713,7 @@ mod tests {
     /// Why: calibration protects the GPUs that this Mac cannot measure
     /// from a new candidate, which it times, but not from a changed
     /// current kernel.  So the WGSL of each current kernel stays the same
-    /// byte for byte (M4 of `plans/active/gpu-speed.md`).
+    /// byte for byte (M4 of `plans/completed/gpu-speed.md`).
     #[test]
     fn current_kernels_keep_their_wgsl() {
         let all: Vec<(String, String)> = generated_sources()

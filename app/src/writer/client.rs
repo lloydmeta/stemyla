@@ -1,5 +1,5 @@
 //! The page's client of the write worker (M5.1 of
-//! `docs/plans/active/gpu-speed.md`).
+//! `docs/plans/completed/gpu-speed.md`).
 //!
 //! It starts its port at the first write, and again after the port
 //! stopped.  It holds each request until the port says `write-ready`, as

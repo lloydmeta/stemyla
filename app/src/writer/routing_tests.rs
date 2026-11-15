@@ -1,5 +1,5 @@
 //! Browser tests of the page's routed writes (M5.1 of
-//! `docs/plans/active/gpu-speed.md`, Step 5c): the song-sized files go
+//! `docs/plans/completed/gpu-speed.md`, Step 5c): the song-sized files go
 //! through the write worker, and the small files stay on write streams.
 //! A recording port stands in for the worker: it keeps each request and
 //! answers `written`, with a block's array given back.

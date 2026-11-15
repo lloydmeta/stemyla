@@ -4,7 +4,7 @@ Status: accepted (proposed 2026-11-12 by the agent, in Step 4 of `plans/complete
 
 ## Context
 
-Decision 0026 says that `xtask check --tier push` runs no `e2e` scenario, because CI runs the browser tests.  M2 of `plans/active/gpu-speed.md` adds `xtask e2e perf`, which separates the 1-minute synthetic song and gates the lower quartile of the chunk times against `xtask/perf-baselines.json`.  The gate needs a real GPU, the model file and an unlocked screen.  CI has no GPU and no model (ASSET-1), so CI cannot run it.  M3 to M6 change the kernels and the worker, and a later change must not make separation slower without a failure.
+Decision 0026 says that `xtask check --tier push` runs no `e2e` scenario, because CI runs the browser tests.  M2 of `plans/completed/gpu-speed.md` adds `xtask e2e perf`, which separates the 1-minute synthetic song and gates the lower quartile of the chunk times against `xtask/perf-baselines.json`.  The gate needs a real GPU, the model file and an unlocked screen.  CI has no GPU and no model (ASSET-1), so CI cannot run it.  M3 to M6 change the kernels and the worker, and a later change must not make separation slower without a failure.
 
 ## Options
 

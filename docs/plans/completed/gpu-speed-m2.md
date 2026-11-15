@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M2 of `plans/active/gpu-speed.md`.  The parent's M2 section stays the criteria.
+This is the milestone plan for M2 of `plans/completed/gpu-speed.md`.  The parent's M2 section stays the criteria.
 
 M3 to M6 change the kernels and the worker to make separation faster.  Each change needs a measure, and a later change must not make separation slower without a failure.  M2 adds a scenario, `xtask e2e perf`, that separates the 1-minute synthetic song and writes a result.  M2 also adds a gate: it compares the result with a committed baseline for the browser and the adapter.  `check --tier push` runs the gate on this M2 Pro when the model is named.
 

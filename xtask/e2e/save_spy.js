@@ -58,7 +58,7 @@
   window.__e2e_writes = 0;
   // A write of the page: a write of one of its write streams (its small
   // files), or a post to a worker with a transfer list: a block or a file
-  // that the write worker writes (M5.1 of plans/active/gpu-speed.md).
+  // that the write worker writes (M5.1 of plans/completed/gpu-speed.md).
   // The post of an encode of the memory path, with its arrays, counts
   // too; it only adds a heap reading.
   const page_wrote = () => {

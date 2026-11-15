@@ -284,7 +284,7 @@ mod tests {
         (h % 2001) as f32 / 1000.0 - 1.0
     }
 
-    /// Cut 2 of M1 of `plans/active/gpu-speed.md`: `apply_masks` masks one
+    /// Cut 2 of M1 of `plans/completed/gpu-speed.md`: `apply_masks` masks one
     /// frame at a time, and gives the samples of the masked whole
     /// spectra, bit for bit.
     #[test]

@@ -1,5 +1,5 @@
 //! The messages between the page and its write worker (M5.1 of
-//! `docs/plans/active/gpu-speed.md`).  The write worker writes the page's
+//! `docs/plans/completed/gpu-speed.md`).  The write worker writes the page's
 //! song-sized files through sync access handles, since Safari keeps a swap
 //! file of each write stream that closes (TD-103).  Each message is a
 //! plain JS object whose `type` starts with `write-`, so a message for one

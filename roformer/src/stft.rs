@@ -169,7 +169,7 @@ mod tests {
             .collect()
     }
 
-    /// Cut 2 of M1 of `plans/active/gpu-speed.md`.  The imaginary parts
+    /// Cut 2 of M1 of `plans/completed/gpu-speed.md`.  The imaginary parts
     /// of the DC and Nyquist bins are not 0.  It asserts:
     /// * the function is asked for each frame once, in order;
     /// * the samples equal those of the whole spectrum's inverse, bit for

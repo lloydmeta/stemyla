@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This is the milestone plan for M5 of `plans/active/gpu-speed.md`.  The parent's M5 section and its "Validation and acceptance" stay the criteria.
+This is the milestone plan for M5 of `plans/completed/gpu-speed.md`.  The parent's M5 section and its "Validation and acceptance" stay the criteria.
 
 M5 has two parts, in this order:
 
@@ -111,7 +111,7 @@ In `docs/tech-debt.md`, TD-101, write the title again: calibration times split a
 
 * Safari chose split in about 10 of 22 calibrations of Steps 9 to 11 of `plans/completed/gpu-speed-m4.md`, the forced-`mm` runs included.
 * Chrome has the same bias: calibration puts split about 0.26 s for each chunk too low against fused (M2 Step 5.3).  Chrome chooses split there, and split is the faster policy in Chrome.
-* The fix: M5 of `plans/active/gpu-speed.md` finds the cause, and calibration times the time axis as the separation runs it.
+* The fix: M5 of `plans/completed/gpu-speed.md` finds the cause, and calibration times the time axis as the separation runs it.
 
 Acceptance: `cargo run -p xtask -- docs-check` passes.  The commit holds only this file.
 

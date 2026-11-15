@@ -58,7 +58,7 @@
 //!   `docs/plans/completed/stream-from-storage-m3.md`, step 4 of M4).  The
 //!   page's growth includes its write of the mix.  The worker grows by
 //!   one chunk's working set, so it has four checks (M1 of
-//!   `docs/plans/active/gpu-speed.md`).  It stays flat after chunk 2.  It
+//!   `docs/plans/completed/gpu-speed.md`).  It stays flat after chunk 2.  It
 //!   grows by at most 4 MB more for the 4-minute song than for the
 //!   1-minute song.  Its growth fits the working set's peak plus a
 //!   measured headroom.  The tab total fits the iPhone's budget (MEM-4).
@@ -81,7 +81,7 @@
 //!   and with this GPU's own; the speed is reported as a measure.
 //! * `perf`: separates the 1-minute song of `memory-budget` at the default
 //!   chunk, `--runs N` times (default 1), each in a new browser profile
-//!   (`--weights`; M2 of `docs/plans/active/gpu-speed.md`, `e2e/perf.rs`).
+//!   (`--weights`; M2 of `docs/plans/completed/gpu-speed.md`, `e2e/perf.rs`).
 //!   Each run writes `<out>/perf-<browser>-<n>.json`: the browser and its
 //!   version, the adapter and its `isFallbackAdapter`, the kernels, the
 //!   time of each chunk, the median and the lower quartile of chunks 2 to
@@ -1748,7 +1748,7 @@ impl MemoryPeak {
 }
 
 /// The write worker's WebAssembly memory, in MB, which no log line gives
-/// (M5.1 of `plans/active/gpu-speed.md`).  Its module starts with 17 pages
+/// (M5.1 of `plans/completed/gpu-speed.md`).  Its module starts with 17 pages
 /// of 64 KiB (1.11 MB, the memory section of `write-worker_bg.wasm` on
 /// 2026-11-14).  It holds only each request's paths in Rust; the bytes
 /// stay in JS.  So 2 pages more than its start bound it: 1.25 MB.
@@ -2243,7 +2243,7 @@ fn memory_budget(o: &Opts) -> Result<()> {
                 "memory-budget: the {minutes}-minute song: page wasm grew by {g:.0} MB during the separation"
             ));
         }
-        // M1 of `plans/active/gpu-speed.md`: the worker grows by one
+        // M1 of `plans/completed/gpu-speed.md`: the worker grows by one
         // chunk's working set, then stays flat.
         let growth = worker_growth(&p.log[from..]);
         if let Some(g) = growth {
