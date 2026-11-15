@@ -395,6 +395,7 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-15, agent (orchestrator), intent review of M5.1, round 2: the browser-run bullet reaches the review agents through each milestone plan, keeps `e2e perf` and `memory-budget` with the team leader, and makes the team leader, not the orchestrator, hold agents during a verdict run (i2-1).  M6's base is the commit before M6's first commit (i2-2).  The two TD fixes are in M6's section (i2-3).
 * 2026-11-15, agent (orchestrator), intent review of M5.1, round 3: no reason exists to wait with the sync access handles of the worker tests' `plant` and `plant_at`, so M6's first commit makes the change (i3-1).  TD-11 already calls the write worker's 1.25 MB an estimate, so it needs no fix (i3-2).
 * 2026-11-15, agent (orchestrator), intent review of M5.1, round 4 (i4-1): the sync-handle `plant` truncates first, as the write worker's test helper does, so a shorter planted file stays shorter; the saving is a whole Safari `web-test` before and after, since `web-test` cannot run two crates alone.
+* 2026-11-15, agent (orchestrator), M6: if Step 2 builds no change, Step 1's commit (the worker tests' `plant` and `plant_at` on sync access handles) still gets review rounds, on that commit alone.  Why: it is code (VERIFY-1), and "no review rounds" in M6's goal meant a milestone that lands no code.
 ## Outcomes and retrospective
 
 Not yet.
