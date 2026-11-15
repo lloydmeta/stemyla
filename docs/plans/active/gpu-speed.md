@@ -337,6 +337,32 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 
 * 2026-11-14, M5's head `f8aa7fe`: `check --tier push` passed 15 lines.  Chrome's gate: 3.59 s against 3.95 s, `matmul v64,v64, attention vfused`.  Safari's gate: 5.54 s against 6.13 s, `matmul v64k8,v64, attention vfused`.
 
+* 2026-11-15, M6 (`plans/active/gpu-speed-m6.md`, Surprises, with each log): overlap on the worker.  M2 Pro, Safari 27.2 and Chrome 157.
+
+  | Step | Safari | Chrome |
+  | - | - | - |
+  | 1, a whole Safari `web-test`, before and after the sync-handle `plant` and `plant_at` | 1,320 swap files (1,697.2 MB) to 1,149 (1,549.5 MB) | the whole `web-test` passes |
+  | 2, chunk, paced, CPU share (the measuring patch, no profile) | 5.603 s, 5.383 s, 3.15 % | 3.630 s, 3.425 s, 5.13 % |
+  | 2, P's prototype (2 steps in flight) against the base, same page | gain, -3.22 % | gain, -4.37 % |
+  | 2, O's bound; O1 and O2's addition at a depth of 2 | 3.07 %; 0.82 %, 0.62 % | 4.86 %; 0.83 %, 0.68 % |
+  | 2, O1 and O2's addition at an unlimited depth | 2.05 %, 1.02 % | 3.20 %, 1.55 % |
+  | 4, P against M6's base (`--runs 4`) | gain, -3.63 % (kernels differ) | gain, -4.32 % |
+  | 6, P against M6's base (`--runs 8`) | gain, -3.70 % (kernels differ) | not run |
+  | 6, baseline | 5.57 s to 5.37 s | 3.59 s to 3.43 s |
+  | 7, `memory-budget`, 3 runs (and 3 with `freq` in Chrome) | growth 55 MB, margin 8.16 MB; tab total 758 MB | the same; tab total 756 MB (799 MB with `freq`) |
+  | 8, the choice check at the head | passes: `vfused` gains 21.3 % over `fused`, 21.2 % over `freq` | passes: 24.0 % over `fused`, 19.5 % over `freq` |
+  | 8, `D` (forced `freq` - `fused`), its noise; calibration's (split - fused); the bias | +0.035 s, 0.020 s; +0.002 s; -0.033 s (8 runs: +0.030 s, 0.220 s; -0.028 s) | -0.265 s, 0.010 s; -0.309 s; -0.044 s |
+
+  * Only P is built: `Pace` keeps 2 steps in flight (`406e819`), and calibration times the time axis the same way (`CALIBRATION` 7).  O1 and O2 are not built (the maintainer's answer, and Step 2).
+  * P gains 3.6 % in Safari, against the estimate of 0.7 % from the profile's gaps (Context).  The waits cost more in Safari than the profile showed.
+  * The CPU pieces are small: the STFT with its upload is 28 to 32 ms, not 0.25 to 0.3 s, and each stem's apply 23 ms.  So the CPU work of a chunk is about 0.17 s.
+  * `e2e stored-stems` gives the base's hashes with `attn=vfused` and `attn=freq` in both browsers.  The scenario always runs `mm=s64`, so it checks P's order with that kernel.
+  * Safari's bias limit (half of `D`, 0.0175 s) fails on the first forced set and holds on a second set and on the 8 runs.  P made `freq` and `fused` almost equal in Safari (`D` 0.5 % of a chunk, against 0.305 s at M5), and `D` changed its sign on the repeat.  The team leader decides on it (M6's Decision log).
+  * The worker grew 55 MB in each separation of Step 7, not 57 MB.  The margin of `WORKER_HEADROOM_MB` (8.16 MB) stays in its band, so the constant stays.
+  * The measuring patch stays off the branch, in the scratchpad of the run (`measure.patch`); M6's Surprises name its fields.
+
+* 2026-11-15, M6's head `cf2e935`: `check --tier push` passed 15 lines.  Chrome's gate: 3.45 s against 3.77 s, `matmul v64,v64, attention vfused`.  Safari's gate: 5.40 s against 5.91 s, `matmul v64k8,v64k8, attention vfused`.
+
 ## Decision log
 
 * 2026-11-12, maintainer: the answers to "Decisions for the maintainer", 1 to 4.
@@ -397,6 +423,12 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
 * 2026-11-15, agent (orchestrator), intent review of M5.1, round 4 (i4-1): the sync-handle `plant` truncates first, as the write worker's test helper does, so a shorter planted file stays shorter; the saving is a whole Safari `web-test` before and after, since `web-test` cannot run two crates alone.
 * 2026-11-15, agent (orchestrator), M6: if Step 2 builds no change, Step 1's commit (the worker tests' `plant` and `plant_at` on sync access handles) still gets review rounds, on that commit alone.  Why: it is code (VERIFY-1), and "no review rounds" in M6's goal meant a milestone that lands no code.
 * 2026-11-15, maintainer: M6 keeps at most 2 steps in flight; the apply of each mask under the next stem (O1) is not built.  Why: at a depth of 2 its bound is 0.83 % (Chrome) and 0.82 % (Safari); only a deeper queue gives 3.20 % and 2.05 %, an upper bound under the 3 % rule in Safari and just over it in Chrome.
+* 2026-11-15, agent (implementer of M6): P is built: its prototype at M6's base gains 4.37 % in Chrome and 3.22 % in Safari, over the 3 % rule.  Its comparison against M6's base then gives 4.32 % and 3.63 % (3.70 % with `--runs 8`), with no loss.
+* 2026-11-15, agent (implementer of M6): O2 is not built: its addition is 0.68 % (Chrome) and 0.62 % (Safari) at a depth of 2, and under 3 % at any depth (1.55 %, 1.02 %).  So Step 3, the chunk time over the input read, is skipped too.
+* 2026-11-15, agent (implementer of M6): O1 is not built at a depth of 2 (0.83 %, 0.82 %).  Its bound at an unlimited depth (3.20 % in Chrome) went to the maintainer, who kept 2 steps in flight.
+* 2026-11-15, agent (implementer of M6): calibration times the time axis with 2 steps in flight (`bench::STEP_WAITS` is `InFlight(STEPS_IN_FLIGHT)`), through the `Window` that `Pace` uses, and `CALIBRATION` is 7 (case 11).
+* 2026-11-15, agent (team leader of M6): Safari's bias of `freq` against `fused` (case 11) holds, judged on the 8 forced runs: -0.028 s, under the noise of `D` (0.220 s).  The first set alone failed (-0.033 s against half of `D`, 0.0175 s).  Why: `D` changed its sign on the repeat (+0.035 s, then -0.025 s), so it is under its noise, and M5's rule then takes the noise as the limit.  Also, `|D|` is about 0.5 % of a chunk, under `T` (1 %), and calibration gives the two policies as equal (+0.002 s), so neither choice costs more than the noise.  Neither policy is choosable on this Mac, since `vfused` is about 21 % ahead.  No fix of the timing and no revert of P.
+
 ## Outcomes and retrospective
 
 Not yet.
