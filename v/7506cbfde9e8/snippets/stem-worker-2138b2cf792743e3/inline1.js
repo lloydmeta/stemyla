@@ -46,14 +46,26 @@ export async function opfs_has(name) {
 function whole(bytes) {
   return bytes.byteOffset === 0 && bytes.byteLength === bytes.buffer.byteLength ? bytes : bytes.slice();
 }
+// Writes the file of `fh` from its start, through a sync access handle,
+// with no write stream: Safari keeps the swap file of each write stream
+// that closes (TD-103).  `body` gets `put`, which appends whole arrays
+// only (MEM-5).  The handle closes on each path.  A failure can leave a
+// partial file; each caller removes it.
 async function write_file(fh, body) {
-  const w = await fh.createWritable();
+  const h = await fh.createSyncAccessHandle();
   try {
-    await body(w);
-    await w.close();
-  } catch (e) {
-    try { await w.abort(); } catch (_) {}
-    throw e;
+    await h.truncate(0);
+    let at = 0;
+    await body(async (bytes) => {
+      // `write` returns the bytes written.  Old browsers return a
+      // promise, so it is awaited, as `truncate`, `flush` and `close` are.
+      const n = await h.write(bytes, { at });
+      if (n !== bytes.byteLength) throw new Error(`wrote ${n} of ${bytes.byteLength} bytes`);
+      at += n;
+    });
+    await h.flush();
+  } finally {
+    await h.close();
   }
 }
 export async function opfs_write(name, src) {
@@ -62,10 +74,14 @@ export async function opfs_write(name, src) {
     const fh = await root.getFileHandle(name, { create: true });
     const slice = 8 << 20;
     const size = src instanceof Blob ? src.size : src.length;
-    await write_file(fh, async (w) => {
+    // Each slice of a `Blob` is read into its own buffer, so no copy of
+    // the whole model is made (MEM-1).
+    await write_file(fh, async (put) => {
       for (let at = 0; at < size; at += slice) {
         const end = Math.min(at + slice, size);
-        await w.write(src instanceof Blob ? src.slice(at, end) : whole(src.subarray(at, end)));
+        await put(src instanceof Blob
+          ? new Uint8Array(new FileReaderSync().readAsArrayBuffer(src.slice(at, end)))
+          : whole(src.subarray(at, end)));
       }
     });
     return true;
@@ -95,6 +111,12 @@ export async function gpu_info(pref) {
   const i = a.info || {};
   return [i.vendor, i.architecture, i.description].filter((s) => s).join(" ") || "unknown adapter";
 }
+export async function gpu_fallback(pref) {
+  if (!navigator.gpu) return "unknown";
+  const a = await navigator.gpu.requestAdapter({ powerPreference: pref });
+  const f = a && a.info ? a.info.isFallbackAdapter : undefined;
+  return f === true ? "yes" : f === false ? "no" : "unknown";
+}
 export async function blob_bytes(blob) {
   return new Uint8Array(await blob.arrayBuffer());
 }
@@ -106,7 +128,11 @@ export async function download_to_opfs(url, name, progress, follow) {
     idle = setTimeout(() => ctl.abort(new Error("no data from the server for 60 s")), 60000);
   };
   arm();
+  // Safari 27 rejects an aborted fetch and its body with its own
+  // "AbortError: Fetch is aborted", not the abort reason (WebKit bug
+  // 246069).  So give the reason, as Chrome does.
   try { return await download_with(url, name, progress, ctl.signal, arm, follow); }
+  catch (e) { throw ctl.signal.aborted ? ctl.signal.reason : e; }
   finally { clearTimeout(idle); }
 }
 async function download_with(url, name, progress, signal, arm, follow) {
@@ -118,12 +144,12 @@ async function download_with(url, name, progress, signal, arm, follow) {
   const reader = r.body.getReader();
   let done = 0, last = 0;
   try {
-    await write_file(fh, async (w) => {
+    await write_file(fh, async (put) => {
       for (;;) {
         const { value, done: end } = await reader.read();
         if (end) break;
         arm();
-        await w.write(whole(value));
+        await put(whole(value));
         done += value.length;
         if (done - last >= 4e6) { progress(done, total); last = done; }
       }

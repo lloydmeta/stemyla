@@ -1,0 +1,1 @@
+import init from './write-worker.js';await init();
