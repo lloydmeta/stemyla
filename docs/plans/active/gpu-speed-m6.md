@@ -279,7 +279,7 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * [x] 2026-11-15: plan review round 1: 1 blocker, 7 should-fix and 2 nits, each applied.
 * [x] 2026-11-15: plan review round 2: 1 blocker, 4 should-fix and 2 nits, each applied.
 * [x] 2026-11-15: Step 1: the test helpers use sync access handles.  The spy tests `plant_helpers_open_no_write_stream` failed first in Chrome, with 2 calls (worker) and 1 call (decoder) of `createWritable` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-fail-spy.log`).  The guard `plant_helpers_truncate_a_longer_file` failed with helpers that had no `truncate(0)`: it read `[2, 2, 2, 1, 1, 1, 1, 1]`, not `[2, 2, 2]`, in both crates (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-fail-truncate.log`).  Then all four tests passed (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-pass.log`).  The whole Safari and Chrome `web-test` runs after the change passed (Surprises).
-* [ ] Step 2: the measurement at M6's base.
+* [x] 2026-11-15: Step 2: the measurement at M6's base, with `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/measure.patch` on `5ad3f82`.  The native tests of `done_signal` and `read_start` failed first with forms that ask WebGPU only at the await, on their flag asserts (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step2-fail-native.log`).  Then `STEMYLA_REQUIRE=gpu,f16 cargo test -p roformer-gpu --release` passed with the patch (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step2-gpu-suite.log`).  P is to be built; O1 and O2 are not, at a depth of 2.  O1's bound at an unlimited depth is 3.20 % in Chrome, so item 2 of "Decisions for the maintainer" is open: a checkpoint for the orchestrator (Surprises, Decision log).
 * [ ] Step 3: the chunk time covers the input read (if O2 is built).
 * [ ] Step 4: P (if built).
 * [ ] Step 5a: O1 (if built).
@@ -294,6 +294,42 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 
 * Step 1, 2026-11-15, Safari 27.2 and Chrome 157 on the M2 Pro.  A whole Safari `web-test` at M6's base left 1,320 swap files, 1,697.2 MB, and 9 blob folders (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-safari-before.log`).  After the change, it left 1,149 swap files, 1,549.5 MB, and 9 blob folders (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-safari-after.log`).  So the change saves 171 swap files, 147.7 MB, for each whole Safari run.  Each crate passed in both runs: the stem worker 111 tests before and 113 after, the decode worker 13 before and 15 after.  The whole Chrome `web-test` after the change passed in each crate (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step1-chrome-after.log`).  The tests that read Safari's `lastModified` after a write in place (`a_mix_file_written_again_after_the_last_read_ends_with_unstored`, `the_end_check_sees_a_mix_file_written_again_at_its_size`) passed in Safari.
 
+* Step 2, 2026-11-15, Chrome 157.0.8103.51 and Safari 27.2 on the M2 Pro, at M6's base with the measuring patch, no `profile=1`.  Each field is the median over chunks 2 to 11 of a run, then the median of 4 runs (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-<browser>-fields/`).  The full table: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/step2-table.md`.  The patch: `/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/measure.patch`; the branch has no commit of it.
+  * The pins: Chrome's unforced run chose `v64,v64` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-chrome-unforced/`), as planned.  Safari's unforced run chose `v64k8,v64k8`, not `v64k8,v64` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-safari-unforced/`).  So Safari's runs used `mm=v64k8,v64k8`, by the rule of Step 2.  Its small products were near: `v64` 1.18 s, `v64k8` 1.16 s.
+
+  | Field (median) | Chrome | Safari |
+  | - | - | - |
+  | chunk | 3.630 s | 5.603 s |
+  | input | 5.2 ms | 6.0 ms |
+  | paced (470 steps) | 3.425 s | 5.383 s |
+  | shared | 3.223 s | 5.087 s |
+  | stem0 to stem5, each | 33.3 to 33.6 ms | 48.8 to 49.8 ms |
+  | reads (6) | 18.7 ms | 42.7 ms |
+  | stft | 32.0 ms | 28.3 ms |
+  | apply0 to apply5, each | 23.2 to 23.4 ms | 23.0 ms |
+  | first21 to first25, each | 6.0 ms | 9.0 to 10.0 ms |
+  | m5w2, m5w3 | 4.0, 4.9 ms | 6.0, 7.0 ms |
+  | head2 | 15.9 ms | 22.0 ms |
+  | rest | 12.1 ms | 11.0 ms |
+  | inflight | 1 | 1 |
+
+  | Predicted gain | Chrome | Safari |
+  | - | - | - |
+  | P: verdict and mean `r` (`/private/tmp/claude-501/-Users-lloyd-Documents-rustt-stemyla/dfc742e1-85d0-46cd-9553-21e0d5ad2fcf/scratchpad/m6/runs/2-<browser>-pace/`) | gain, 3 % or more; -4.37 % (blocks -4.55 %, -4.19 %) | gain, 3 % or more; -3.22 % (blocks -3.17 %, -3.26 %; block 1, -2.34 %, spoiled at 1.45 %) |
+  | O's bound | 4.86 % | 3.07 % |
+  | O1, depth 2 | 0.83 % | 0.82 % |
+  | O2's addition, depth 2 | 0.68 % | 0.62 % |
+  | O1's bound, unlimited depth | 3.20 % | 2.05 % |
+  | O2's addition's bound, unlimited depth | 1.55 % | 1.02 % |
+  | CPU share | 5.13 % | 3.15 % |
+  | The parent's estimate of the waits, from `profile=1` | 7.5 % (bound 10 %) | 0.7 % (bound 3.7 %) |
+
+  * The head runs of P's prototype read `inflight 2` in each chunk, and the base runs `inflight 1`.
+  * P gains 3.2 % in Safari, against the parent's estimate of 0.7 %.  The waits cost more in Safari than the gaps of the profile showed.
+  * The CPU pieces are small: the STFT with its upload is 28 to 32 ms, not the 0.25 to 0.3 s of the parent's Context.  Each stem's apply with its inverse STFT is 23 ms.  So the CPU work of a chunk is about 0.17 s.  Each piece is larger than the 2 steps under it (6 to 16 ms), so the steps bound O at a depth of 2.
+  * O2's addition at an unlimited depth takes `min(input + stft, stem5)`, since the input read and the STFT share the span of stem 5.  A min for each gives 1.66 % in Chrome and 1.02 % in Safari.  Either way it is under 3 %.  So O2 is not built at any depth, and Step 3 is skipped.
+  * Safari's worker clock gives whole milliseconds, so its fields are on a grid of 1 ms.  O's bound in Safari (3.07 %) is near 3 %, but Chrome's 4.86 % already passes the bound, so no decision hangs on it.
+
 ## Decision log
 
 * 2026-11-15, agent (team leader): P's predicted gain is the same-page comparison of a prototype under a query key, in the measuring patch.  Why: no figure without `profile=1` gives the GPU's idle time between steps; the prototype gives P's effect itself at the base, with the noise rule of the comparison.
@@ -302,6 +338,10 @@ Each step is one commit or none, on the branch.  A session that stops reads Prog
 * 2026-11-15, agent (team leader): P and O use two new `Gpu` methods that make their WebGPU call at once (`done_signal`, `read_start`).  Why: `Gpu::done` and `Gpu::read` are `async fn`s, so a signal taken through them covers the later step too (plan review round 1, finding 2).
 
 * 2026-11-15, agent (implementer): Step 1's commit also changes `docs/references/local-browser-testing.md`, which gives the count of a whole Safari `web-test` (1,320 files).  Why: the new count makes that line wrong, and DOC-1 fixes a doc in the same commit.  Item 6 of Step 1 named only the two test files and `docs/tech-debt.md`.
+
+* 2026-11-15, agent (implementer): by Step 2's rule, P is built (Step 4): its prototype gains 4.37 % in Chrome and 3.22 % in Safari.  O1 and O2 are not built at a depth of 2: 0.83 % and 0.68 % in Chrome, 0.82 % and 0.62 % in Safari.  O1's bound at an unlimited depth is 3.20 % in Chrome, so the checkpoint of item 2 of "Decisions for the maintainer" applies, and the implementer waits.  O2's bound at an unlimited depth is under 3 % in both browsers (1.55 %, 1.02 %), so O2 is not built in either answer, and Step 3 is skipped.
+* 2026-11-15, agent (implementer): Safari's pins in Step 2 are `v64k8,v64k8`, from the `kernels:` line of its first unforced run, not `v64k8,v64` (Step 2's rule).
+* 2026-11-15, agent (implementer): the measuring patch's `Signal` and `PendingRead` hold a clone of the device, so neither holds a borrow of `Gpu`.  `Signal::wait` and `PendingRead::finish` poll the device natively, as `Gpu::done` did.  `Gpu::done` is `done_signal().wait()`, and `Gpu::read` is `read_start(..).finish()`.
 
 ## Outcomes and retrospective
 
