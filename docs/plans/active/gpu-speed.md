@@ -357,13 +357,13 @@ None beyond the skill's.  The orchestrator decides these cases, records them in 
   * P gains 3.6 % in Safari, against the estimate of 0.7 % from the profile's gaps (Context).  The waits cost more in Safari than the profile showed.
   * The CPU pieces are small: the STFT with its upload is 28 to 32 ms, and each stem's apply 23 ms.  So the CPU work of a chunk is about 0.17 s, not the 0.25 to 0.3 s of Context.
   * P relies on the queue order of `writeBuffer` into the shared uniform buffer after a submission that is still running, which only the M2 Pro checked.  The optional Radeon run: `e2e stored-stems --query attn=vfused`, M6's base page against the head, in Safari and Chrome (same hashes), `e2e selftest`, and `e2e perf --base-dist` (no loss).
-* 2026-11-15, M6's head `72dfd07`: `check --tier push` passed 15 lines.  Chrome's gate: 3.51 s against 3.77 s, `v64,v64` and `vfused`.  Safari's gate: 5.57 s against 5.91 s, `v64k8,v64k8` and `vfused`.  This head holds the review rounds' changes of `Pace` and `time_rec`; Steps 4 and 8 measured `406e819`, and the round 4 push check at `1d75877`, the same code, gave 3.43 s and 5.37 s.
   * `e2e stored-stems` gives the base's hashes with `attn=vfused` and `attn=freq` in both browsers.  The scenario always runs `mm=s64`, so it checks P's order with that kernel.
   * Safari's bias limit (half of `D`, 0.0175 s) fails on the first forced set and holds on a second set and on the 8 runs.  P made `freq` and `fused` almost equal in Safari (`D` 0.5 % of a chunk, against 0.305 s at M5), and `D` changed its sign on the repeat.  The team leader decides on it (M6's Decision log).
   * The worker grew 55 MB in each separation of Step 7, not 57 MB.  M6's base page grew 55 MB too, so the change came before M6.  With -17 MB, a lost cut 3 less the taken noise (62.28 MB) passed the budget of 63.16 MB.  So `WORKER_HEADROOM_MB` is -19 MB (finding i1-2 of the intent review, `decb0c3`): a budget of 61.16 MB, and a margin of 6.16 MB in 3 runs of each browser.
   * The measuring patch stays off the branch, in the scratchpad of the run (`measure.patch`); M6's Surprises name its fields.
 
 * 2026-11-15, M6's head `cf2e935`: `check --tier push` passed 15 lines.  Chrome's gate: 3.45 s against 3.77 s, `matmul v64,v64, attention vfused`.  Safari's gate: 5.40 s against 5.91 s, `matmul v64k8,v64k8, attention vfused`.
+* 2026-11-15, M6's head `72dfd07`: `check --tier push` passed 15 lines.  Chrome's gate: 3.51 s against 3.77 s, `v64,v64` and `vfused`.  Safari's gate: 5.57 s against 5.91 s, `v64k8,v64k8` and `vfused`.  This head holds the review rounds' changes of `Pace` and `time_rec`; Steps 4 and 8 measured `406e819`, and the round 4 push check at `1d75877`, the same code, gave 3.43 s and 5.37 s.
 
 ## Decision log
 
