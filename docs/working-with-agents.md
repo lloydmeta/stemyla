@@ -174,7 +174,7 @@ Each agent file says `model: inherit` and has no `effort`, so each agent runs on
 
 ## Tools
 
-The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <command>`; `README.md` has the details).
+The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <command>`; `README.md` and the module docs of each command in `xtask/src/` have the details).
 
 | Command | What it does | Needs |
 | - | - | - |

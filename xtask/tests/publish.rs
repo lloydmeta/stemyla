@@ -1267,14 +1267,17 @@ fn checks_the_build_names_its_id() {
 }
 
 /// The name of the job that `line` starts, if it starts one: a line under
-/// `jobs:` with an indent of two spaces, a name and a colon, and maybe a
-/// comment.
+/// `jobs:` with an indent of two spaces, a name (maybe in quotes) and a
+/// colon, and maybe a comment.
 fn job_name(line: &str) -> Option<&str> {
     if !line.starts_with("  ") || line.starts_with("   ") {
         return None;
     }
     let code = line.split_once('#').map_or(line, |(code, _)| code);
-    let name = code.trim().strip_suffix(':')?;
+    let name = code
+        .trim()
+        .strip_suffix(':')?
+        .trim_matches(|c| c == '"' || c == '\'');
     let is_name = !name.is_empty()
         && name
             .chars()
@@ -1300,9 +1303,11 @@ fn ci_jobs(ci: &str) -> Vec<(&str, Vec<&str>)> {
 }
 
 /// Each way that `publish` can run without a pass of each other job: a
-/// job that its one-line `needs` does not name, a status function in its
-/// `if:`, which runs it after a failure, or a `continue-on-error` in a job
-/// that it needs, which makes a failure a pass.
+/// job that its one-line `needs` does not name, or a status function
+/// before its steps, which can run it after a failure.  Also a
+/// `continue-on-error` or the `continue_on_error` input of an action in a
+/// job that it needs, which can make a failure a pass.  Each rule reads
+/// text, not YAML, so it refuses each such word wherever it is.
 fn publish_gate_problems(ci: &str) -> Vec<String> {
     let jobs = ci_jobs(ci);
     let Some((_, publish)) = jobs.iter().find(|(name, _)| *name == "publish") else {
@@ -1320,20 +1325,20 @@ fn publish_gate_problems(ci: &str) -> Vec<String> {
         .map(|(name, _)| format!("publish does not need {name}"));
     let after_failure = publish
         .iter()
-        .filter(|line| line.starts_with("    if:"))
+        .take_while(|line| !line.starts_with("    steps:"))
         .filter(|line| {
-            ["always()", "failure()", "cancelled()"]
+            ["always()", "success()", "failure()", "cancelled()"]
                 .iter()
                 .any(|status| line.contains(status))
         })
-        .map(|line| format!("publish runs after a failure: {}", line.trim()));
+        .map(|line| format!("publish has a status function: {}", line.trim()));
     let failure_is_pass = jobs
         .iter()
         .filter(|(name, _)| needed.contains(name))
         .filter(|(_, lines)| {
-            lines
-                .iter()
-                .any(|line| line.trim_start().starts_with("continue-on-error:"))
+            lines.iter().any(|line| {
+                line.contains("continue-on-error") || line.contains("continue_on_error")
+            })
         })
         .map(|(name, _)| format!("{name} has continue-on-error"));
     missing
@@ -1363,12 +1368,18 @@ fn publish_waits_for_every_other_ci_job() {
         publish_gate_problems(&sample.replace("[fmt, macos]", "[fmt]")),
         ["publish does not need macos"]
     );
-    for status in ["always() && ", "!cancelled() && ", "failure() || "] {
+    for status in [
+        "always() && ",
+        "!cancelled() && ",
+        "failure() || ",
+        "success() || needs.macos.result == 'failure' || ",
+        ">-\n      always() && ",
+    ] {
         let runs_anyway = sample.replace("if: github", &format!("if: {status}github"));
         let problems = publish_gate_problems(&runs_anyway);
         assert_eq!(problems.len(), 1, "{status}: {problems:?}");
         assert!(
-            problems[0].starts_with("publish runs after a failure: "),
+            problems[0].starts_with("publish has a status function: "),
             "{problems:?}"
         );
     }
@@ -1387,6 +1398,30 @@ fn publish_waits_for_every_other_ci_job() {
     assert_eq!(
         publish_gate_problems(&step_ignores),
         ["macos has continue-on-error"]
+    );
+    let first_key_ignores = sample.replace(
+        "      - run: y\n",
+        "      - continue-on-error: true\n        run: y\n",
+    );
+    assert_eq!(
+        publish_gate_problems(&first_key_ignores),
+        ["macos has continue-on-error"]
+    );
+    let action_ignores = sample.replace(
+        "      - run: y\n",
+        "      - uses: nick-fields/retry@v4\n        with:\n          continue_on_error: true\n",
+    );
+    assert_eq!(
+        publish_gate_problems(&action_ignores),
+        ["macos has continue-on-error"]
+    );
+    let quoted = sample.replace(
+        "  publish:",
+        "  \"deploy-preview\":\n    runs-on: x\n  publish:",
+    );
+    assert_eq!(
+        publish_gate_problems(&quoted),
+        ["publish does not need deploy-preview"]
     );
     let needs_after_publish = sample.replace(
         "    needs: [fmt, macos]\n",

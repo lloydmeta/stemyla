@@ -15,7 +15,7 @@ Open the published page (for example `https://beachape.com/stemyla/`) in a brows
 3. Press **Separate 6 stems**.  On a laptop GPU a 3.5-minute song takes about 7 minutes.
 4. Use **Mute** and **Solo** per lane, the tempo slider, and drag across the bar above the lanes to loop a section.  **Save** on a lane downloads it as WAV, FLAC, M4A (Apple Lossless) or MP3.  Where the browser can encode AAC at 256 kbit/s, as Chrome and Safari on a Mac can, the menu also offers M4A (AAC 256 kbps).  Chrome on Windows probably cannot, so its menu has no AAC item.  **Save** on the mix lane downloads the mix that you hear: the stems that Mute and Solo let through, at their volumes, at 100% tempo.  For a backing track, mute the vocals, then save the mix.
 
-Each song you open, and its stems once separated, stays in the browser's storage, so a reload brings it back.  When browser storage is full or refuses a file, or the worker cannot read the mix, the page works in memory instead.  In memory it opens and separates a song of up to 100 seconds (less when other lanes are in memory), saves one of up to 100 seconds, and does not keep the stems.  The **Storage** menu lists the songs kept, opens or forgets one, shows the space used, and can remove the model.  **Reset…** (also offered when the separation worker stops) fetches the app's files again, bypassing the browser cache, or also deletes everything the page keeps, then reloads: use it when a reload does not help.  **About** links to the model, its code and its paper, and shows the build's version.
+Each song you open, and its stems once separated, stays in the browser's storage, so a reload brings it back.  When browser storage is full or refuses a file, the page works in memory instead.  It also does so when the separation worker cannot read the song from storage.  In memory, the page opens and separates a song of up to 100 seconds.  The limit is less for a song of several files, or with stems in memory.  It saves a song of up to 100 seconds, and does not keep the stems.  The **Storage** menu lists the songs kept, opens or forgets one, shows the space used, and can remove the model.  **Reset…** (also offered when the separation worker stops) fetches the app's files again, bypassing the browser cache, or also deletes everything the page keeps, then reloads: use it when a reload does not help.  **About** links to the model, its code and its paper, and shows the build's version.
 
 The native app (`cargo run -p app --release`) plays songs and stems but cannot separate; separation is web only.
 
@@ -81,7 +81,7 @@ Before a push, run the local checks of CI:
 cargo run -p xtask -- check --tier push
 ```
 
-It runs the fmt, clippy, test, `docs-check` and Trunk build lines of the Commands in `CLAUDE.md`, which lists each command.  It also runs the GPU test line, which needs a GPU, when a path changes GPU code or a workspace file, or no path is known (TD-70).  It runs no browser test; CI runs those.  On Linux without a GPU, run the tests as CI does: `WGPU_BACKEND=vulkan cargo test --workspace --exclude roformer-gpu`.  That uses software Vulkan for the UI tests, and leaves out the GPU kernel tests, which are never judged on software alone.
+It runs the fmt, clippy, test, `docs-check` and Trunk build lines of the Commands in `CLAUDE.md`, which lists each command.  It also runs the GPU test line, which needs a GPU, when a path changes GPU code or is a workspace file.  It also runs that line when no path changed or no path is known (TD-70).  When `STEMYLA_PERF_WEIGHTS` names the model, it runs the perf gate (`e2e perf --gate`) in Chrome and Safari.  It runs no other browser test; CI runs those.  On Linux without a GPU, run the tests as CI does: `WGPU_BACKEND=vulkan cargo test --workspace --exclude roformer-gpu`.  That uses software Vulkan for the UI tests, and leaves out the GPU kernel tests, which are never judged on software alone.
 
 The GPU kernel tests run on any Vulkan, Metal or DX12 GPU.  Without one, SwiftShader's Vulkan driver works: `STEMYLA_REQUIRE=gpu VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan cargo test -p roformer-gpu --release`.  `STEMYLA_REQUIRE=gpu` makes a wrong driver path fail instead of skipping.  A pass on SwiftShader is not GPU evidence (GPU-3).
 
@@ -109,7 +109,7 @@ cargo run -p xtask -- e2e smoke                 # the built page over WebDriver
 cargo run -p xtask -- e2e selftest --weights bs_roformer_sw.f16.safetensors
 ```
 
-The scenarios `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage`, `flac` and `save` need no model, and CI runs them.  `bench` needs WebGPU only.  `selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems`, `weights` and `perf` need a GPU and the model (`--weights`).  The module docs of `xtask/src/e2e.rs` give what each scenario checks, its options and its time limit.  Those of `xtask/src/web_test.rs` do the same for `web-test`.
+The scenarios `smoke`, `decode`, `playback`, `old-session`, `audio-resume`, `storage`, `flac` and `save` need no model, and CI runs them.  `bench` needs WebGPU only.  `selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems`, `weights` and `perf` need a GPU and the model (`--weights`).  The module docs of `xtask/src/e2e.rs` give what each scenario checks and its options.  `scenario_limit_secs` there gives its time limit.  Those of `xtask/src/web_test.rs` do the same for `web-test`.
 
 Logs and screenshots go to `target/e2e/<scenario>`.  `cargo run -p xtask -- clean` lists what runs leave, and `clean --yes` removes what it can prove safe.  `--swiftshader` runs WebGPU in software on a machine without a GPU: it is slow, and a compile check, not a verdict on the kernels.
 
@@ -127,7 +127,7 @@ It refuses to run with uncommitted changes, so every published version names the
 * `--no-push`: commit locally only.
 * `--remote <name>`, `--branch <name>`: where to publish.  `publish` reads the remote before it builds; to publish locally with no network, pass `--remote . --no-push`.
 * `--allow-dirty`: publish uncommitted changes, with a build id that says so.
-* `--skip-if-behind <branch>`: publish only the tip of that branch, or a commit of it newer than every published build.
+* `--skip-if-behind <branch>`: publish only the tip of that branch, or a commit of it newer than each published build of that branch.
 
 Its steps are in the module docs of `xtask/src/publish.rs`.
 
