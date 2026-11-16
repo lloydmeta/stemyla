@@ -81,7 +81,7 @@ Before a push, run the local checks of CI:
 cargo run -p xtask -- check --tier push
 ```
 
-It runs the fmt, clippy, test, `docs-check` and Trunk build lines of the Commands in `CLAUDE.md`, which lists each command.  It also runs the GPU test line, which needs a GPU, when a path changes GPU code or is a workspace file.  It also runs that line when no path changed or no path is known (TD-70).  When `STEMYLA_PERF_WEIGHTS` names the model, it runs the perf gate (`e2e perf --gate`) in Chrome and Safari.  It runs no other browser test; CI runs those.  On Linux without a GPU, run the tests as CI does: `WGPU_BACKEND=vulkan cargo test --workspace --exclude roformer-gpu`.  That uses software Vulkan for the UI tests, and leaves out the GPU kernel tests, which are never judged on software alone.
+It runs the fmt, clippy, test, `docs-check` and Trunk build lines of the Commands in `CLAUDE.md`, which lists each command.  It also runs the GPU test line, which needs a GPU, when a path changes GPU code or is a workspace file.  It also runs that line when no path changed or no path is known (TD-70).  When `STEMYLA_PERF_WEIGHTS` names the model, it runs the perf gate (`e2e perf --gate`) in Chrome and Safari.  It does so only for a path in `roformer/`, `roformer-gpu/` or `worker/`, a workspace file, or no known path.  It runs no other browser test; CI runs those.  On Linux without a GPU, run the tests as CI does: `WGPU_BACKEND=vulkan cargo test --workspace --exclude roformer-gpu`.  That uses software Vulkan for the UI tests, and leaves out the GPU kernel tests, which are never judged on software alone.
 
 The GPU kernel tests run on any Vulkan, Metal or DX12 GPU.  Without one, SwiftShader's Vulkan driver works: `STEMYLA_REQUIRE=gpu VK_ICD_FILENAMES=<path>/vk_swiftshader_icd.json WGPU_BACKEND=vulkan cargo test -p roformer-gpu --release`.  `STEMYLA_REQUIRE=gpu` makes a wrong driver path fail instead of skipping.  A pass on SwiftShader is not GPU evidence (GPU-3).
 
@@ -127,7 +127,7 @@ It refuses to run with uncommitted changes, so every published version names the
 * `--no-push`: commit locally only.
 * `--remote <name>`, `--branch <name>`: where to publish.  `publish` reads the remote before it builds; to publish locally with no network, pass `--remote . --no-push`.
 * `--allow-dirty`: publish uncommitted changes, with a build id that says so.
-* `--skip-if-behind <branch>`: publish only the tip of that branch, or a commit of it newer than each published build of that branch.
+* `--skip-if-behind <branch>`: publish only the tip of that branch, or a commit of it no older than the newest published build of that branch.
 
 Its steps are in the module docs of `xtask/src/publish.rs`.
 

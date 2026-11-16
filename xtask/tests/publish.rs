@@ -1303,11 +1303,11 @@ fn ci_jobs(ci: &str) -> Vec<(&str, Vec<&str>)> {
 }
 
 /// Each way that `publish` can run without a pass of each other job: a
-/// job that its one-line `needs` does not name, or a status function
-/// before its steps, which can run it after a failure.  Also a
-/// `continue-on-error` or the `continue_on_error` input of an action in a
-/// job that it needs, which can make a failure a pass.  Each rule reads
-/// text, not YAML, so it refuses each such word wherever it is.
+/// job that its one-line `needs` does not name, or a status function in
+/// it, which can run it after a failure.  Also a `continue-on-error` or the
+/// `continue_on_error` input of an action in a job that it needs, which can
+/// make a failure a pass.  Each rule reads text, not YAML, so it refuses
+/// each such word wherever it is in the job, in a step of the job too.
 fn publish_gate_problems(ci: &str) -> Vec<String> {
     let jobs = ci_jobs(ci);
     let Some((_, publish)) = jobs.iter().find(|(name, _)| *name == "publish") else {
@@ -1325,7 +1325,6 @@ fn publish_gate_problems(ci: &str) -> Vec<String> {
         .map(|(name, _)| format!("publish does not need {name}"));
     let after_failure = publish
         .iter()
-        .take_while(|line| !line.starts_with("    steps:"))
         .filter(|line| {
             ["always()", "success()", "failure()", "cancelled()"]
                 .iter()
@@ -1383,6 +1382,15 @@ fn publish_waits_for_every_other_ci_job() {
             "{problems:?}"
         );
     }
+    let if_after_steps = sample.replace(
+        "    if: github",
+        "    steps:\n      - run: p\n    if: always() && github",
+    );
+    assert_eq!(
+        publish_gate_problems(&if_after_steps),
+        ["publish has a status function: if: always() && github.event_name == 'push'"],
+        "a job-level if: after the steps"
+    );
     let job_ignores = sample.replace(
         "  macos: # Safari\n",
         "  macos: # Safari\n    continue-on-error: true\n",
