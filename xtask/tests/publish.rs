@@ -1265,3 +1265,187 @@ fn checks_the_build_names_its_id() {
     assert!(check_build_id(&build, id).is_err(), "no wasm");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The name of the job that `line` starts, if it starts one: a line under
+/// `jobs:` with an indent of two spaces, a name (maybe in quotes) and a
+/// colon, and maybe a comment.
+fn job_name(line: &str) -> Option<&str> {
+    if !line.starts_with("  ") || line.starts_with("   ") {
+        return None;
+    }
+    let code = line.split_once('#').map_or(line, |(code, _)| code);
+    let name = code
+        .trim()
+        .strip_suffix(':')?
+        .trim_matches(|c| c == '"' || c == '\'');
+    let is_name = !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+    is_name.then_some(name)
+}
+
+/// The jobs of a workflow, each with its name and the lines after it, up
+/// to the next job.
+fn ci_jobs(ci: &str) -> Vec<(&str, Vec<&str>)> {
+    let Some((_, jobs)) = ci.split_once("\njobs:\n") else {
+        return Vec::new();
+    };
+    let mut found: Vec<(&str, Vec<&str>)> = Vec::new();
+    for line in jobs.lines() {
+        match (job_name(line), found.last_mut()) {
+            (Some(name), _) => found.push((name, Vec::new())),
+            (None, Some((_, lines))) => lines.push(line),
+            (None, None) => {}
+        }
+    }
+    found
+}
+
+/// Each way that `publish` can run without a pass of each other job: a
+/// job that its one-line `needs` does not name, or a status function in
+/// it, which can run it after a failure.  Also a `continue-on-error` or the
+/// `continue_on_error` input of an action in a job that it needs, which can
+/// make a failure a pass.  Each rule reads text, not YAML, so it refuses
+/// each such word wherever it is in the job, in a step of the job too.
+fn publish_gate_problems(ci: &str) -> Vec<String> {
+    let jobs = ci_jobs(ci);
+    let Some((_, publish)) = jobs.iter().find(|(name, _)| *name == "publish") else {
+        return vec!["no publish job".to_string()];
+    };
+    let needed: Vec<&str> = publish
+        .iter()
+        .find_map(|line| line.strip_prefix("    needs: ["))
+        .and_then(|needs| needs.strip_suffix(']'))
+        .map(|needs| needs.split(',').map(str::trim).collect())
+        .unwrap_or_default();
+    let missing = jobs
+        .iter()
+        .filter(|(name, _)| *name != "publish" && !needed.contains(name))
+        .map(|(name, _)| format!("publish does not need {name}"));
+    let after_failure = publish
+        .iter()
+        .filter(|line| {
+            ["always()", "success()", "failure()", "cancelled()"]
+                .iter()
+                .any(|status| line.contains(status))
+        })
+        .map(|line| format!("publish has a status function: {}", line.trim()));
+    let failure_is_pass = jobs
+        .iter()
+        .filter(|(name, _)| needed.contains(name))
+        .filter(|(_, lines)| {
+            lines.iter().any(|line| {
+                line.contains("continue-on-error") || line.contains("continue_on_error")
+            })
+        })
+        .map(|(name, _)| format!("{name} has continue-on-error"));
+    missing
+        .chain(after_failure)
+        .chain(failure_is_pass)
+        .collect()
+}
+
+/// The site is published only from a commit that passed every check of CI,
+/// the Safari tests of the `macos` job too (VERIFY-1).
+#[test]
+fn publish_waits_for_every_other_ci_job() {
+    let ci = include_str!("../../.github/workflows/ci.yml");
+    assert_eq!(publish_gate_problems(ci), Vec::<String>::new());
+
+    let sample = "on: push\njobs:\n\
+                  \x20 fmt:\n    runs-on: x\n\
+                  \x20 # a comment line:\n\
+                  \x20 macos: # Safari\n    steps:\n      - run: y\n      - if: failure()\n        run: z\n\
+                  \x20 publish:\n    needs: [fmt, macos]\n    if: github.event_name == 'push'\n";
+    assert_eq!(
+        publish_gate_problems(sample),
+        Vec::<String>::new(),
+        "a step's own if: failure() is no problem"
+    );
+    assert_eq!(
+        publish_gate_problems(&sample.replace("[fmt, macos]", "[fmt]")),
+        ["publish does not need macos"]
+    );
+    for status in [
+        "always() && ",
+        "!cancelled() && ",
+        "failure() || ",
+        "success() || needs.macos.result == 'failure' || ",
+        ">-\n      always() && ",
+    ] {
+        let runs_anyway = sample.replace("if: github", &format!("if: {status}github"));
+        let problems = publish_gate_problems(&runs_anyway);
+        assert_eq!(problems.len(), 1, "{status}: {problems:?}");
+        assert!(
+            problems[0].starts_with("publish has a status function: "),
+            "{problems:?}"
+        );
+    }
+    let if_after_steps = sample.replace(
+        "    if: github",
+        "    steps:\n      - run: p\n    if: always() && github",
+    );
+    assert_eq!(
+        publish_gate_problems(&if_after_steps),
+        ["publish has a status function: if: always() && github.event_name == 'push'"],
+        "a job-level if: after the steps"
+    );
+    let job_ignores = sample.replace(
+        "  macos: # Safari\n",
+        "  macos: # Safari\n    continue-on-error: true\n",
+    );
+    assert_eq!(
+        publish_gate_problems(&job_ignores),
+        ["macos has continue-on-error"]
+    );
+    let step_ignores = sample.replace(
+        "      - run: y\n",
+        "      - run: y\n        continue-on-error: true\n",
+    );
+    assert_eq!(
+        publish_gate_problems(&step_ignores),
+        ["macos has continue-on-error"]
+    );
+    let first_key_ignores = sample.replace(
+        "      - run: y\n",
+        "      - continue-on-error: true\n        run: y\n",
+    );
+    assert_eq!(
+        publish_gate_problems(&first_key_ignores),
+        ["macos has continue-on-error"]
+    );
+    let action_ignores = sample.replace(
+        "      - run: y\n",
+        "      - uses: nick-fields/retry@v4\n        with:\n          continue_on_error: true\n",
+    );
+    assert_eq!(
+        publish_gate_problems(&action_ignores),
+        ["macos has continue-on-error"]
+    );
+    let quoted = sample.replace(
+        "  publish:",
+        "  \"deploy-preview\":\n    runs-on: x\n  publish:",
+    );
+    assert_eq!(
+        publish_gate_problems(&quoted),
+        ["publish does not need deploy-preview"]
+    );
+    let needs_after_publish = sample.replace(
+        "    needs: [fmt, macos]\n",
+        "    runs-on: x\n  later:\n    needs: [fmt, macos]\n",
+    );
+    assert_eq!(
+        publish_gate_problems(&needs_after_publish),
+        [
+            "publish does not need fmt",
+            "publish does not need macos",
+            "publish does not need later",
+        ],
+        "the needs of a later job are not those of publish"
+    );
+    assert_eq!(
+        publish_gate_problems(&sample.replace("  publish:", "  deploy:")),
+        ["no publish job"]
+    );
+}
