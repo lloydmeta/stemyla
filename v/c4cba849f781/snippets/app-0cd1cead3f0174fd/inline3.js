@@ -80,33 +80,6 @@ export function save_blob(name, blob) {
   setTimeout(() => URL.revokeObjectURL(url), 60000);
 }
 export function st_sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
-// A writer of `within/rel`, as `st_write` opens it; else "gone" or the
-// name of the error.
-export async function st_open(within, rel) {
-  try {
-    let base;
-    try { base = await dir(within, false); }
-    catch (e) { if (within && e.name === "NotFoundError") return "gone"; throw e; }
-    const [d, n] = split("/" + rel);
-    const fh = await (await dir(d, true, base)).getFileHandle(n, { create: true });
-    return await fh.createWritable();
-  } catch (e) {
-    console.warn("storage open failed", within, rel, e);
-    return (e && e.name) || "Error";
-  }
-}
-// Writes `bytes` at the writer's position: true, else the error's name.
-export async function st_put(w, bytes) {
-  try { await w.write(whole(bytes)); return true; }
-  catch (e) { console.warn("storage write failed", e); return (e && e.name) || "Error"; }
-}
-export async function st_close(w) {
-  try { await w.close(); return true; }
-  catch (e) { console.warn("storage close failed", e); return (e && e.name) || "Error"; }
-}
-export async function st_abort(w) {
-  try { await w.abort(); } catch (_) {}
-}
 export async function st_size(path) {
   try {
     const [d, n] = split(path);
