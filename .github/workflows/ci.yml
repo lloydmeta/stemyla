@@ -247,9 +247,9 @@ jobs:
   # Safari, and the real AAC encode, on a Mac (TD-92, TD-93, TD-96).
   # macos-latest is macOS 26 on arm64, with Safari 27.2, Chrome and a
   # matching ChromeDriver in $CHROMEWEBDRIVER (actions/runner-images,
-  # images/macos/macos-26-arm64-Readme.md, 2026-11-02).  It is not in
-  # `needs` of publish, and not a required check at first (Q6 of
-  # docs/plans/active/tech-debt-rungs.md).  The GPU tests may skip here:
+  # images/macos/macos-26-arm64-Readme.md, 2026-11-02).  It is a required
+  # check of the `main` ruleset, and publish waits for it
+  # (`publish_waits_for_every_other_ci_job`).  The GPU tests may skip here:
   # GitHub states nothing about the runner's GPU, so the job does not set
   # gpu in STEMYLA_REQUIRE.
   macos:
@@ -350,7 +350,7 @@ jobs:
 
   publish:
     name: publish to gh-pages
-    needs: [fmt, clippy, test, wasm-build, browser-tests]
+    needs: [fmt, clippy, test, wasm-build, browser-tests, macos]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     permissions:

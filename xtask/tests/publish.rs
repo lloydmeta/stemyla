@@ -1265,3 +1265,47 @@ fn checks_the_build_names_its_id() {
     assert!(check_build_id(&build, id).is_err(), "no wasm");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// The jobs of a workflow that `publish` does not wait for, or `None` when
+/// the workflow has no `publish` job with a one-line `needs`.  A job is a
+/// line under `jobs:` with an indent of two spaces.
+fn jobs_publish_skips(ci: &str) -> Option<Vec<String>> {
+    let (_, jobs) = ci.split_once("\njobs:\n")?;
+    let names: Vec<&str> = jobs
+        .lines()
+        .filter(|line| line.starts_with("  ") && !line.starts_with("   "))
+        .filter_map(|line| line.trim().strip_suffix(':'))
+        .filter(|name| {
+            name.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        })
+        .collect();
+    let (_, publish) = jobs.split_once("\n  publish:\n")?;
+    let needs = publish
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("needs: ["))?
+        .strip_suffix(']')?;
+    let needed: Vec<&str> = needs.split(',').map(str::trim).collect();
+    Some(
+        names
+            .into_iter()
+            .filter(|name| *name != "publish" && !needed.contains(name))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+/// The site is published only from a commit that passed every check of CI,
+/// the Safari tests of the `macos` job too (VERIFY-1).
+#[test]
+fn publish_waits_for_every_other_ci_job() {
+    let ci = include_str!("../../.github/workflows/ci.yml");
+    assert_eq!(jobs_publish_skips(ci), Some(Vec::new()));
+
+    let sample = "on: push\njobs:\n  fmt:\n    runs-on: x\n  # a comment line:\n  macos:\n    steps:\n      - run: y\n  publish:\n    needs: [fmt]\n";
+    assert_eq!(jobs_publish_skips(sample), Some(vec!["macos".to_string()]));
+    let both = sample.replace("[fmt]", "[fmt, macos]");
+    assert_eq!(jobs_publish_skips(&both), Some(Vec::new()));
+    let no_needs = sample.replace("    needs: [fmt]\n", "");
+    assert_eq!(jobs_publish_skips(&no_needs), None);
+}

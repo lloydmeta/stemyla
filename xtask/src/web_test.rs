@@ -10,6 +10,12 @@
 //! whose test binary has no wasm test, unless a filter is given.  With a
 //! filter, it fails when no crate run ran a test.
 //!
+//! A wasm test reads the `STEMYLA_REQUIRE` of its build, and each crate
+//! run builds with the environment of `web-test`.  So
+//! `STEMYLA_REQUIRE=gpu cargo run -p xtask -- web-test` fails a GPU test
+//! that has no adapter.  `--chrome-arg --disable-gpu` takes the WebGPU
+//! adapter away.
+//!
 //! In Safari, the crate run of `stem-worker` gets `WASM_BINDGEN_NO_DEBUG=1`,
 //! and `web-test` prints why (TD-93, [`run_vars`]).
 //!

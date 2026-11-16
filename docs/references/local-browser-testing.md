@@ -1,6 +1,6 @@
 # Local browser testing
 
-Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 26.7.1, Safari 27.0), as of 2026-10-19.  Since 2026-11-10, the maintainer also runs them on an Apple silicon Mac (arm64).  The commands and their prerequisites are in `README.md` (browser tests); this is what those machines add.
+Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 26.7.1, Safari 27.0), as of 2026-10-19.  Since 2026-11-10, the maintainer also runs them on an Apple silicon Mac (arm64).  The commands and their prerequisites are in `README.md` (browser tests), and each scenario in the module docs of `xtask/src/e2e.rs`.  This is what those machines add.
 
 ## Which browser
 
@@ -23,7 +23,7 @@ Running `xtask web-test` and `xtask e2e` on the maintainer's Mac (Intel, macOS 2
 * Set `STEMYLA_PERF_WEIGHTS` and `CHROMEDRIVER` for the push check before a review round and before a push, on the M2 Pro whose baselines `xtask/perf-baselines.json` holds.
 * The gate fails a run whose browser gives no `isFallbackAdapter` (`fallback adapter unknown`), with that reason.
 * The gate adds about 3 minutes: one run in each browser (2.8 minutes on 2026-11-12: Chrome 70 s, Safari 99 s).
-* Each `e2e perf` run has a time limit of 10 minutes, from when the run opens its page.  At the limit, the run fails with one line, and ends its WebDriver session and its driver.  So a hung Safari run does not hold Safari for hours (2026-11-13: one Safari run hung for 3 hours).  The limits of the other scenarios are in `README.md` (browser tests).
+* Each `e2e perf` run has a time limit of 10 minutes, from when the run opens its page.  At the limit, the run fails with one line, and ends its WebDriver session and its driver.  So a hung Safari run does not hold Safari for hours (2026-11-13: one Safari run hung for 3 hours).  The limits of the other scenarios are in `scenario_limit_secs` in `xtask/src/e2e.rs`.
 * Keep the screen unlocked and do not use the Mac during the Safari run.  A locked screen fails the Safari line at once.
 * A Chrome update can stop the Chrome line until `CHROMEDRIVER` names a driver of the new version.  An old driver may still drive the new Chrome, with a warning.
 * The gate compares across browser versions, and prints a line when the version is not the baseline's.  After a browser update, measure again with `e2e perf --runs 5 --update-baselines`, and record both figures.  A raise of the bound needs `--raise "<reason>"` with any browser version.  After a browser update, the reason names it, for example `--raise "Safari 27.2 to 27.3"`.
@@ -94,6 +94,8 @@ A test that clicks a download link saves the file in `~/Downloads`: headless Chr
 ## The model
 
 `e2e selftest`, `separate`, `worker-check`, `memory-budget`, `stored-stems` and `weights` need the model weights (`--weights <path>`), which are never in the repo (ASSET-1).  The PyTorch reference fixtures from `tools/roformer_export.py` are not on either Mac, so the reference tests skip, and `STEMYLA_REQUIRE=fixtures` makes them fail (TD-8).
+
+Keep the model file in `third_party/models/`.  Give its absolute path to `--weights` and `STEMYLA_PERF_WEIGHTS`, because a review worktree has no ignored files.
 
 ## Memory on an iPhone
 
