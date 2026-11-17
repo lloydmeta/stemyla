@@ -46,7 +46,12 @@ A shared link to the page shows a title, a description and an image.  This holds
 * [x] 2026-11-17: M1, `xtask brand` and its files.
 * [x] 2026-11-17: M2, the head tags.
 * [x] 2026-11-17: M3, the root share image in `publish`.
-* [ ] Review rounds (decision 0024).
+* [x] 2026-11-17: review round 1: 14 confirmed findings fixed (tier commit runs the brand test, weaker tests, two doc errors); 19 equivalent mutants refuted.
+* [x] 2026-11-17: review round 2: the ICO length and offset tests (2-1); two doc nits fixed.
+* [x] 2026-11-17: review round 3: a PNG is compared by its pixels (3-1); the URL choice marked as the agent's.
+* [x] 2026-11-17: review round 4: decision 0034, proposed, holds the share image's URL (4-1).
+* [x] 2026-11-17: review round 5: five doc nits, reported and not fixed; the last round.  The log is `reviews/meta-info.md`.
+* [ ] The maintainer accepts or rejects decision 0034.
 
 ## Surprises and discoveries
 
@@ -65,4 +70,7 @@ A shared link to the page shows a title, a description and an image.  This holds
 
 ## Outcomes and retrospective
 
-To be filled in at the end.
+* 2026-11-17: M1 to M3 are done.  The page has the head tags, `xtask brand` draws the four files, and `publish` puts `og.png` at the site's root.
+* Not done: a check of the link previews on X, Facebook and Slack.  It needs a publish, which only a person runs (GIT-1).
+* Open: decision 0034 waits for the maintainer.  The plan moves to `completed/` after that answer.
+* To do differently: write a decision record as `proposed` for each choice that the maintainer did not make, at the start.  Rounds 3 and 4 fixed this late.
