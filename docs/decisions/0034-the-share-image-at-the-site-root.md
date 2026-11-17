@@ -1,8 +1,8 @@
 # 0034: publish puts the share image at the site's root
 
-Status: proposed
+Status: accepted (2026-11-17, by the maintainer)
 
-The agent made this choice while it did `plans/active/share-metadata.md`.  The maintainer accepts or rejects it ("Decisions for the maintainer").
+The agent made this choice while it did `plans/completed/share-metadata.md`.  The maintainer accepted it ("Decisions for the maintainer").
 
 ## Context
 

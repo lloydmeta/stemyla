@@ -17,6 +17,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and the numbers of phases 2 and 3b.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
+* `plans/completed/share-metadata.md`: done on 2026-11-17: the head tags for search and link previews, the icons that `xtask brand` draws, and the share image at the site's root.
 * `plans/completed/gpu-speed.md`: done on 2026-11-15: faster separation on Apple GPUs, in Safari first, with no loss on other GPUs.  A perf gate, and `memory-budget` at the default chunk.
 * `plans/completed/gpu-speed-m6.md`: M6 of `plans/completed/gpu-speed.md`, done on 2026-11-15: the worker keeps 2 GPU steps in flight, a separation 3.6 % to 4.3 % faster.  The CPU work under the GPU was measured and not built.
 * `plans/completed/gpu-speed-m51.md`: M5.1 of `plans/completed/gpu-speed.md`, done on 2026-11-15: Chrome runs of `xtask` remove their profiles, and Safari's write-stream swap files are found as a WebKit defect.  The model saves and the page's song-sized writes go through sync access handles, the latter in the new write worker.
@@ -26,7 +27,6 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `plans/completed/gpu-speed-m2.md`: M2 of `plans/completed/gpu-speed.md`, done on 2026-11-12: the scenario `e2e perf`, its baselines on the M2 Pro, and its gate in `check --tier push`.
 * `plans/completed/gpu-speed-m1.md`: M1 of `plans/completed/gpu-speed.md`, done on 2026-11-12: `memory-budget` at the default chunk, with four checks for MEM-4, and cuts of the worker's working set.
 * `plans/active/tech-debt-rungs.md`: the open entries of `tech-debt.md`, sorted by impact and effort, and closed in three PRs.
-* `plans/active/share-metadata.md`: the head tags for search and link previews, the icons, and the share image.
 * `plans/completed/tech-debt-rungs-m2.md`: M2 of `plans/active/tech-debt-rungs.md`, rung 2, done on 2026-11-11: the dev tools at their new pins, Safari in `web-test` and CI, TD-8 (the wasm GPU tests), the resampler on wasm32, the decode worker's tests in Safari, TD-92 and TD-93.
 * `plans/completed/tech-debt-rungs-m2-td97.md`: step 11 of M2 of `plans/active/tech-debt-rungs.md`, done on 2026-11-12: the page's memory check of `e2e save` in Safari, now a bound of 3 MiB from the measured spread.
 * `plans/completed/m4a.md`: done on 2026-11-11 in PR #43: the app opens M4A (AAC-LC and ALAC) and AIFF songs.  It saves a stem or the mix as an ALAC M4A, or an AAC M4A where the browser can encode it at 256 kbit/s.
@@ -96,7 +96,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0031-the-push-tier-runs-the-perf-gate.md`: tier `push`, when asked, runs `e2e perf --gate` in Chrome and Safari when `STEMYLA_PERF_WEIGHTS` names the model and the paths change GPU or worker code (accepted).
 * `decisions/0032-a-write-worker-crate.md`: a page-side worker crate writes the page's song-sized files through sync access handles, since Safari keeps a swap file of each write stream that closes (accepted).
 * `decisions/0033-share-tags-and-a-drawn-share-image.md`: the head tags for search and link previews, and the icons and share image that `xtask brand` draws (accepted).
-* `decisions/0034-the-share-image-at-the-site-root.md`: `publish` copies the newest build's `og.png` to the site's root, so the share image's URL stays the same across builds (proposed).
+* `decisions/0034-the-share-image-at-the-site-root.md`: `publish` copies the newest build's `og.png` to the site's root, so the share image's URL stays the same across builds (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References

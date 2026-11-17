@@ -39,7 +39,7 @@ A shared link to the page shows a title, a description and an image.  This holds
 * Favicon: Bars, Lanes or Branch.  Recommended: Bars, the clearest at 16 px.  Answer (2026-11-17): Bars.
 * Description.  Answer (2026-11-17): "Split any song into vocals, drums, bass, guitar, piano and the rest, in your browser with WebGPU. Free, private, no install: it all stems from your own GPU."
 * How the images are made: a) `xtask brand` draws them in Rust, and a test compares the committed files; b) commit images made once.  Recommended: a).  Answer (2026-11-17): a).
-* Share image URL: a) `publish` copies the newest build's og.png to the site's root; b) a URL into `v/<id>/`; c) a URL on another host.  Recommended: a), since `publish` prunes old build folders and a shared link keeps its URL for days.  The agent chose a) during the work (decision 0034, proposed).  Answer: open.
+* Share image URL: a) `publish` copies the newest build's og.png to the site's root; b) a URL into `v/<id>/`; c) a URL on another host.  Recommended: a), since `publish` prunes old build folders and a shared link keeps its URL for days.  The agent chose a) during the work (decision 0034).  Answer (2026-11-17): a), accepted by the maintainer.
 
 ## Progress
 
@@ -51,7 +51,7 @@ A shared link to the page shows a title, a description and an image.  This holds
 * [x] 2026-11-17: review round 3: a PNG is compared by its pixels (3-1); the URL choice marked as the agent's.
 * [x] 2026-11-17: review round 4: decision 0034, proposed, holds the share image's URL (4-1).
 * [x] 2026-11-17: review round 5: five doc nits, reported and not fixed; the last round.  The log is `reviews/meta-info.md`.
-* [ ] The maintainer accepts or rejects decision 0034.
+* [x] 2026-11-17: the maintainer accepted decision 0034.
 
 ## Surprises and discoveries
 
@@ -61,6 +61,7 @@ A shared link to the page shows a title, a description and an image.  This holds
 ## Decision log
 
 * 2026-11-17, maintainer: the choices in "Decisions for the maintainer"; decision 0033 records them.
+* 2026-11-17, maintainer: accepted the agent's choice of the share image's URL (decision 0034).
 * 2026-11-17, agent: the share image's waveforms come from a seeded generator, not from `synth` (see "Surprises and discoveries").
 * 2026-11-17, agent: `publish` copies the newest build's og.png to the site's root, where `og:image` points.  A URL into `v/<id>/` would break when `publish` prunes the build.  Decision 0034 records this choice as proposed (review rounds 3 and 4, 3-2 and 4-1).
 * 2026-11-17, agent: the tags name `https://beachape.com/stemyla/`.  A fork that publishes elsewhere changes them; the README says so.
@@ -72,5 +73,5 @@ A shared link to the page shows a title, a description and an image.  This holds
 
 * 2026-11-17: M1 to M3 are done.  The page has the head tags, `xtask brand` draws the four files, and `publish` puts `og.png` at the site's root.
 * Not done: a check of the link previews on X, Facebook and Slack.  It needs a publish, which only a person runs (GIT-1).
-* Open: decision 0034 waits for the maintainer.  The plan moves to `completed/` after that answer.
+* 2026-11-17: the maintainer accepted decision 0034, and the plan moved to `completed/`.
 * To do differently: write a decision record as `proposed` for each choice that the maintainer did not make, at the start.  Rounds 3 and 4 fixed this late.

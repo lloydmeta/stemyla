@@ -2,7 +2,7 @@
 
 Status: accepted (2026-11-17, by the maintainer)
 
-The maintainer chose the share image, the icon, the description and how the images are made.  `plans/active/share-metadata.md` records the choices ("Decisions for the maintainer").  Decision 0034 holds the share image's URL, which is the agent's choice.
+The maintainer chose the share image, the icon, the description and how the images are made.  `plans/completed/share-metadata.md` records the choices ("Decisions for the maintainer").  Decision 0034 holds the share image's URL, which is the agent's choice.
 
 ## Context
 
