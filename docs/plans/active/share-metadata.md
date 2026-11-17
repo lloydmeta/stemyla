@@ -56,6 +56,7 @@ A shared link to the page shows a title, a description and an image.  This holds
 
 * 2026-11-17, maintainer: the choices in "Decisions for the maintainer"; decision 0033 records them.
 * 2026-11-17, agent: the share image's waveforms come from a seeded generator, not from `synth` (see "Surprises and discoveries").
+* 2026-11-17, agent: `publish` copies the newest build's og.png to the site's root, where `og:image` points.  A URL into `v/<id>/` would break when `publish` prunes the build.  Decision 0033 marks this choice as proposed (review round 3, 3-2).
 * 2026-11-17, agent: the tags name `https://beachape.com/stemyla/`.  A fork that publishes elsewhere changes them; the README says so.
 * 2026-11-17, agent: the test compares PNGs by their pixels, not their bytes, so a new `png` encoder does not fail it.
 * 2026-11-17, agent: `png` and `ab_glyph` go in `SETTLED_CRATES` (first versions 2015-05-26 and 2020-04-10 on crates.io).  `epaint_default_fonts` is pinned to the version in `Cargo.lock`.  The share image's pixels come from its font bytes, so an egui update must not draw og.png again (review round 2, 2-3).

@@ -1,8 +1,8 @@
 # 0033: share tags, and icons and a share image that xtask draws
 
-Status: accepted (2026-11-17, by the maintainer)
+Status: accepted (2026-11-17, by the maintainer), but for the URL of the share image, which is proposed
 
-The maintainer chose the share image, the icon, the description and how the images are made.  `plans/active/share-metadata.md` records the choices ("Decisions for the maintainer").
+The maintainer chose the share image, the icon, the description and how the images are made.  The share image's URL is the agent's choice, and it stays proposed until the maintainer accepts it.  `plans/active/share-metadata.md` records the choices ("Decisions for the maintainer").
 
 ## Context
 

@@ -282,6 +282,10 @@ fn same_image_compares_an_ico_s_entry() {
     let longer_png = [png.as_slice(), &[0; 4]].concat();
     assert_eq!(decode_png(&longer_png).unwrap(), decode_png(&png).unwrap());
     assert!(
+        same_image("a.png", &png, &longer_png).unwrap(),
+        "a PNG of the same pixels and another length, as a new encoder can write"
+    );
+    assert!(
         same_image("a.ico", &icon, &ico(&longer_png, 1).unwrap()).unwrap(),
         "a PNG of the same pixels and another length, as a new encoder can write"
     );
