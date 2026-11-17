@@ -189,6 +189,7 @@ The agent and a person use the same `xtask` commands (`cargo run -p xtask -- <co
 | `web-test` | browser tests (wasm-bindgen-test) in Safari or Chrome.  A run with a filter fails when no crate ran a test | wasm-bindgen-cli, a WebDriver |
 | `e2e` | drives the built page over WebDriver (`e2e smoke`, `e2e storage`, ...) | `trunk build`, a WebDriver; some scenarios need a GPU and the model |
 | `publish` | builds, commits to `gh-pages` and pushes | a person only (GIT-1) |
+| `brand`, `brand --check` | draws the page's icons and share image into `app/assets/` (decision 0033).  `--check` changes nothing, and fails when a file differs from what `brand` draws.  `the_committed_brand_files_match_the_generator` runs the same check | nothing |
 | `gen-song` | writes the demo song's stems, mix and ground truth | ffmpeg for MP3 (optional) |
 | `stretch-bench` | compares the time-stretch methods for quality and cost | nothing |
 | `perf` | measures the cost of one audio callback | nothing |

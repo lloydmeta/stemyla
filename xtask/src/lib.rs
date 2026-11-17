@@ -2,6 +2,7 @@
 
 pub mod attention;
 pub mod bench;
+pub mod brand;
 pub mod check;
 pub mod clean;
 pub mod docs;

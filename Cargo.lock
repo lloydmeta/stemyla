@@ -10044,15 +10044,18 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "ab_glyph",
  "anyhow",
  "burn",
  "burn-store",
  "dsp",
  "engine",
+ "epaint_default_fonts",
  "flacenc",
  "half",
  "hound",
  "m4a",
+ "png",
  "proc-macro2",
  "quote",
  "roformer",

@@ -17,6 +17,7 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `harness.md`: the parts of the agent harness (map, rules, checks, reviews), the failure each one addresses, and the baseline it is measured against, and the numbers of phases 2 and 3b.
 * `plans/PLANS.md`: how to write and keep an execution plan.  Plans in progress are in `plans/active/`, finished ones in `plans/completed/`.
 * `plans/active/harness-engineering.md`: the phased adoption of harness engineering in this repo.
+* `plans/completed/share-metadata.md`: done on 2026-11-17: the head tags for search and link previews, the icons that `xtask brand` draws, and the share image at the site's root.
 * `plans/completed/gpu-speed.md`: done on 2026-11-15: faster separation on Apple GPUs, in Safari first, with no loss on other GPUs.  A perf gate, and `memory-budget` at the default chunk.
 * `plans/completed/gpu-speed-m6.md`: M6 of `plans/completed/gpu-speed.md`, done on 2026-11-15: the worker keeps 2 GPU steps in flight, a separation 3.6 % to 4.3 % faster.  The CPU work under the GPU was measured and not built.
 * `plans/completed/gpu-speed-m51.md`: M5.1 of `plans/completed/gpu-speed.md`, done on 2026-11-15: Chrome runs of `xtask` remove their profiles, and Safari's write-stream swap files are found as a WebKit defect.  The model saves and the page's song-sized writes go through sync access handles, the latter in the new write worker.
@@ -94,6 +95,8 @@ What each doc is for and when to read it.  `CLAUDE.md` at the root is the map lo
 * `decisions/0030-the-save-check-counts-the-heap.md`: a count of the page's Rust heap for the memory check of `e2e save` (rejected; the check keeps the memory's growth, with a bound of 3 MiB).
 * `decisions/0031-the-push-tier-runs-the-perf-gate.md`: tier `push`, when asked, runs `e2e perf --gate` in Chrome and Safari when `STEMYLA_PERF_WEIGHTS` names the model and the paths change GPU or worker code (accepted).
 * `decisions/0032-a-write-worker-crate.md`: a page-side worker crate writes the page's song-sized files through sync access handles, since Safari keeps a swap file of each write stream that closes (accepted).
+* `decisions/0033-share-tags-and-a-drawn-share-image.md`: the head tags for search and link previews, and the icons and share image that `xtask brand` draws (accepted).
+* `decisions/0034-the-share-image-at-the-site-root.md`: `publish` copies the newest build's `og.png` to the site's root, so the share image's URL stays the same across builds (accepted).
 * `reviews/`: the log of the review rounds of each PR branch, one file for each branch, which step 11 of the `review-rounds` skill writes.  Read it to see what a review found and what it cost.  Beside the branch logs, `reviews/replay.md` records harness phase 3's replay of six old review rounds (M5), with its ground truth.
 
 ## References

@@ -11,16 +11,19 @@
 //! and never changed.  The CDN in front of the site may let browsers keep
 //! `.js` files for a month but `.wasm` files for ten minutes, so a file
 //! name reused across builds can pair one build's wasm-bindgen glue with
-//! another's wasm.  Only the root `index.html` changes in place: it is the
-//! newest build's page, and its `<base href>` points into that build's
-//! folder.
+//! another's wasm.  Only the root `index.html` and `og.png` change in
+//! place.  The page is the newest build's, and its `<base href>` points into
+//! that build's folder.  The share image needs a URL that stays the same
+//! across builds, since a site that shows a link may keep it for days.
 //!
 //! ```text
 //! .nojekyll
 //! index.html          the newest build's page
+//! og.png              the newest build's share image, where og:image points
 //! v/VERSIONS          the kept build ids, newest first
 //! v/<id>/index.html   that build's page
 //! v/<id>/app.js, app_bg.wasm, stem-worker*.{js,wasm}, decode-worker*.{js,wasm}, write-worker*.{js,wasm}, snippets/…
+//! v/<id>/icon.svg, favicon.ico, apple-touch-icon.png, og.png   from `xtask brand`
 //! ```
 //!
 //! Steps:
@@ -43,7 +46,7 @@
 //!    keeps its published copy, even if it was pruned since (so the clone
 //!    must not be shallow, and the branch's history must never be
 //!    rewritten).  Older builds are dropped.  Writes the root
-//!    `index.html`, `v/VERSIONS` and `.nojekyll`, and checks the new id's
+//!    `index.html` and `og.png`, `v/VERSIONS` and `.nojekyll`, and checks the new id's
 //!    build again (it may be the published copy).
 //! 4. Commits the result as the branch's whole content, with the previous
 //!    publish as parent.  This uses git's plumbing (temporary indexes,
@@ -55,6 +58,7 @@
 //!
 //! Only Cargo, Trunk and git are involved: no non-Rust build steps.
 
+use crate::brand;
 use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -440,8 +444,8 @@ pub struct Prepared {
 
 /// Turns `site`, which holds only the fresh build in `v/<id>/`, into the
 /// branch's next tree: adds the kept older builds from the branch's current
-/// commit, the root `index.html` (a copy of the newest build's),
-/// `v/VERSIONS` and `.nojekyll`.
+/// commit, the root `index.html` and `og.png` (copies of the newest
+/// build's), `v/VERSIONS` and `.nojekyll`.
 ///
 /// A published `v/<id>/` is never changed, because browsers may hold its
 /// files for a month: if the branch's history has ever had `v/<id>/`, for
@@ -494,8 +498,8 @@ pub fn prepare_site(repo: &Path, site: &Path, branch: &str, id: &str) -> Result<
     finish_site(site, id, parent, kept, copied, reused)
 }
 
-/// Writes the root `index.html`, `v/VERSIONS` and `.nojekyll` once `v/`
-/// holds every kept build.
+/// Writes the root `index.html` and `og.png`, `v/VERSIONS` and `.nojekyll`
+/// once `v/` holds every kept build.
 fn finish_site(
     site: &Path,
     id: &str,
@@ -509,6 +513,11 @@ fn finish_site(
         site.join("index.html"),
     )
     .context("copying the newest build's index.html to the root")?;
+    std::fs::copy(
+        site.join("v").join(id).join(brand::OG_PNG),
+        site.join(brand::OG_PNG),
+    )
+    .context("copying the newest build's share image to the root")?;
     std::fs::write(site.join("v/VERSIONS"), format!("{}\n", kept.join("\n")))?;
     std::fs::write(site.join(".nojekyll"), b"")?;
     Ok(Prepared {
@@ -702,8 +711,9 @@ pub fn finish_build(dir: &Path, url: &str, id: &str) -> Result<()> {
 }
 
 /// Checks one Trunk build, in `dir`, before it is published: the files the
-/// page needs exist, and the page's base and assets are under `url`, the
-/// build's own folder on the site.  The base matters as much as the
+/// page needs exist, with the icons and the share image of `xtask brand`,
+/// and the page's base and assets are under `url`, the build's own folder
+/// on the site.  The base matters as much as the
 /// assets: the app starts the worker from a relative URL, which resolves
 /// against it.
 pub fn check_build(dir: &Path, url: &str) -> Result<()> {
@@ -720,7 +730,9 @@ pub fn check_build(dir: &Path, url: &str) -> Result<()> {
         "write-worker.js",
         "write-worker_bg.wasm",
         "write-worker_loader.js",
-    ];
+    ]
+    .into_iter()
+    .chain(brand::FILES);
     for f in need {
         let p = dir.join(f);
         let len = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);

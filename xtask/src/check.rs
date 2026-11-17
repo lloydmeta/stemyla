@@ -168,7 +168,7 @@ pub fn lines() -> Vec<Check> {
 /// The tests of `xtask` that read the whole repo.  They take seconds; the
 /// other tests of `xtask` take about a minute.
 fn xtask_repo_tests() -> Check {
-    Check::root("cargo test -p xtask --lib --test rules --test docs --test review")
+    Check::root("cargo test -p xtask --lib --test rules --test docs --test review --test brand")
 }
 
 /// The nightly that CI's `test` job runs the `roformer-gpu` doctests on,
@@ -1217,7 +1217,8 @@ mod tests {
     const APP: &str = "cargo clippy -p app -- -D warnings";
     const APP_ALL: &str = "cargo clippy -p app --all-targets -- -D warnings";
     const WASM: &str = "cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p write-worker -p stem-protocol -p engine --all-targets -- -D warnings";
-    const XTASK_REPO: &str = "cargo test -p xtask --lib --test rules --test docs --test review";
+    const XTASK_REPO: &str =
+        "cargo test -p xtask --lib --test rules --test docs --test review --test brand";
     const TESTS: &str = "cargo test --workspace --exclude roformer-gpu";
     const ENGINE: &str = "cargo test -p engine";
     const GPU_LIB: &str = "cargo test -p roformer-gpu --lib";

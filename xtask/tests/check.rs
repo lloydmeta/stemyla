@@ -405,7 +405,7 @@ check: skip: cargo clippy -p synth --all-targets -- -D warnings (no changed memb
 check: skip: cargo clippy -p app -- -D warnings (no changed member is in the closure of app)
 check: skip: cargo clippy -p app --all-targets -- -D warnings (no changed member is in the closure of app)
 check: skip: cargo clippy --target wasm32-unknown-unknown -p app -p stem-worker -p decode-worker -p write-worker -p stem-protocol -p engine --all-targets -- -D warnings (no changed member is in the closure of the wasm32 packages)
-check: run: cargo test -p xtask --lib --test rules --test docs --test review (these tests read the whole repo, and xtask is not a dependent of a changed member)
+check: run: cargo test -p xtask --lib --test rules --test docs --test review --test brand (these tests read the whole repo, and xtask is not a dependent of a changed member)
 check: run: cargo test --workspace --exclude roformer-gpu (the changed members and their dependents are every member but roformer-gpu)
 check: skip: cargo test -p engine (the crate tests do not build engine with a member outside its closure and dependents; tier push runs it)
 check: skip: cargo test -p roformer-gpu --lib (roformer-gpu is not a dependent of a changed member)
@@ -637,7 +637,7 @@ fn a_real_run_stops_at_the_first_failure_and_changes_no_file() {
             "check: failed (exit 1) in <t> s",
             "check: not run: cargo run -p xtask -- docs-check",
             "check: not run: cargo clippy --workspace --all-targets -- -D warnings",
-            "check: not run: cargo test -p xtask --lib --test rules --test docs --test review",
+            "check: not run: cargo test -p xtask --lib --test rules --test docs --test review --test brand",
             "check: not run: cargo test --workspace --exclude roformer-gpu",
             "check: cargo fmt --all --check failed, after 0 passed, in <t> s",
         ],

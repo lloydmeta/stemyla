@@ -1,0 +1,77 @@
+# Search and share metadata, icons and a share image
+
+## Purpose
+
+A shared link to the page shows a title, a description and an image.  This holds on X, Facebook, Slack and chat apps.  Search engines get a description and one canonical URL.  The browser tab and the iPhone home screen show an icon.  Before this plan, the page had only a `<title>` and an empty icon (`<link rel="icon" href="data:,">`).
+
+## Context and orientation
+
+* `app/index.html` is Trunk's entry point.  Its head holds the tags.  Trunk does not fill values into the page, so each tag holds its value in full.
+* `xtask publish` (`xtask/src/publish.rs`) puts each build in `v/<id>/` and copies the newest build's `index.html` to the root.  The root page's `<base href>` points into `v/<id>/`, so relative URLs resolve into the build's folder.
+* The published site is `https://beachape.com/stemyla/` (README, "Publishing on GitHub Pages").
+* Facts from the standards:
+  * Open Graph needs `og:title`, `og:type`, `og:image` and `og:url`, and `og:image:alt` with an image ([ogp.me](https://ogp.me/)).
+  * X takes the `og:` title, description and image when its own tags are missing.  `twitter:card` sets the large card ([X cards markup](https://developer.x.com/cards/markup)).
+  * Meta asks for at least 1200 x 630 and the image's size in tags, so that the image shows on the first share ([Meta](https://developers.facebook.com/docs/sharing/webmasters/images/)).
+  * Google takes a canonical link with an absolute URL as a strong signal across duplicate pages ([Google](https://developers.google.com/search/docs/crawling-indexing/consolidate-duplicate-urls)).  `v/<id>/index.html` duplicates the root page.
+  * Google shows one favicon for each host, so a search result for a sub-folder shows the host's favicon ([Google](https://developers.google.com/search/docs/appearance/favicon-in-search)).
+  * An ICO of 32 px, an SVG and a 180 px Apple touch icon cover current browsers.  A manifest is only for an installable app ([Evil Martians](https://evilmartians.com/chronicles/how-to-favicon-in-2021-six-files-that-fit-most-needs)).
+
+## Plan of work
+
+* M1: `xtask brand` (`xtask/src/brand.rs`) draws `icon.svg`, `favicon.ico`, `apple-touch-icon.png` and `og.png` into `app/assets/`.  Acceptance: `cargo test -p xtask --test brand` passes.  `the_committed_brand_files_match_the_generator` fails when a file differs from what `brand` draws.
+* M2: the head of `app/index.html` gets the description, the canonical link, the Open Graph tags, `twitter:card` and `theme-color`.  It also gets the icon links, and copies the files into each build.  Acceptance: `the_head_tags_agree` passes, and `head_problems_finds_each_fault` shows that each fault gives a problem.
+* M3: `xtask publish` requires the brand files in each build and copies the newest build's `og.png` to the site's root.  Acceptance: `cargo test -p xtask --test publish` passes, with `the_root_share_image_is_the_newest_build_s`.
+
+## Validation and acceptance
+
+* `cargo run -p xtask -- check --tier push` passes.
+* `(cd app && trunk build --release)` puts the four files in `app/dist/`.
+* After a publish, the link previews of X, Facebook and Slack show the image, the title and the description.  A person checks this, because it needs the published site.
+
+## Idempotence and recovery
+
+`xtask brand` writes the same files each run.  `brand --check` changes nothing.  To undo, revert the commits; the next publish removes the root `og.png`.
+
+## Decisions for the maintainer
+
+* Share image: Lanes, Unmix or Poster (mock-ups on 2026-11-17).  Recommended: Lanes.  Answer (2026-11-17): Unmix, with the footer "free, private, in your browser".
+* Favicon: Bars, Lanes or Branch.  Recommended: Bars, the clearest at 16 px.  Answer (2026-11-17): Bars.
+* Description.  Answer (2026-11-17): "Split any song into vocals, drums, bass, guitar, piano and the rest, in your browser with WebGPU. Free, private, no install: it all stems from your own GPU."
+* How the images are made: a) `xtask brand` draws them in Rust, and a test compares the committed files; b) commit images made once.  Recommended: a).  Answer (2026-11-17): a).
+* Share image URL: a) `publish` copies the newest build's og.png to the site's root; b) a URL into `v/<id>/`; c) a URL on another host.  Recommended: a), since `publish` prunes old build folders and a shared link keeps its URL for days.  The agent chose a) during the work (decision 0034).  Answer (2026-11-17): a), accepted by the maintainer.
+
+## Progress
+
+* [x] 2026-11-17: M1, `xtask brand` and its files.
+* [x] 2026-11-17: M2, the head tags.
+* [x] 2026-11-17: M3, the root share image in `publish`.
+* [x] 2026-11-17: review round 1: 14 confirmed findings fixed (tier commit runs the brand test, weaker tests, two doc errors); 19 equivalent mutants refuted.
+* [x] 2026-11-17: review round 2: the ICO length and offset tests (2-1); two doc nits fixed.
+* [x] 2026-11-17: review round 3: a PNG is compared by its pixels (3-1); the URL choice marked as the agent's.
+* [x] 2026-11-17: review round 4: decision 0034, proposed, holds the share image's URL (4-1).
+* [x] 2026-11-17: review round 5: five doc nits, reported and not fixed; the last round.  The log is `reviews/meta-info.md`.
+* [x] 2026-11-17: the maintainer accepted decision 0034.
+
+## Surprises and discoveries
+
+* 2026-11-17: the demo song of `synth` has five stems, with no "other", and keeps one level for 30 s.  Its waveforms would give flat lanes.  So `brand` draws its waveforms from a seeded generator with a song's sections.
+* 2026-11-17: `ab_glyph` calls no platform maths such as exp or sin.  Each of its float operations has one IEEE 754 result: +, -, *, /, square root, min, max, floor, ceil, trunc, fract, round and absolute value.  On x86 its rasteriser runs the same scalar code, built for AVX2 or SSE4.2.  Rust does not fuse or reorder float operations, so each machine gives the same pixels.  So the test compares the pixels exactly, with no tolerance.  The CI `test` job on x86_64 Linux checks this against the files drawn on arm64 (review round 1, 1-3).
+
+## Decision log
+
+* 2026-11-17, maintainer: the choices in "Decisions for the maintainer"; decision 0033 records them.
+* 2026-11-17, maintainer: accepted the agent's choice of the share image's URL (decision 0034).
+* 2026-11-17, agent: the share image's waveforms come from a seeded generator, not from `synth` (see "Surprises and discoveries").
+* 2026-11-17, agent: `publish` copies the newest build's og.png to the site's root, where `og:image` points.  A URL into `v/<id>/` would break when `publish` prunes the build.  Decision 0034 records this choice as proposed (review rounds 3 and 4, 3-2 and 4-1).
+* 2026-11-17, agent: the tags name `https://beachape.com/stemyla/`.  A fork that publishes elsewhere changes them; the README says so.
+* 2026-11-17, agent: the test compares PNGs by their pixels, not their bytes, so a new `png` encoder does not fail it.
+* 2026-11-17, agent: `png` and `ab_glyph` go in `SETTLED_CRATES` (first versions 2015-05-26 and 2020-04-10 on crates.io).  `epaint_default_fonts` is pinned to the version in `Cargo.lock`.  The share image's pixels come from its font bytes, so an egui update must not draw og.png again (review round 2, 2-3).
+* 2026-11-17, agent: tier commit runs `--test brand` with the other xtask tests that read the repo, since it reads `app/` (review round 1, 1-1).
+
+## Outcomes and retrospective
+
+* 2026-11-17: M1 to M3 are done.  The page has the head tags, `xtask brand` draws the four files, and `publish` puts `og.png` at the site's root.
+* Not done: a check of the link previews on X, Facebook and Slack.  It needs a publish, which only a person runs (GIT-1).
+* 2026-11-17: the maintainer accepted decision 0034, and the plan moved to `completed/`.
+* To do differently: write a decision record as `proposed` for each choice that the maintainer did not make, at the start.  Rounds 3 and 4 fixed this late.
