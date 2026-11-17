@@ -27,8 +27,8 @@ safetensors = "0.7.0"
 # to the version that `Cargo.lock` already holds (DEPS-1).
 sha2 = "=0.10.9"
 # Draw the page's icons and share image (`xtask brand`).  png and ab_glyph are
-# in SETTLED_CRATES.  egui's font crate is young: pinned to the version that
-# `Cargo.lock` already holds (DEPS-1).
+# in SETTLED_CRATES.  egui's font crate is pinned to the version that
+# `Cargo.lock` already holds: og.png's pixels come from its font bytes.
 png = "0.18.1"
 ab_glyph = "0.2.32"
 epaint_default_fonts = "=0.36.2"

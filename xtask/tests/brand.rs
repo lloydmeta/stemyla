@@ -278,6 +278,19 @@ fn same_image_compares_an_ico_s_entry() {
     let mut wrong_bits = icon.clone();
     wrong_bits[12] = 24;
     assert!(!same_image("a.ico", &icon, &wrong_bits).unwrap(), "24 bits");
+
+    let longer_png = [png.as_slice(), &[0; 4]].concat();
+    assert_eq!(decode_png(&longer_png).unwrap(), decode_png(&png).unwrap());
+    assert!(
+        same_image("a.ico", &icon, &ico(&longer_png, 1).unwrap()).unwrap(),
+        "a PNG of the same pixels and another length, as a new encoder can write"
+    );
+    let moved = [&icon[..18], &26u32.to_le_bytes(), &[0; 4], &icon[22..]].concat();
+    assert_eq!(ico_png(&moved).unwrap(), png.as_slice());
+    assert!(
+        !same_image("a.ico", &icon, &moved).unwrap(),
+        "an entry with another offset"
+    );
 }
 
 #[test]

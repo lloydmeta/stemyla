@@ -50,7 +50,7 @@ A shared link to the page shows a title, a description and an image.  This holds
 ## Surprises and discoveries
 
 * 2026-11-17: the demo song of `synth` has five stems, with no "other", and keeps one level for 30 s.  Its waveforms would give flat lanes.  So `brand` draws its waveforms from a seeded generator with a song's sections.
-* 2026-11-17: `ab_glyph` uses only exact float operations: floor, ceil, trunc, fract, round, square root and absolute value.  On x86 its rasteriser runs the same scalar code, built for AVX2 or SSE4.2.  Rust does not fuse or reorder float operations, so each machine gives the same pixels.  So the test compares the pixels exactly, with no tolerance.  The CI `test` job on x86_64 Linux checks this against the files drawn on arm64 (review round 1, 1-3).
+* 2026-11-17: `ab_glyph` calls no platform maths such as exp or sin.  Each of its float operations has one IEEE 754 result: +, -, *, /, square root, min, max, floor, ceil, trunc, fract, round and absolute value.  On x86 its rasteriser runs the same scalar code, built for AVX2 or SSE4.2.  Rust does not fuse or reorder float operations, so each machine gives the same pixels.  So the test compares the pixels exactly, with no tolerance.  The CI `test` job on x86_64 Linux checks this against the files drawn on arm64 (review round 1, 1-3).
 
 ## Decision log
 
@@ -58,7 +58,7 @@ A shared link to the page shows a title, a description and an image.  This holds
 * 2026-11-17, agent: the share image's waveforms come from a seeded generator, not from `synth` (see "Surprises and discoveries").
 * 2026-11-17, agent: the tags name `https://beachape.com/stemyla/`.  A fork that publishes elsewhere changes them; the README says so.
 * 2026-11-17, agent: the test compares PNGs by their pixels, not their bytes, so a new `png` encoder does not fail it.
-* 2026-11-17, agent: `png` and `ab_glyph` go in `SETTLED_CRATES` (first versions 2015-05-26 and 2020-04-10 on crates.io).  `epaint_default_fonts` (first version 2024-09-26) is young, so it is pinned to the version in `Cargo.lock`.
+* 2026-11-17, agent: `png` and `ab_glyph` go in `SETTLED_CRATES` (first versions 2015-05-26 and 2020-04-10 on crates.io).  `epaint_default_fonts` is pinned to the version in `Cargo.lock`.  The share image's pixels come from its font bytes, so an egui update must not draw og.png again (review round 2, 2-3).
 * 2026-11-17, agent: tier commit runs `--test brand` with the other xtask tests that read the repo, since it reads `app/` (review round 1, 1-1).
 
 ## Outcomes and retrospective
