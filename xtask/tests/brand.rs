@@ -112,67 +112,111 @@ fn head_problems_finds_each_fault() {
     let size = (OG_WIDTH, OG_HEIGHT);
     assert_eq!(head_problems(&html, size), Vec::<String>::new());
     let description = "Split any song into vocals, drums, bass, guitar, piano and the rest, in your browser with WebGPU. Free, private, no install: it all stems from your own GPU.";
-    let long = "x".repeat(brand::DESCRIPTION_LIMIT + 1);
-    let faults: [(&str, String, &str); 13] = [
-        (
+    let fault =
+        |from: &str, to: &str, says: &str| (from.to_string(), to.to_string(), says.to_string());
+    let mut faults = vec![
+        fault(
             "property=\"og:title\" content=\"Stemyla",
-            "property=\"og:title\" content=\"Other".into(),
+            "property=\"og:title\" content=\"Other",
             "og:title",
         ),
-        (
+        fault(
             "property=\"og:description\" content=\"Split",
-            "property=\"og:description\" content=\"Unmix".into(),
+            "property=\"og:description\" content=\"Unmix",
             "og:description",
         ),
-        (description, long, "characters"),
-        (
-            "<link rel=\"canonical\" href=\"https://",
-            "<link rel=\"canonical\" href=\"http://".into(),
-            "canonical URL",
+        fault(
+            description,
+            &"x".repeat(brand::DESCRIPTION_LIMIT + 1),
+            "characters",
         ),
-        (
+        fault(
+            "name=\"description\"",
+            "name=\"abstract\"",
+            "no description",
+        ),
+        fault(
+            "<link rel=\"canonical\" href=\"https://",
+            "<link rel=\"canonical\" href=\"http://",
+            "absolute https://",
+        ),
+        fault(
+            "<link rel=\"canonical\" href=\"https://beachape.com/stemyla/\"",
+            "<link rel=\"canonical\" href=\"https://beachape.com/stemyla\"",
+            "absolute https://",
+        ),
+        fault(
             "property=\"og:url\" content=\"https://beachape.com/stemyla/\"",
-            "property=\"og:url\" content=\"https://acme.com/\"".into(),
+            "property=\"og:url\" content=\"https://acme.com/\"",
             "og:url",
         ),
-        ("/stemyla/og.png", "/stemyla/v/og.png".into(), "og:image"),
-        (
+        fault("/stemyla/og.png", "/stemyla/v/og.png", "og:image"),
+        fault(
             "property=\"og:image:width\" content=\"1200\"",
-            "property=\"og:image:width\" content=\"1201\"".into(),
+            "property=\"og:image:width\" content=\"1201\"",
             "1201 x 630",
         ),
-        (
+        fault(
+            "property=\"og:image:height\"",
+            "property=\"og:image:tall\"",
+            "no og:image:height",
+        ),
+        fault(
             "property=\"og:image:alt\"",
-            "property=\"og:image:none\"".into(),
+            "property=\"og:image:none\"",
             "no og:image:alt",
         ),
-        (
+        fault(
+            "property=\"og:image:alt\" content=\"A",
+            "property=\"og:image:alt\" content=\" \" data-was=\"A",
+            "no og:image:alt",
+        ),
+        fault("property=\"og:type\"", "property=\"og:kind\"", "no og:type"),
+        fault(
+            "property=\"og:site_name\"",
+            "property=\"og:site\"",
+            "no og:site_name",
+        ),
+        fault(
             "content=\"summary_large_image\"",
-            "content=\"summary\"".into(),
+            "content=\"summary\"",
             "twitter:card",
         ),
-        (
+        fault(
             "name=\"theme-color\" content=\"#1b1b1b\"",
-            "name=\"theme-color\" content=\"#ffffff\"".into(),
+            "name=\"theme-color\" content=\"#ffffff\"",
             "theme-color",
         ),
-        (
-            "<link data-trunk rel=\"copy-file\" href=\"assets/og.png\"",
-            "<link data-trunk rel=\"copy-file\" href=\"og.png\"".into(),
-            "assets/og.png",
+        fault(
+            "<link rel=\"icon\" href=\"favicon.ico\"",
+            "<link rel=\"icon\" href=\"fav.ico\"",
+            "href=\"favicon.ico\"",
         ),
-        (
+        fault(
+            "<link rel=\"icon\" href=\"icon.svg\"",
+            "<link rel=\"icon\" href=\"logo.svg\"",
+            "href=\"icon.svg\"",
+        ),
+        fault(
             "<link rel=\"apple-touch-icon\" href=\"apple-touch-icon.png\"",
-            "<link rel=\"apple-touch-icon\" href=\"touch.png\"".into(),
+            "<link rel=\"apple-touch-icon\" href=\"touch.png\"",
             "apple-touch-icon",
         ),
-        ("<title>", "<titel>".into(), "no <title>"),
+        fault("<title>", "<titel>", "no <title>"),
     ];
+    for name in brand::FILES {
+        let copy = format!("<link data-trunk rel=\"copy-file\" href=\"assets/{name}\"");
+        faults.push(fault(
+            &copy,
+            &copy.replace("assets/", ""),
+            &format!("assets/{name}"),
+        ));
+    }
     for (from, to, says) in faults {
-        assert!(html.contains(from), "the page has no {from:?}");
-        let problems = head_problems(&html.replacen(from, &to, 1), size);
+        assert!(html.contains(&from), "the page has no {from:?}");
+        let problems = head_problems(&html.replacen(&from, &to, 1), size);
         assert!(
-            problems.iter().any(|p| p.contains(says)),
+            problems.iter().any(|p| p.contains(&says)),
             "{from:?} -> {to:?} should give a problem with {says:?}: {problems:?}"
         );
     }
@@ -181,6 +225,99 @@ fn head_problems_finds_each_fault() {
         wrong_size.iter().any(|p| p.contains("1200 x 631")),
         "{wrong_size:?}"
     );
+    let at_the_limit = html.replace(description, &"x".repeat(brand::DESCRIPTION_LIMIT));
+    assert_eq!(
+        head_problems(&at_the_limit, size),
+        Vec::<String>::new(),
+        "a description of {} characters fits",
+        brand::DESCRIPTION_LIMIT
+    );
+}
+
+#[test]
+fn ico_png_refuses_what_is_not_one_ico_image() {
+    let small = ico(&[1, 2, 3], 1).unwrap();
+    assert_eq!(small.len(), 25);
+    assert_eq!(ico_png(&small).unwrap(), [1, 2, 3], "an ICO of a few bytes");
+    let empty = ico(&[], 1).unwrap();
+    assert_eq!(
+        ico_png(&empty).unwrap(),
+        [] as [u8; 0],
+        "an ICO of 22 bytes"
+    );
+    let with = |at: usize, value: u8| {
+        let mut bytes = small.clone();
+        bytes[at] = value;
+        bytes
+    };
+    assert!(
+        ico_png(&with(0, 1)).is_err(),
+        "a reserved field that is not 0"
+    );
+    assert!(ico_png(&with(2, 2)).is_err(), "a cursor (CUR) file");
+    assert!(ico_png(&with(4, 2)).is_err(), "two images");
+    assert!(ico_png(&small[..21]).is_err(), "a cut entry");
+}
+
+#[test]
+fn same_image_compares_an_ico_s_entry() {
+    let png = encode_png(&Image {
+        width: 1,
+        height: 1,
+        rgba: vec![1, 2, 3, 255],
+    })
+    .unwrap();
+    let icon = ico(&png, 1).unwrap();
+    let mut wrong_size = icon.clone();
+    wrong_size[6] = 0;
+    assert!(same_image("a.ico", &icon, &icon).unwrap());
+    assert!(
+        !same_image("a.ico", &icon, &wrong_size).unwrap(),
+        "an entry that says 256 px"
+    );
+    let mut wrong_bits = icon.clone();
+    wrong_bits[12] = 24;
+    assert!(!same_image("a.ico", &icon, &wrong_bits).unwrap(), "24 bits");
+}
+
+#[test]
+fn the_favicon_s_entry_says_32_px_and_32_bits() {
+    let files = brand::files().unwrap();
+    let favicon = &files.iter().find(|f| f.name == FAVICON_ICO).unwrap().bytes;
+    let u16_at = |i: usize| u16::from_le_bytes([favicon[i], favicon[i + 1]]);
+    let u32_at = |i: usize| u32::from_le_bytes(favicon[i..i + 4].try_into().unwrap());
+    assert_eq!(
+        (favicon[6], favicon[7]),
+        (FAVICON_SIZE as u8, FAVICON_SIZE as u8),
+        "width and height"
+    );
+    assert_eq!((u16_at(10), u16_at(12)), (1, 32), "planes and bits");
+    assert_eq!(u32_at(18), 22, "the PNG follows the entry");
+    assert_eq!(u32_at(14) as usize, favicon.len() - 22, "the PNG's length");
+}
+
+#[test]
+fn the_brand_command_writes_checks_and_refuses_a_bad_flag() {
+    let dir = std::env::temp_dir().join(format!("stemyla-brand-main-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let args = |words: &[&str]| words.iter().map(|w| w.to_string()).collect::<Vec<_>>();
+    brand::main_in(&dir, &args(&[])).unwrap();
+    for name in brand::FILES {
+        assert!(dir.join(name).is_file(), "{name} is written");
+    }
+    brand::main_in(&dir, &args(&["--check"])).unwrap();
+    std::fs::write(dir.join(ICON_SVG), "<svg/>").unwrap();
+    let stale = brand::main_in(&dir, &args(&["--check"])).unwrap_err();
+    assert!(stale.to_string().contains(ICON_SVG), "{stale}");
+    for bad in [&["--bogus"][..], &["--check", "--check"], &["write"]] {
+        let refused = brand::main(&args(bad)).unwrap_err();
+        assert!(
+            refused.to_string().contains(brand::USAGE),
+            "{bad:?}: {refused}"
+        );
+    }
+    brand::main(&args(&["--check"])).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]

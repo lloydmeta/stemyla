@@ -598,14 +598,26 @@ pub fn files() -> Result<Vec<File>> {
     ])
 }
 
+/// The bytes of an ICO's header and its entry, but the PNG's length:
+/// the size, the colours, the planes, the bit count and the offset.
+fn ico_entry(ico: &[u8]) -> Vec<u8> {
+    const LENGTH: std::ops::Range<usize> = ICO_HEADER + 8..ICO_HEADER + 12;
+    (0..ICO_HEADER + ICO_ENTRY)
+        .filter(|i| !LENGTH.contains(i))
+        .map(|i| ico[i])
+        .collect()
+}
+
 /// Whether two copies of the file `name` hold the same image.  PNGs are
 /// compared by their pixels, so a new PNG encoder that compresses
-/// differently does not count as a change.
+/// differently does not count as a change.  An ICO is compared by its
+/// entry, as well as by its PNG's pixels.
 pub fn same_image(name: &str, a: &[u8], b: &[u8]) -> Result<bool> {
     if name.ends_with(".png") {
         Ok(decode_png(a)? == decode_png(b)?)
     } else if name.ends_with(".ico") {
-        Ok(decode_png(ico_png(a)?)? == decode_png(ico_png(b)?)?)
+        let (png_a, png_b) = (ico_png(a)?, ico_png(b)?);
+        Ok(ico_entry(a) == ico_entry(b) && decode_png(png_a)? == decode_png(png_b)?)
     } else {
         Ok(a == b)
     }
@@ -633,10 +645,14 @@ pub fn stale(dir: &Path) -> Result<Vec<String>> {
 }
 
 pub fn main(args: &[String]) -> Result<()> {
-    let dir = crate::workspace_root().join(ASSETS);
+    main_in(&crate::workspace_root().join(ASSETS), args)
+}
+
+/// [`main`], with the files in `dir`.
+pub fn main_in(dir: &Path, args: &[String]) -> Result<()> {
     match args {
         [] => {
-            std::fs::create_dir_all(&dir)?;
+            std::fs::create_dir_all(dir)?;
             for file in files()? {
                 let path = dir.join(file.name);
                 std::fs::write(&path, &file.bytes)
@@ -646,7 +662,7 @@ pub fn main(args: &[String]) -> Result<()> {
             Ok(())
         }
         [flag] if flag == "--check" => {
-            let problems = stale(&dir)?;
+            let problems = stale(dir)?;
             if problems.is_empty() {
                 println!("{} matches `xtask brand`", dir.display());
                 Ok(())

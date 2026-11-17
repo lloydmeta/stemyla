@@ -20,7 +20,7 @@ Images a): `xtask brand` (`xtask/src/brand.rs`) draws the four files into `app/a
 ## Consequences
 
 * A change of a stem colour in `app/src/lib.rs` fails `the_brand_colours_are_the_app_s` until `brand.rs` changes too.  Then run `cargo run -p xtask -- brand` and commit the files.
-* `xtask` takes `png`, `ab_glyph` and `epaint_default_fonts`.  None of them ships in the web app.
+* `xtask` takes `png`, `ab_glyph` and `epaint_default_fonts`.  This adds no crate to the web app.  `png` and `epaint_default_fonts` already ship through eframe and egui, and `ab_glyph` does not ship.
 * The tags name `https://beachape.com/stemyla/`.  A fork that publishes elsewhere changes them.
 * A site that shows a link may keep the old image for days, until it reads the page again.
 * Google shows the host's favicon in its results, not the page's, because the page is in a sub-folder.
