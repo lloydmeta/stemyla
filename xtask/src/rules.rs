@@ -1744,7 +1744,8 @@ pub fn snapshot_updates(texts: &[(String, String)]) -> Vec<Problem> {
 /// the crate's first version on crates.io, two years or more before the
 /// crate was listed.  The check reads only the date's form; a reviewer
 /// checks it at `https://crates.io/api/v1/crates/<crate>`.
-pub const SETTLED_CRATES: [(&str, &str); 13] = [
+pub const SETTLED_CRATES: [(&str, &str); 15] = [
+    ("ab_glyph", "2020-04-10"),
     ("burn", "2022-07-27"),
     ("console_error_panic_hook", "2018-05-23"),
     ("cpal", "2014-12-17"),
@@ -1752,6 +1753,7 @@ pub const SETTLED_CRATES: [(&str, &str); 13] = [
     ("futures-channel", "2018-03-05"),
     ("js-sys", "2018-07-19"),
     ("log", "2014-12-13"),
+    ("png", "2015-05-26"),
     ("safetensors", "2022-12-13"),
     ("symphonia", "2020-09-01"),
     ("wasm-bindgen", "2018-03-06"),

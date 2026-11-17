@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use xtask::brand;
 use xtask::publish::{
     CopiedBuild, KEPT_BUILDS, Options, Prepared, TRUNK_LOCK, build_id, check_build, check_build_id,
     check_id, check_kept_builds, commit_dir, deploy, finish_build, kept_ids, main_with,
@@ -129,6 +130,10 @@ fn write_build(build: &Path, public_url: &str, id: &str, version: &str) {
         "write-worker_loader.js",
     ] {
         std::fs::write(build.join(f), format!("{id} {version}")).unwrap();
+    }
+    // Equal across builds of one version, as one source draws them.
+    for f in brand::FILES {
+        std::fs::write(build.join(f), format!("{f} {version}")).unwrap();
     }
     std::fs::write(build.join("snippets/x/inline0.js"), version).unwrap();
 }
@@ -324,10 +329,18 @@ fn keeps_the_newest_three_builds() {
         assert_eq!(ls(&r, "gh-pages", "v/"), folders);
         assert_eq!(
             ls(&r, "gh-pages", "v/0123456789ab/").len(),
-            if n < KEPT_BUILDS { 13 } else { 0 },
+            if n < KEPT_BUILDS { 17 } else { 0 },
             "the oldest build is dropped only once three newer ones exist"
         );
-        assert_eq!(ls(&r, "gh-pages", "."), [".nojekyll", "index.html", "v"]);
+        assert_eq!(
+            ls(&r, "gh-pages", "."),
+            [".nojekyll", "index.html", "og.png", "v"]
+        );
+        assert_eq!(
+            git(&r, &["show", "gh-pages:og.png"]),
+            git(&r, &["show", &format!("gh-pages:v/{id}/og.png")]),
+            "the root share image is the newest build's"
+        );
         assert_eq!(
             git(&r, &["show", "gh-pages:index.html"]).as_bytes(),
             fresh_page.as_slice(),
@@ -839,6 +852,17 @@ fn checks_the_build() {
             .is_some_and(|e| e.contains("write-worker_loader.js")),
         "the write worker's loader is needed: {missing:?}"
     );
+    std::fs::write(build.join("write-worker_loader.js"), "x").unwrap();
+    for f in brand::FILES {
+        std::fs::remove_file(build.join(f)).unwrap();
+        let missing = check_build(&build, &url).err().map(|e| e.to_string());
+        assert!(
+            missing.as_deref().is_some_and(|e| e.contains(f)),
+            "{f} is needed: {missing:?}"
+        );
+        std::fs::write(build.join(f), "x").unwrap();
+    }
+    check_build(&build, &url).unwrap();
     let _ = std::fs::remove_dir_all(&root);
 
     let o = Options::parse(&[
@@ -1448,4 +1472,24 @@ fn publish_waits_for_every_other_ci_job() {
         publish_gate_problems(&sample.replace("  publish:", "  deploy:")),
         ["no publish job"]
     );
+}
+
+/// The share image's URL names no build, so each publish puts the newest
+/// build's copy at the root, where `og:image` points.
+#[test]
+fn the_root_share_image_is_the_newest_build_s() {
+    let root = scratch("share-image");
+    identity();
+    let r = repo(&root);
+    for (id, version) in [("aaaaaaaaaaaa", "v1"), ("bbbbbbbbbbbb", "v2")] {
+        let site = versioned_site(&root, id, version);
+        deploy(&r, &site, &no_push(&root), id, &format!("Publish {id}"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            git(&r, &["show", &format!("gh-pages:{}", brand::OG_PNG)]),
+            format!("{} {version}", brand::OG_PNG)
+        );
+    }
+    let _ = std::fs::remove_dir_all(&root);
 }

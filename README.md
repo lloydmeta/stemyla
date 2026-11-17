@@ -131,11 +131,13 @@ It refuses to run with uncommitted changes, so every published version names the
 
 Its steps are in the module docs of `xtask/src/publish.rs`.
 
-Each build goes in its own folder, `v/<id>/`, named after its commit, and is never changed.  The About menu shows the id, linked to its commit on GitHub.  The link gives a 404 until that commit is pushed, because `publish` pushes only `gh-pages`.  A build that `publish` did not make shows "unpublished build".  Only the root `index.html` changes: it is a copy of the newest build's page, whose `<base href>` points into that build's folder.  So a browser that keeps old JavaScript in its cache never pairs it with a newer build's wasm.  The branch keeps the newest 3 builds.  `publish` needs the full history of `gh-pages`, so never squash or rewrite that branch (GIT-3).
+Each build goes in its own folder, `v/<id>/`, named after its commit, and is never changed.  The About menu shows the id, linked to its commit on GitHub.  The link gives a 404 until that commit is pushed, because `publish` pushes only `gh-pages`.  A build that `publish` did not make shows "unpublished build".  Only the root `index.html` and `og.png` change.  The page is a copy of the newest build's page, whose `<base href>` points into that build's folder.  So a browser that keeps old JavaScript in its cache never pairs it with a newer build's wasm.  The branch keeps the newest 3 builds.  `publish` needs the full history of `gh-pages`, so never squash or rewrite that branch (GIT-3).
 
 On a push to `main`, CI publishes the pushed commit after every other CI job passes, the Safari tests included.  It passes `--skip-if-behind main`, so a re-run of an old run cannot roll the site back.
 
 The first time, choose the `gh-pages` branch under the repository's Settings → Pages.  A project site on an account whose user site has a custom domain (`beachape.com` here) appears under that domain at `/stemyla/`.  The site is about 18 MB with 3 builds of about 6 MB each; the model is not part of it.
+
+The head of `app/index.html` names `https://beachape.com/stemyla/` in its canonical link and its `og:url` and `og:image` tags.  These tags give link previews and tell search engines which URL to show.  To publish elsewhere, change the three URLs.  `og:image` points at the root `og.png`, the share image of the newest build.  A site that shows a link may keep an old image for days, until it reads the page again.
 
 The CDN in front of `beachape.com` (Cloudflare) lets browsers keep `.js` files for a month.  That is safe for the `v/` folders, but the root `index.html` must stay short-lived: a "Cache Everything" rule, or a long cache lifetime on HTML, would keep browsers on an old build, and once that build is pruned its files return 404.
 
@@ -143,7 +145,7 @@ The CDN in front of `beachape.com` (Cloudflare) lets browsers keep `.js` files f
 
 | Path | What |
 | - | - |
-| `app/` | the egui app (web and native); `index.html` is Trunk's entry point |
+| `app/` | the egui app (web and native); `index.html` is Trunk's entry point, and `assets/` holds the icons and share image that `xtask brand` draws |
 | `worker/` | the Web Worker that runs separations |
 | `decoder/` | the Web Worker that decodes a stored song in blocks into browser storage, and makes the overviews of its stems and its classic drums (`decode-worker`) |
 | `writer/` | the Web Worker that writes the page's song-sized files into browser storage (`write-worker`) |
