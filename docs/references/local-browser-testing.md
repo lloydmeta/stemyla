@@ -73,6 +73,17 @@ The check of the goal "Each calibration choice is not slower", for one page and 
 * The check fails when a choosable policy is slower than another policy: a loss when it is the head, a gain when it is the base.  Else it passes.
 * An undecided comparison runs again in a later session.  Twice undecided fails the check, unless the plan's Decision log gives a reason.
 
+## The MSL that a browser makes
+
+How to read the Metal Shading Language that a browser makes from a WGSL kernel (2026-11-19, `references/browser-quirks.md`).
+
+* Chrome: start a headless Chrome with `--enable-dawn-features=dump_shaders --enable-logging=stderr` and its own `--user-data-dir`.  It writes the WGSL and the MSL of each shader to its standard error.
+* WebKit: `notifyutil -p com.apple.WebKit.WebGPU.TogglePrintMetalCode` turns the dump on in the GPU process, and the same command turns it off.  It stores no setting.  The GPU process listens only after its first shader compiles ([MetalCodeGenerator.cpp](https://github.com/WebKit/WebKit/blob/main/Source/WebGPU/WGSL/Metal/MetalCodeGenerator.cpp)).  So the page compiles one small shader, waits, and then compiles the kernels.
+* The dump goes to the standard error of the GPU process.  The system Safari does not give its standard error to its child processes ([ProcessLauncherCocoa.mm](https://github.com/WebKit/WebKit/blob/main/Source/WebKit/UIProcess/Launcher/cocoa/ProcessLauncherCocoa.mm), `isSystemWebKit`).  So Safari gives no dump, and the unified log has none.
+* Safari Technology Preview has its own WebKit, so it gives the dump: `open --stderr <file> -a "Safari Technology Preview" <url>`.  It needs no WebDriver session.  A person installs it from Apple's developer site.
+* To time an MSL without a browser, compile it with `MTLDevice.makeLibrary(source:options:)`, with the relaxed math mode that both browsers use.  Chrome's MSL takes each buffer at its binding number.  It takes the buffer lengths at buffer 30: one `uint`, then one length for each buffer.  WebKit's MSL takes one argument buffer at buffer 0: the buffers, then their lengths.  Check that both give the same output before a comparison.
+* The page, the scripts and the Metal program of 2026-11-19 were in the session scratchpad, and are not kept.
+
 ## Known local failures
 
 Check `main` before treating any of these as a regression:

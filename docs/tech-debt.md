@@ -567,6 +567,14 @@ It breaks no rule.  It concerns case 11 of M6 of `plans/completed/gpu-speed.md`:
 * Evidence: in M6, in Safari, `|D|` was 0.035 s, about 0.6 % of a chunk.  Its noise was 0.020 s, so the limit was 0.0175 s, and the bias -0.033 s.  `D` changed its sign on a repeat set, so that noise was too small.  The orchestrator accepted it (i1-3 of the intent review of M6).
 * Fix: make the limit the larger of half of `|D|`, the noise of `D` and `T` (1 %) of a chunk.  Do it in the next plan that runs the check.  Not planned.
 
+### TD-108: a stored calibration does not see a new browser version
+
+It breaks no rule.  It concerns the kernels that a GPU keeps (`roformer_gpu::bench::choice_key`).  The key is the adapter, the kernel set, `CALIBRATION` and the weight format.  It has no browser version.  So a browser update that changes which kernel is fastest leaves each user on the old choice, until the next `CALIBRATION` bump.
+
+* Evidence: on 2026-11-19, on the M2 Pro, Safari 27.2 was fastest with `v64k8` (1,398 GFLOP/s against 1,273 with `v64`).  Safari Technology Preview, with a later WebKit, was fastest with `v64` (1,759 against 1,583).  A Safari user who keeps `v64k8` after such an update loses about 10 % on the large products (`references/browser-quirks.md`).
+* What guards it: nothing.  The perf gate runs with a new browser profile, so it calibrates each time.
+* Fix: bump `CALIBRATION` when a Safari release has the later WebKit, or put the browser's version in the key.  The second needs a decision: the worker must read the version, and each browser update then costs each user one calibration (about 33 s on the M2 Pro).  Not planned.
+
 ### TD-107: the check of machine paths does not see a session ID
 
 It breaks no rule.  It concerns `no_tracked_file_holds_a_machine_path` in `xtask/tests/rules.rs`.  The test finds home folders, temporary folders of macOS and Claude Code, and `~/.local/`.  It does not find the ID of a Claude Code session, which is a plain UUID.
