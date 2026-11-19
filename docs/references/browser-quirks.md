@@ -92,6 +92,31 @@ Seen in Safari 27.2 on macOS 27.2.1, on an Apple M2 Pro, on 2026-11-13.  The sou
 * `r64`, with no workgroup memory, was slower than `v64` on the large products in both browsers: 1.20 to 1.25 times in Safari, 1.93 to 2.55 in Chrome.  It did not land.
 * Rule: GPU-1 (the default limits stay).  The WebKit bug text for the maintainer is [webkit-bug-workgroup-zero-init.md](webkit-bug-workgroup-zero-init.md).
 
+## Safari 27.2 runs a kernel with workgroup memory slower than a later WebKit
+
+Seen on 2026-11-19, on an Apple M2 Pro with macOS 27.2.1.  The browsers were Safari 27.2 (WebKit 22625.2.8.11.9), Safari Technology Preview (WebKit 22627.1.8.19.1) and Chrome 157.0.8103.79.  M3 of `plans/completed/gpu-speed.md` found a K loop about 1.35 times slower in Safari, with no cause.  The loss is in the WebKit of Safari 27.2.  The later WebKit of Safari Technology Preview does not have it.
+
+A page compiled the WGSL of each kernel with f16 weights, and timed 100 dispatches for each submission.  The figures are GFLOP/s, the median of 7 rounds:
+
+| Kernel, product | Chrome 157 | Safari Technology Preview | Safari 27.2 |
+| - | - | - | - |
+| `v64`, 5,456 x 1,536, K 256 | 2,148 | 1,759 | 1,273 |
+| `v64k8`, 5,456 x 1,536, K 256 | 1,540 | 1,583 | 1,398 |
+| `v64`, 5,456 x 256, K 1,024 | not run | 2,058 | 1,567 |
+| `v64k8`, 5,456 x 256, K 1,024 | not run | 1,668 | 1,526 |
+
+* Safari 27.2 takes 1.38 times the time of Safari Technology Preview with `v64` at K 256, and 1.31 times at K 1,024.  With `v64k8` it takes 1.13 and 1.09 times.
+* The MSL of Safari Technology Preview has no slow loop.  Timed through Metal directly, it gives 1,710 to 1,740 GFLOP/s with `v64` at K 256.  Chrome's MSL gives 2,106 to 2,108 the same way.  So each MSL runs at its browser's rate.
+* The zero-init and the clamps explain the loss of Safari Technology Preview against Chrome.  Its `v64` MSL took 2.51 ms for each dispatch at K 256.  It took 2.06 ms with no zero-init, 2.40 ms with no clamp on the workgroup reads, and 1.95 ms with neither (2,205 GFLOP/s).  With `v64k8` the zero-init costs about 1 %.
+* In Safari 27.2, the time grows with the bytes of workgroup memory.  Variants of `v64` with other pads ran on the K 256 product, with 60 dispatches for each submission and 5 rounds.  With a K tile of 8 it took 2.85 ms with 4 KiB, 3.07 ms with 6 KiB and 3.53 ms with 10 KiB.  With a K tile of 16 it took 2.98 ms with 8 KiB, 3.35 ms with 10 KiB and 3.67 ms with 14 KiB.  Safari Technology Preview took 2.88, 2.72 and 3.00 ms, and 2.45, 2.45 and 2.68 ms.  Chrome took 3.06, 2.79 and 2.85 ms, and 2.04, 2.00 and 2.00 ms.
+* A K tile of 8 with no pad (4 KiB) is 7 % faster than `v64k8` in Safari 27.2 on this product.  It is slower in the two other browsers.  It is not a kernel of `TILES`.
+* The WebKit change that removed the loss was not found.  In [WebKit bug 325378](https://bugs.webkit.org/show_bug.cgi?id=325378), each pipeline from a used shader module gets one more clamp on each array index.  WebKit fixed it on 2026-09-27.  It is not the cause: 8 more pipelines from one module did not make Safari 27.2 slower.
+* The MSL of Safari 27.2 was not read: the system Safari gives no dump (`references/local-browser-testing.md`, "The MSL that a browser makes").
+* A whole separation (`e2e perf`, the 1-minute song, the same session, the page of `3d2e88d`): Safari 27.2 has a chunk lower quartile of 5.38 s, and 59.3 s for the whole.  Safari Technology Preview has 3.96 s and 3.97 s in 2 runs, and 43.7 s and 43.9 s: 26 % less for each chunk.  Chrome's baseline is 3.43 s.  The Technology Preview runs used a copy of `xtask` in a scratch worktree, which started that browser's own `safaridriver` and asked for the browser name `Safari Technology Preview`.
+* Calibration in Safari Technology Preview chose `v64` for the large products (0.95 s against 1.05 s for `v64k8`) and `vfused` (2.30 s for each chunk).  In Safari 27.2 it chose `v64k8` (1.25 s against 1.33 s for `v64`) and `vfused` (3.24 s).  `s64`, with its loop-indexed array, took 1.37 s in Safari Technology Preview and 11.56 s in Safari 27.2.
+* A preview is not a release, so the gain is not sure.
+* The code: none works around it.  When a Safari release has the later WebKit, `v64` becomes its fastest kernel on the large products.  A stored calibration does not see the new version (TD-108).
+
 ## Safari keeps the swap file of each OPFS write stream that closes
 
 Seen in Safari 27.2 on macOS 27.2.1, on an Apple M2 Pro, on 2026-11-14 (Step 3 of `plans/completed/gpu-speed-m51.md`).  Each `createWritable()` makes a `FileSystemWritableStream*` file in `$DARWIN_USER_TEMP_DIR/com.apple.WebKit.Networking+com.apple.Safari/`, where `DARWIN_USER_TEMP_DIR` is the folder of `getconf DARWIN_USER_TEMP_DIR`.  A `close()` keeps it, with the bytes written.  An `abort()` removes it.  The files stayed while Safari ran, and after Safari quit (35,841 files, 176 GB, on 2026-11-14).  The draft bug is `references/webkit-bug-writable-swap-file.md`.
